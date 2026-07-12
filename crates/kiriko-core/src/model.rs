@@ -76,7 +76,11 @@ pub struct Switches {
 
 impl Default for Switches {
     fn default() -> Self {
-        Self { visible: true, audible: true, locked: false }
+        Self {
+            visible: true,
+            audible: true,
+            locked: false,
+        }
     }
 }
 
@@ -149,7 +153,11 @@ pub struct Document {
 
 impl Document {
     pub fn new() -> Self {
-        Self { id: Uuid::now_v7(), items: Vec::new(), extra: serde_json::Map::new() }
+        Self {
+            id: Uuid::now_v7(),
+            items: Vec::new(),
+            extra: serde_json::Map::new(),
+        }
     }
 
     pub fn item(&self, id: Uuid) -> Option<&ProjectItem> {

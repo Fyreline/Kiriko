@@ -81,8 +81,8 @@ impl Rational {
     }
 
     pub fn checked_add(self, rhs: Self) -> Result<Self, TimeError> {
-        let num = i128::from(self.num) * i128::from(rhs.den)
-            + i128::from(rhs.num) * i128::from(self.den);
+        let num =
+            i128::from(self.num) * i128::from(rhs.den) + i128::from(rhs.num) * i128::from(self.den);
         Self::from_i128(num, i128::from(self.den) * i128::from(rhs.den))
     }
 
@@ -176,9 +176,7 @@ impl<'de> Deserialize<'de> for Rational {
 
 /// A span of time, shared across timebases. Non-negativity is by convention,
 /// validated at model boundaries.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Duration(pub Rational);
 
 macro_rules! timebase {

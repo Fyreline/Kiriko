@@ -1,9 +1,7 @@
 //! Application state behind the shell: the document store, project path,
 //! journal, dirty tracking, autosave. Slice 3 of docs/impl/phase-0-kickoff.md.
 
-use kiriko_core::model::{
-    Composition, Document, FootageItem, LinearColour, MediaRef, ProjectItem,
-};
+use kiriko_core::model::{Composition, Document, FootageItem, LinearColour, MediaRef, ProjectItem};
 use kiriko_core::ops::Op;
 use kiriko_core::time::{Duration, FrameRate, Rational};
 use kiriko_core::DocumentStore;
@@ -135,13 +133,18 @@ impl AppState {
         if ops.is_empty() {
             self.install(doc, Some(path.to_owned()), false);
         } else {
-            self.pending_recovery =
-                Some(PendingRecovery { doc, path: path.to_owned(), ops });
+            self.pending_recovery = Some(PendingRecovery {
+                doc,
+                path: path.to_owned(),
+                ops,
+            });
         }
     }
 
     pub fn resolve_recovery(&mut self, recover: bool) {
-        let Some(pending) = self.pending_recovery.take() else { return };
+        let Some(pending) = self.pending_recovery.take() else {
+            return;
+        };
         let mut doc = pending.doc;
         if recover {
             let mut replayed = 0usize;
@@ -203,7 +206,9 @@ impl AppState {
         let picked = rfd::FileDialog::new()
             .add_filter(
                 "Media",
-                &["mp4", "mov", "mkv", "avi", "webm", "png", "jpg", "jpeg", "wav", "mp3", "flac"],
+                &[
+                    "mp4", "mov", "mkv", "avi", "webm", "png", "jpg", "jpeg", "wav", "mp3", "flac",
+                ],
             )
             .pick_files();
         let Some(files) = picked else { return };
@@ -344,6 +349,9 @@ mod tests {
         );
         let mut app3 = AppState::default();
         app3.open_path(&path);
-        assert!(app3.pending_recovery.is_none(), "journal cleared on discard");
+        assert!(
+            app3.pending_recovery.is_none(),
+            "journal cleared on discard"
+        );
     }
 }

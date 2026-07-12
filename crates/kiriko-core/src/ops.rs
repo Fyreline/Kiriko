@@ -24,12 +24,27 @@ pub enum OpError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Op {
     /// Insert a project item at an index in the Project panel order.
-    AddItem { index: usize, item: Box<ProjectItem> },
-    RemoveItem { id: Uuid },
-    RenameItem { id: Uuid, name: String },
+    AddItem {
+        index: usize,
+        item: Box<ProjectItem>,
+    },
+    RemoveItem {
+        id: Uuid,
+    },
+    RenameItem {
+        id: Uuid,
+        name: String,
+    },
     /// Insert a layer at a stack index (0 = top) of a comp.
-    AddLayer { comp: Uuid, index: usize, layer: Box<Layer> },
-    RemoveLayer { comp: Uuid, layer: Uuid },
+    AddLayer {
+        comp: Uuid,
+        index: usize,
+        layer: Box<Layer>,
+    },
+    RemoveLayer {
+        comp: Uuid,
+        layer: Uuid,
+    },
     /// Set a layer's span on the comp timeline.
     SetLayerSpan {
         comp: Uuid,
@@ -38,7 +53,11 @@ pub enum Op {
         out_point: CompTime,
         start_offset: CompTime,
     },
-    RenameLayer { comp: Uuid, layer: Uuid, name: String },
+    RenameLayer {
+        comp: Uuid,
+        layer: Uuid,
+        name: String,
+    },
 }
 
 /// Apply `op` to `doc`, returning the exact inverse operation.
@@ -58,13 +77,19 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
                 .position(|i| i.id() == *id)
                 .ok_or(OpError::UnknownItem)?;
             let item = doc.items.remove(index);
-            Ok(Op::AddItem { index, item: Box::new(item) })
+            Ok(Op::AddItem {
+                index,
+                item: Box::new(item),
+            })
         }
         Op::RenameItem { id, name } => {
             let item = doc.item_mut(*id).ok_or(OpError::UnknownItem)?;
             let previous = item.name().to_owned();
             item.set_name(name.clone());
-            Ok(Op::RenameItem { id: *id, name: previous })
+            Ok(Op::RenameItem {
+                id: *id,
+                name: previous,
+            })
         }
         Op::AddLayer { comp, index, layer } => {
             let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
@@ -75,7 +100,10 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
                 return Err(OpError::InvalidSpan);
             }
             c.layers.insert(*index, (**layer).clone());
-            Ok(Op::RemoveLayer { comp: *comp, layer: layer.id })
+            Ok(Op::RemoveLayer {
+                comp: *comp,
+                layer: layer.id,
+            })
         }
         Op::RemoveLayer { comp, layer } => {
             let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
@@ -85,9 +113,19 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
                 .position(|l| l.id == *layer)
                 .ok_or(OpError::UnknownLayer)?;
             let removed = c.layers.remove(index);
-            Ok(Op::AddLayer { comp: *comp, index, layer: Box::new(removed) })
+            Ok(Op::AddLayer {
+                comp: *comp,
+                index,
+                layer: Box::new(removed),
+            })
         }
-        Op::SetLayerSpan { comp, layer, in_point, out_point, start_offset } => {
+        Op::SetLayerSpan {
+            comp,
+            layer,
+            in_point,
+            out_point,
+            start_offset,
+        } => {
             if out_point <= in_point {
                 return Err(OpError::InvalidSpan);
             }
@@ -117,7 +155,11 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
                 .find(|l| l.id == *layer)
                 .ok_or(OpError::UnknownLayer)?;
             let previous = std::mem::replace(&mut l.name, name.clone());
-            Ok(Op::RenameLayer { comp: *comp, layer: *layer, name: previous })
+            Ok(Op::RenameLayer {
+                comp: *comp,
+                layer: *layer,
+                name: previous,
+            })
         }
     }
 }

@@ -26,7 +26,10 @@ pub enum ProjectError {
     #[error("not a Kiriko project")]
     NotAKirikoProject,
     #[error("project needs Kiriko {min_reader} or newer (file is schema {schema_version})")]
-    TooNew { schema_version: String, min_reader: String },
+    TooNew {
+        schema_version: String,
+        min_reader: String,
+    },
 }
 
 /// manifest.json — MUST be the archive's first entry and parse standalone.
@@ -74,8 +77,8 @@ pub fn save(doc: &Document, path: &Path) -> Result<(), ProjectError> {
     let result = (|| -> Result<(), ProjectError> {
         let file = File::create(&tmp)?;
         let mut zip = ZipWriter::new(file);
-        let opts = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let opts =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         // Manifest MUST be the first entry.
         zip.start_file("manifest.json", opts)?;
         zip.write_all(serde_json::to_string_pretty(&Manifest::current())?.as_bytes())?;
@@ -108,9 +111,10 @@ pub fn open(path: &Path) -> Result<(Document, Manifest), ProjectError> {
     if manifest.format != FORMAT {
         return Err(ProjectError::NotAKirikoProject);
     }
-    if let (Some(ours), Some(needs)) =
-        (semver_triple(SCHEMA_VERSION), semver_triple(&manifest.min_reader))
-    {
+    if let (Some(ours), Some(needs)) = (
+        semver_triple(SCHEMA_VERSION),
+        semver_triple(&manifest.min_reader),
+    ) {
         if ours < needs {
             return Err(ProjectError::TooNew {
                 schema_version: manifest.schema_version.clone(),
@@ -131,11 +135,7 @@ pub fn open(path: &Path) -> Result<(Document, Manifest), ProjectError> {
 }
 
 /// Rotating autosaves beside the project: `<stem>.autosave-1.kir` is newest.
-pub fn autosave(
-    doc: &Document,
-    project_path: &Path,
-    keep: usize,
-) -> Result<PathBuf, ProjectError> {
+pub fn autosave(doc: &Document, project_path: &Path, keep: usize) -> Result<PathBuf, ProjectError> {
     let dir = project_path
         .parent()
         .unwrap_or(Path::new("."))
@@ -186,7 +186,10 @@ impl JournalFile {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         let mut line = serde_json::to_string(op)?;
         line.push('\n');
         f.write_all(line.as_bytes())?;
@@ -289,7 +292,8 @@ mod tests {
         doc.extra
             .insert("from_the_future".into(), serde_json::json!({"keep": true}));
         if let ProjectItem::Footage(f) = &mut doc.items[0] {
-            f.extra.insert("colour_tag".into(), serde_json::json!("rec709"));
+            f.extra
+                .insert("colour_tag".into(), serde_json::json!("rec709"));
         }
         let path2 = dir.path().join("edit2.kir");
         save(&doc, &path2).unwrap();
@@ -356,8 +360,14 @@ mod tests {
 
         let item = ProjectItem::Footage(footage("a.mp4"));
         let ops = vec![
-            Op::AddItem { index: 0, item: Box::new(item.clone()) },
-            Op::RenameItem { id: item.id(), name: "hero".into() },
+            Op::AddItem {
+                index: 0,
+                item: Box::new(item.clone()),
+            },
+            Op::RenameItem {
+                id: item.id(),
+                name: "hero".into(),
+            },
         ];
         for op in &ops {
             apply(&mut doc, op).unwrap();

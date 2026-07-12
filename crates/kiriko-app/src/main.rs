@@ -15,7 +15,9 @@ impl KirikoApp {
         let restored = cc
             .storage
             .and_then(|s| eframe::get_value::<Shell>(s, STORAGE_KEY));
-        Self { shell: Shell::new(&cc.egui_ctx, restored) }
+        Self {
+            shell: Shell::new(&cc.egui_ctx, restored),
+        }
     }
 }
 

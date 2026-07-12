@@ -125,11 +125,23 @@ impl Theme {
         // Pro-density type scale (docs/15-DESIGN.md §density): 12 px body, 11 px small.
         use egui::{FontFamily, FontId, TextStyle};
         style.text_styles = [
-            (TextStyle::Heading, FontId::new(16.0, FontFamily::Proportional)),
+            (
+                TextStyle::Heading,
+                FontId::new(16.0, FontFamily::Proportional),
+            ),
             (TextStyle::Body, FontId::new(12.0, FontFamily::Proportional)),
-            (TextStyle::Button, FontId::new(12.0, FontFamily::Proportional)),
-            (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
-            (TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace)),
+            (
+                TextStyle::Button,
+                FontId::new(12.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Small,
+                FontId::new(11.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(12.0, FontFamily::Monospace),
+            ),
         ]
         .into();
         style.spacing.item_spacing = egui::vec2(6.0, 4.0);

@@ -64,7 +64,10 @@ impl DocumentStore {
         let mut doc = Document::clone(&self.snapshot());
         // Applying the inverse yields the original op again — symmetry by construction.
         let op = apply(&mut doc, &entry.inverse)?;
-        journal.redo.push(JournalEntry { op, inverse: entry.inverse.clone() });
+        journal.redo.push(JournalEntry {
+            op,
+            inverse: entry.inverse.clone(),
+        });
         let arc = Arc::new(doc);
         self.current.store(arc.clone());
         Ok(Some(arc))
@@ -78,7 +81,10 @@ impl DocumentStore {
         };
         let mut doc = Document::clone(&self.snapshot());
         let inverse = apply(&mut doc, &entry.op)?;
-        journal.undo.push(JournalEntry { op: entry.op, inverse });
+        journal.undo.push(JournalEntry {
+            op: entry.op,
+            inverse,
+        });
         let arc = Arc::new(doc);
         self.current.store(arc.clone());
         Ok(Some(arc))
@@ -87,7 +93,12 @@ impl DocumentStore {
     /// Ops applied since the store was created (or last save), oldest first —
     /// the crash-recovery log persisted by kiriko-project (slice 3).
     pub fn journal_ops(&self) -> Vec<Op> {
-        self.journal.lock().undo.iter().map(|e| e.op.clone()).collect()
+        self.journal
+            .lock()
+            .undo
+            .iter()
+            .map(|e| e.op.clone())
+            .collect()
     }
 
     pub fn can_undo(&self) -> bool {
@@ -162,9 +173,19 @@ mod tests {
         let _ = doc;
         (
             vec![
-                Op::AddItem { index: 0, item: Box::new(ProjectItem::Footage(footage)) },
-                Op::AddItem { index: 1, item: Box::new(ProjectItem::Composition(comp)) },
-                Op::AddLayer { comp: comp_id, index: 0, layer: Box::new(layer) },
+                Op::AddItem {
+                    index: 0,
+                    item: Box::new(ProjectItem::Footage(footage)),
+                },
+                Op::AddItem {
+                    index: 1,
+                    item: Box::new(ProjectItem::Composition(comp)),
+                },
+                Op::AddLayer {
+                    comp: comp_id,
+                    index: 0,
+                    layer: Box::new(layer),
+                },
                 Op::SetLayerSpan {
                     comp: comp_id,
                     layer: layer_id,
@@ -172,8 +193,15 @@ mod tests {
                     out_point: t(19, 2),
                     start_offset: t(1, 2),
                 },
-                Op::RenameLayer { comp: comp_id, layer: layer_id, name: "hero shot".into() },
-                Op::RenameItem { id: comp_id, name: "Main edit".into() },
+                Op::RenameLayer {
+                    comp: comp_id,
+                    layer: layer_id,
+                    name: "hero shot".into(),
+                },
+                Op::RenameItem {
+                    id: comp_id,
+                    name: "Main edit".into(),
+                },
             ],
             comp_id,
         )
@@ -234,7 +262,10 @@ mod tests {
         store.undo().unwrap();
         assert!(store.can_redo());
         store
-            .commit(Op::RenameItem { id: comp_id, name: "diverged".into() })
+            .commit(Op::RenameItem {
+                id: comp_id,
+                name: "diverged".into(),
+            })
             .unwrap();
         assert!(!store.can_redo(), "new edit invalidates the redo branch");
     }

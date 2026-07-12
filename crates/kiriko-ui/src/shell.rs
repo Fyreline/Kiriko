@@ -37,13 +37,16 @@ impl Panel {
 pub fn default_layout() -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewer]);
     let surface = state.main_surface_mut();
-    let [centre, _timeline] =
-        surface.split_below(NodeIndex::root(), 0.65, vec![Panel::Timeline]);
+    let [centre, _timeline] = surface.split_below(NodeIndex::root(), 0.65, vec![Panel::Timeline]);
     let [centre, _project] = surface.split_left(centre, 0.22, vec![Panel::Project]);
     let [_centre, _right] = surface.split_right(
         centre,
         0.78,
-        vec![Panel::EffectControls, Panel::EffectsAndPresets, Panel::Scopes],
+        vec![
+            Panel::EffectControls,
+            Panel::EffectsAndPresets,
+            Panel::Scopes,
+        ],
     );
     state
 }
@@ -120,9 +123,7 @@ fn viewer_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         );
                         ui.add_space(12.0);
                         ui.vertical_centered_justified(|ui| {
-                            let b = |t: &str| {
-                                egui::Button::new(t).min_size(egui::vec2(0.0, 28.0))
-                            };
+                            let b = |t: &str| egui::Button::new(t).min_size(egui::vec2(0.0, 28.0));
                             if ui.add(b("Import footage")).clicked() {
                                 app.import_footage_dialog();
                             }
@@ -135,11 +136,9 @@ fn viewer_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         });
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new(
-                                "Footage can be dropped anywhere in the window.",
-                            )
-                            .small()
-                            .color(theme.text_disabled),
+                            egui::RichText::new("Footage can be dropped anywhere in the window.")
+                                .small()
+                                .color(theme.text_disabled),
                         );
                     });
             });
@@ -147,8 +146,7 @@ fn viewer_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     });
 
     // Viewer bar placeholder (bottom): preview resolution + magnification stubs.
-    let bar =
-        egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - 26.0), rect.max);
+    let bar = egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - 26.0), rect.max);
     ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
         egui::Frame::new()
             .fill(theme.surface_1)
@@ -157,22 +155,23 @@ fn viewer_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("Full").small().color(theme.text_secondary),
+                        egui::RichText::new("Full")
+                            .small()
+                            .color(theme.text_secondary),
                     );
                     ui.label(egui::RichText::new("·").small().color(theme.text_disabled));
                     ui.label(
-                        egui::RichText::new("Fit").small().color(theme.text_secondary),
+                        egui::RichText::new("Fit")
+                            .small()
+                            .color(theme.text_secondary),
                     );
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new("sRGB display")
-                                    .small()
-                                    .color(theme.text_muted),
-                            );
-                        },
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("sRGB display")
+                                .small()
+                                .color(theme.text_muted),
+                        );
+                    });
                 });
             });
     });
@@ -312,7 +311,11 @@ pub struct Shell {
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { dock: default_layout(), theme: Theme::dark(), app: AppState::default() }
+        Self {
+            dock: default_layout(),
+            theme: Theme::dark(),
+            app: AppState::default(),
+        }
     }
 }
 
@@ -342,7 +345,9 @@ impl Shell {
     }
 
     fn recovery_modal(&mut self, ctx: &egui::Context) {
-        let Some(pending) = &self.app.pending_recovery else { return };
+        let Some(pending) = &self.app.pending_recovery else {
+            return;
+        };
         let n = pending.ops.len();
         let mut choice: Option<bool> = None;
         egui::Window::new("Recover changes")
@@ -356,7 +361,11 @@ impl Shell {
                 ));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button(format!("Restore {n} change{}", if n == 1 { "" } else { "s" }))
+                    if ui
+                        .button(format!(
+                            "Restore {n} change{}",
+                            if n == 1 { "" } else { "s" }
+                        ))
                         .clicked()
                     {
                         choice = Some(true);
@@ -427,7 +436,9 @@ impl Shell {
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        egui::RichText::new("Edit").small().color(self.theme.text_muted),
+                        egui::RichText::new("Edit")
+                            .small()
+                            .color(self.theme.text_muted),
                     )
                     .on_hover_text("Workspace — presets arrive with the panel set");
                 });
@@ -436,15 +447,19 @@ impl Shell {
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let status = if self.app.dirty { "Unsaved changes" } else { "Ready" };
+                let status = if self.app.dirty {
+                    "Unsaved changes"
+                } else {
+                    "Ready"
+                };
                 ui.label(
-                    egui::RichText::new(status).small().color(self.theme.text_muted),
+                    egui::RichText::new(status)
+                        .small()
+                        .color(self.theme.text_muted),
                 );
                 if let Some(err) = self.app.error.clone() {
                     ui.separator();
-                    ui.label(
-                        egui::RichText::new(&err).small().color(self.theme.warning),
-                    );
+                    ui.label(egui::RichText::new(&err).small().color(self.theme.warning));
                     if ui.small_button("Dismiss").clicked() {
                         self.app.error = None;
                     }
