@@ -199,6 +199,15 @@ transforms (sRGB, Rec.709/BT.1886, linear). **OCIO v2 integration is post-v1 but
 an OCIO-backed `ColourTransform` generated from a config via OCIO's GPU shader API, transpiled
 to WGSL. Nothing else in the pipeline may assume the transform set is fixed.
 
+**The parity guarantee (K-031).** Preview and export MUST share one colour code path: the
+same input transforms, working space, and output transform implementations, in the same
+precision. At Full resolution and full quality, the frame presented in the Viewer is
+bit-identical to the frame handed to the encoder; export-only stages (encoder subsampling,
+8/10-bit quantisation, container tagging) sit strictly downstream of that point. There is
+no "render colour engine" distinct from the preview's — having two is how other tools end
+up with previews that lie. CI enforces parity with a golden test comparing Viewer readback
+against export output for a reference comp in every shipped colour configuration.
+
 ### 3.4 Premultiplication rules
 
 Premultiplied everywhere, with exactly these boundaries:

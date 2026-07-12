@@ -492,7 +492,14 @@ Export window. Export never blocks editing; the queue runs in the background.
   cancelled), and a **per-item cancel** button. Items are reorderable; failed items keep
   their settings for retry.
 - **Per-item settings**: range (work area / full comp / custom in-out), **preset**, output
-  folder, filename (tokenised template: comp name, date, preset).
+  folder, filename (tokenised template: comp name, date, preset) — and, expandable beneath
+  the preset, the full custom controls: resolution (comp / half / custom), frame rate
+  (comp rate or override), format/container, codec with encoder choice (hardware
+  NVENC/AMF/QSV or software), rate control (VBR bitrate / CRF quality), colour output
+  (Rec.709 default), audio codec/bitrate, and **resource allocation** — export thread
+  count and a background/balanced/fast priority selector governing how much of the
+  machine the queue takes while you keep editing. Editing a preset's controls offers
+  "save as new preset".
 - **Shipped presets**: *YouTube 1080p60* (H.264, high bitrate VBR), *YouTube 1440p60*
   (H.264; the scene's quality trick), *Vertical 1080×1920 60* (Shorts/TikTok/Reels), plus
   *PNG sequence + alpha* and a mezzanine intermediate. Preset details and encoder matrix
@@ -593,6 +600,28 @@ Binding, from the household mandate; these override convenience everywhere.
 ---
 
 ## 15. Default keymap
+
+### Settings inventory (K-031/K-032 anchors)
+
+The Settings window groups, minimum set — every value here is machine-local (never in the
+project file, [10-FILE-FORMAT.md](10-FILE-FORMAT.md) §2):
+
+- **Performance**: RAM budget for Kiriko (default 60% of system, slider + absolute),
+  VRAM budget (default 70%), CUDA acceleration on/off (per K-014 it is only ever an
+  optional per-node accelerator; off = WGSL path, identical output), decoder pool size,
+  worker thread cap, background cache fill on/off.
+- **Cache**: cache root folder, disk cache size budget, clear-cache actions (per tier),
+  proxy generation policy.
+- **Preview**: default preview mode (Cached/Realtime, K-030), Realtime tier bounds,
+  adaptive-degradation aggressiveness, audio scrubbing on/off.
+- **Colour** (K-031): working-space defaults for new comps, display transform selection,
+  footage interpretation defaults. The preview–export parity rule is stated in this panel's
+  header text so users understand what the app guarantees.
+- **Export**: default preset, export priority default (background/balanced/fast), encoder
+  preference order, filename template.
+- **Keymap**, **Interface** (UI scale, tooltips, reduced motion follows OS or override),
+  **Autosave** (interval, copies kept), **Plugins** (search paths, disabled list, per-plugin
+  overrides).
 
 All bindings are remappable in Settings → Keymap (search, conflict detection, per-context
 display); the keymap serialises to a shareable file. An "After Effects" alternate preset

@@ -124,6 +124,22 @@ Spec: [13-PERFORMANCE-RULES.md](13-PERFORMANCE-RULES.md).
 recommended.** CPU-only operation must work (slowly) for every built-in effect: each WGSL
 effect ships a CPU reference implementation, which doubles as its test oracle.
 
+**K-031 · DECIDED · Colour spaces are selectable; preview always matches export.** Working
+colour space is selectable per comp (with app-level defaults, and OCIO joining post-v1 per
+06), like AE — but with a hard parity guarantee: **what the Viewer shows at Full resolution
+and full quality is bit-identical to what export produces** through the same transforms.
+Export-only settings (encoder, bitrate, container, subsampling to 8/10-bit) sit strictly
+after the parity point. Adaptive degradation and Realtime mode affect interaction only and
+are always visibly indicated. Added 2026-07-12 at Mack's request. Spec:
+[06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md) §3.
+
+**K-032 · DECIDED · Resource and export controls are explicit settings.** RAM/VRAM budgets,
+CUDA on/off, decoder pool, worker caps, cache root/size in Settings → Performance/Cache;
+export dialogue exposes full custom controls (resolution, frame rate, format, codec,
+encoder choice, rate control, audio, thread count and a background/balanced/fast priority)
+alongside presets — and exporting never blocks editing (06 §7.1). Added 2026-07-12 at
+Mack's request. Spec: [07-UI-SPEC.md](07-UI-SPEC.md) §Settings inventory.
+
 **K-030 · DECIDED · Two preview modes: Cached (default) and Realtime-adaptive.** Cached
 plays at full chosen quality from the render-ahead ring and cache. Realtime never waits:
 every frame renders live at whatever resolution tier sustains the comp frame rate, adjusted
