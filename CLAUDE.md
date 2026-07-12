@@ -38,6 +38,20 @@ household `HOUSEHOLD-DESIGN.md`. All colours come from the theme struct; hex lit
 widget code are a defect. Voice: British English, sentence case, calm, no exclamation
 marks, no emoji, no punishment UI.
 
+## Readability and coverage (binding, K-007)
+
+- **The docs and code must stay understandable to the project owner**, who knows editing
+  software deeply but has never written Rust and hasn't worked with threads/GPUs.
+  `docs/GUIDE.md` is the plain-English companion: whenever a new concept, crate, or
+  mechanism enters the codebase, add a plain-English section for it to GUIDE.md **in the
+  same commit**. New impl notes and complex modules open with a short "in plain terms"
+  framing. Never assume Rust fluency in any doc outside code comments.
+- **Near-full regression coverage is standing policy**: every feature lands with its tests;
+  every bug fix lands with a regression test that fails without the fix; CI runs fmt,
+  clippy (warnings are errors), the full suite on macOS + Windows, the engine-crate
+  coverage gate (threshold rises only), and the no-hex-outside-theme lint. A red CI blocks
+  everything else.
+
 ## Working style
 
 - This is a public repo: nothing personal or machine-specific in committed files.

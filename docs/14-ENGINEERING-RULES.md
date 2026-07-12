@@ -241,6 +241,13 @@ A feature is done when all of the following hold; PRs state each explicitly:
    banned-term check; new concepts are named in [01-GLOSSARY.md](01-GLOSSARY.md) first.
 7. **Determinism** — if it touches evaluation: no clocks, seeded randomness only, and the
    golden frames still match across two consecutive CI runs.
+8. **Regression coverage (K-007)** — a bug fix MUST include a regression test that fails
+   without the fix; the engine-crate line-coverage gate in CI MUST still pass, and its
+   threshold may be raised but never lowered. The suite is the museum of every bug ever
+   fixed; none may return unnoticed.
+9. **Owner readability (K-007)** — if the change introduces a new concept, crate, or
+   mechanism, [GUIDE.md](GUIDE.md) gains its plain-English section in the same commit, and
+   any new impl note opens with an "in plain terms" framing.
 
 ---
 

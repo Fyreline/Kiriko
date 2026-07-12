@@ -37,7 +37,10 @@ beat-sync covenant, and the genre's staple effects in the box. The full pitch:
 | [15-DESIGN](docs/15-DESIGN.md) | Dark-first Aizome design language |
 | [16-ROADMAP](docs/16-ROADMAP.md) | Phases and their gates |
 
-Two companion sets:
+Three companion pieces:
+- [docs/GUIDE.md](docs/GUIDE.md) — the plain-English guide to the codebase: what each crate
+  does, Rust and threading explained in editing terms, and the safe-change recipe. Start
+  here if you aren't a Rust developer.
 - [docs/impl/](docs/impl/) — implementation notes for the genuinely hard, low-level parts
   (rational time, cubic solving, wgpu patterns, hardware decode interop, the scheduler,
   optical flow, OFX hosting, beat detection, expression embedding): exact algorithms,

@@ -1,0 +1,178 @@
+# The plain-English guide to Kiriko's code
+
+**Who this is for:** the project owner — someone who knows editing software inside-out but
+has never written Rust and hasn't worked with threads or GPUs directly. Read this once and
+you'll be able to navigate the codebase, understand what each part does and why, and make
+changes without fear. Everything here is explained with editing analogies where they help.
+No prior programming knowledge in Rust is assumed; general "I've seen code before" level is.
+
+This guide is **kept current by rule** (CLAUDE.md): whenever a new concept enters the
+codebase, a plain-English section for it is added here in the same commit.
+
+---
+
+## 1. The 30-second map
+
+Kiriko is split into **crates** (Rust's word for a module/library — think of them as the
+app's departments). They live in `crates/`:
+
+| Crate | Job | Plain English |
+|---|---|---|
+| `kiriko-core` | Time, the document, undo | The project file's brain: what a comp/layer *is*, and every edit that can happen to it |
+| `kiriko-project` | `.kir` files, autosave, recovery | Saving and loading, and the "never lose work" machinery |
+| `kiriko-ui` | Everything you see | Panels, menus, the theme — the shell around the engine |
+| `kiriko-app` | The `main()` entry | Ten lines that open the window and start the UI |
+| `kiriko-media` | (coming) decoding video | Turning an .mp4 into frames |
+| `kiriko-gpu` | (coming) the GPU pipeline | Drawing and processing frames on the graphics card |
+| `kiriko-audio` | (coming) sound | Playback and the clock everything syncs to |
+| `kiriko-eval` | (coming) the render engine | Working out what each frame looks like |
+| `kiriko-cache` | (coming) caching | Remembering rendered frames so they're never rendered twice |
+
+**One rule ties them together:** the engine crates never depend on the UI. The UI asks the
+engine for things; the engine doesn't know the UI exists. That's why the UI could be
+replaced entirely without touching the engine — like swapping a car's dashboard without
+opening the engine bay.
+
+## 2. Rust in ten minutes, Kiriko edition
+
+You don't need to write Rust to read it. The handful of ideas that appear everywhere:
+
+- **Ownership.** Every piece of data in Rust has exactly one owner, and the compiler
+  enforces it. When you see code "cloning" a document, that's making an independent copy so
+  two parts of the app can't fight over one. This is the language feature that makes the
+  "never crashes" goal realistic — whole categories of crash (two threads corrupting the
+  same memory) simply don't compile.
+- **`Result` — errors are values, not explosions.** A function that can fail returns
+  `Result<Thing, Error>`: either `Ok(thing)` or `Err(why)`. The caller *must* deal with
+  both. You'll see `?` a lot — it means "if this failed, pass the error up to my caller".
+  Kiriko bans the shortcuts (`unwrap`/`panic`) that turn errors into crashes; the build
+  literally fails if someone uses them in engine code.
+- **`Option`** is the same idea for "might not exist": `Some(comp)` or `None`. No
+  null-pointer crashes, ever.
+- **Structs and enums.** A `struct` is a record (a Layer has a name, an in point, an out
+  point…). An `enum` is a choice between shapes — `LayerKind` is Footage *or* Sequence *or*
+  Text… and the compiler forces every `match` to handle every case, so adding a new layer
+  kind makes the compiler point at every place that needs updating. That's why the strict
+  glossary maps so well to code.
+- **Traits** are capability contracts, like "anything that can decode frames". Code can say
+  "give me anything that satisfies this trait" — that's how the engine will stay swappable
+  (a CPU decoder and a GPU decoder behind the same trait).
+- **`Arc<T>`** means "shared, read-only handle to T" (Atomically Reference Counted). Several
+  parts of the app can hold the same document snapshot at once; it's freed automatically
+  when the last holder lets go.
+- **Crates and Cargo.** `Cargo.toml` files list dependencies (like a plugins list).
+  `cargo build` compiles, `cargo run` launches, `cargo test` runs every test. Those three
+  commands are 95% of what you'll ever type.
+
+## 3. Threads, in editing terms
+
+A thread is an independent worker inside the program. Kiriko's design gives each worker a
+fixed job (the full table is in [05-ARCHITECTURE.md](05-ARCHITECTURE.md)):
+
+- **The UI thread** is front-of-house: it draws the interface and responds to your mouse.
+  The golden rule — it **never** does heavy work. Every stutter you've ever felt in AE is
+  some engineer breaking this rule. In Kiriko it's structural: the UI thread hands work to
+  others and carries on drawing.
+- **Worker threads** are the render farm: they evaluate frames, run effects, do maths.
+  There are roughly as many as your CPU has cores.
+- **Dedicated threads** exist for decoding video, disk IO, and audio — because those jobs
+  must never wait behind anything else (audio especially: if its thread is ever late, you
+  *hear* it).
+
+Two mechanisms make this safe, and you'll see them by name in the code:
+
+- **Snapshots (`ArcSwap`).** When you edit, the UI thread produces a complete new immutable
+  copy of the document and atomically swaps a pointer to it. Workers that were mid-render
+  keep the old copy; new work uses the new one. Nobody ever sees a half-finished edit —
+  like workers each getting their own printed copy of the script, and edits producing a
+  fresh printing rather than scribbling on someone's pages.
+- **Epochs (cancellation).** Every piece of work carries a ticket number. When you scrub,
+  the global ticket number increments; workers check their ticket often ("is my work still
+  wanted?") and quietly stop if it's stale. Nothing is force-killed — force-killing is how
+  you corrupt state — everything checks and steps aside. Details in
+  [impl/playback-scheduler.md](impl/playback-scheduler.md).
+- **Channels** are how threads hand each other work: a conveyor belt with a fixed length.
+  A full belt makes the sender wait — that's **back-pressure**, and it's deliberate: it's
+  the mechanism that stops the app drowning itself under load (rule K-018, degrade never
+  crash).
+
+## 4. What exists today, file by file
+
+- `crates/kiriko-core/src/time.rs` — **Rational time.** Times are stored as exact fractions
+  (`num/den`), never decimals, so frame maths is exact forever (a 3-hour NTSC timeline
+  never drifts by a frame). The four "timebases" (source/clip/layer/comp time — glossary §4)
+  are separate types, so mixing them up is a compile error, not a subtle bug.
+- `crates/kiriko-core/src/model.rs` — **What a project is.** Structs for the document,
+  comps, layers, footage items. Each has an `extra` field that preserves anything a future
+  Kiriko version adds — so old and new versions can share project files.
+- `crates/kiriko-core/src/ops.rs` — **Every possible edit, as data.** An edit is an `Op`
+  (AddLayer, SetLayerSpan…). Applying an op returns its exact inverse — that pair is what
+  makes undo *provably* correct instead of hopefully correct.
+- `crates/kiriko-core/src/store.rs` — **The document store**: applies ops, publishes
+  snapshots, keeps the undo/redo stacks.
+- `crates/kiriko-project/src/lib.rs` — **`.kir` files.** A `.kir` is a zip containing
+  readable JSON (rename one to `.zip` and look inside — genuinely). Saves are atomic:
+  written to a temp file, flushed to disk, then renamed over the old file, so a crash
+  mid-save can never destroy the previous save. The **journal** logs every edit to a side
+  file the instant it happens; after a crash, replaying it restores your work.
+- `crates/kiriko-ui/src/theme.rs` — **the Aizome tokens.** The only file allowed to contain
+  colour values. Change a colour here, it changes everywhere.
+- `crates/kiriko-ui/src/shell.rs` + `app_state.rs` — **the window**: panels, menus,
+  shortcuts, and the state glue (current project, dirty flag, autosave timer, recovery
+  prompt).
+
+## 5. Making a change safely (the recipe)
+
+1. **Find the doc first.** Specs (`docs/00–16`) say what the behaviour should be; impl
+   notes (`docs/impl/`) say how the hard parts work. If your change disagrees with a doc,
+   the doc gets updated in the same commit — docs are canonical.
+2. **Make the change.** The compiler is your ally: in Rust, most mistakes fail to compile
+   rather than fail at runtime. Read its messages — they're unusually helpful and usually
+   tell you exactly what to fix.
+3. **Run `cargo test`.** Everything green? Your change didn't break any promise that's
+   been made so far.
+4. **Add a test for what you changed.** New behaviour = new test proving it. Fixed a bug =
+   a regression test that fails without your fix (that bug can now never return unnoticed).
+5. **Commit with a message saying what and why.** CI re-runs everything on every push.
+
+Even if you never write the change yourself, this recipe is how you *direct* a model to do
+it and check it did it right: point at the doc, ask for the change plus its test, look at
+the test.
+
+## 6. The testing philosophy (and your regression-coverage rule)
+
+Standing policy, enforced in CI ([14-ENGINEERING-RULES.md](14-ENGINEERING-RULES.md) §tests):
+
+- **Every feature lands with tests.** Not after — with. A feature without tests is not done.
+- **Every bug fix lands with a regression test** that reproduces the bug first. The suite
+  is a museum of every bug ever fixed, and none of them can come back silently.
+- **Property tests** generate thousands of random inputs looking for edge cases humans
+  don't think of (the time maths runs under these).
+- **Golden tests** compare output against a known-correct reference — later, whole rendered
+  frames get compared pixel-by-pixel, which is how "preview equals export" stays true.
+- **Coverage is measured in CI** and the engine crates must stay above the threshold —
+  it can only be raised, never lowered.
+
+What the suite guards *today*: time maths exactness (6 property suites), undo/redo
+symmetry, journal replay, the crash-recovery drill both ways, file-format round-trips,
+unknown-field survival, autosave rotation, version refusal.
+
+## 7. Words you'll meet in the code
+
+| Term | Meaning |
+|---|---|
+| `fn` | A function |
+| `pub` | Public — usable from other files/crates |
+| `let` | Create a variable |
+| `&thing` / `&mut thing` | Borrow it read-only / borrow it with permission to change |
+| `impl X` | "Here are X's functions" |
+| `#[derive(...)]` | Auto-generate boilerplate (comparisons, serialisation) |
+| `#[serde(...)]` | Instructions for JSON conversion |
+| `mod` / `use` | Declare / import a module |
+| `Vec<T>` | A growable list of T |
+| `HashMap<K, V>` | A dictionary/lookup table |
+| `match` | A switch that must handle every case |
+| `async` | Not used in Kiriko's engine — we use threads and channels instead, deliberately |
+
+When you hit something not covered here, ask any session "explain X in GUIDE.md terms and
+add it to the guide" — that's the standing arrangement.

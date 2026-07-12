@@ -50,6 +50,14 @@ request; post-v1 polish. Spec: [07-UI-SPEC.md](07-UI-SPEC.md) §13.1.
 
 ## Core model
 
+**K-007 · DECIDED · Docs stay owner-readable; regression coverage is near-full.** All
+documentation must remain understandable to the project owner (expert editor, new to Rust
+and systems concepts): [GUIDE.md](GUIDE.md) is the plain-English companion, updated in the
+same commit as any new concept. Testing policy: every feature ships with tests, every bug
+fix ships with a regression test, CI enforces fmt/clippy/tests on macOS + Windows plus an
+engine-crate coverage gate whose threshold may rise but never fall, and a design-token
+lint. Added 2026-07-13 at Mack's request. Spec: [14-ENGINEERING-RULES.md](14-ENGINEERING-RULES.md).
+
 **K-020 · DECIDED · Layer-based model with a Sequence layer type.** Ordinary layers stay 1:1
 with a source, as in AE. A dedicated **Sequence layer** holds clips cut back-to-back on one
 row — the Vegas-style surface. This was chosen over (a) making every layer multi-clip and
