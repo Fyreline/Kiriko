@@ -486,6 +486,17 @@ beneath the mark; no custom lettering. The mark MUST also be paintable from them
 in code (it is pure strokes, no raster assets) so the splash and about box never ship
 image files.
 
+**Status of the current mark: approved placeholder** (owner, 2026-07-13). The destination
+for the brand's artwork is more ambitious, in the owner's words: a **broken-glass look**,
+styled like something out of Persona 5 — hard-edged silhouettes, aggressive shard-shaped
+composition, beautiful graphic stylisation. Direction for the eventual splash art: the
+Kiriko mark or a silhouette figure seen through/composed of fractured glass shards, flat
+high-contrast shapes on the dark ramp with clay as the single cutting colour, mist filling
+the negative space. Persona 5 is the energy reference, not a template to copy — no borrowed
+assets or traced compositions; Kiriko's own geometry (the hexagonal facet grammar above)
+supplies the shard language. The boot-log splash below ships with the placeholder mark now;
+the art replaces the mark's slot without changing the splash's structure.
+
 **The splash.** A small frameless window, centred on the monitor (~460×300), surface_0,
 shown while the application boots:
 

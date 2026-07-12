@@ -311,6 +311,10 @@ pub struct Shell {
     /// Boot splash (K-008); None once the application window has expanded.
     #[serde(skip, default)]
     splash: Option<Splash>,
+    /// Native macOS menu bar; None on other platforms (07-UI-SPEC).
+    #[cfg(target_os = "macos")]
+    #[serde(skip, default)]
+    native_menu: Option<crate::native_menu::NativeMenu>,
 }
 
 impl Default for Shell {
@@ -320,6 +324,8 @@ impl Default for Shell {
             theme: Theme::dark(),
             app: AppState::default(),
             splash: None,
+            #[cfg(target_os = "macos")]
+            native_menu: None,
         }
     }
 }
@@ -346,10 +352,47 @@ impl Shell {
         lines.push(BootLine::ok(
             "Effects: none registered — suite arrives in phase 3",
         ));
+
+        #[cfg(target_os = "macos")]
+        {
+            match crate::native_menu::NativeMenu::install() {
+                Ok(menu) => {
+                    shell.native_menu = Some(menu);
+                    lines.push(BootLine::ok("Menu bar: native (macOS)"));
+                }
+                Err(e) => lines.push(BootLine {
+                    text: format!("Menu bar: in-window fallback ({e})"),
+                    failed: true,
+                }),
+            }
+        }
+
         shell.splash = Some(Splash::new(lines));
         shell
     }
 
+    #[cfg(target_os = "macos")]
+    fn native_menu_frame(&mut self) {
+        use crate::native_menu::MenuAction;
+        let Some(menu) = &self.native_menu else {
+            return;
+        };
+        for action in menu.poll() {
+            match action {
+                MenuAction::NewProject => self.app.new_project(),
+                MenuAction::OpenProject => self.app.open_dialog(),
+                MenuAction::ImportFootage => self.app.import_footage_dialog(),
+                MenuAction::Save => self.app.save(),
+                MenuAction::Undo => self.app.undo(),
+                MenuAction::Redo => self.app.redo(),
+                MenuAction::NewComposition => self.app.new_composition(),
+                MenuAction::ResetWorkspace => self.dock = default_layout(),
+            }
+        }
+        menu.sync(self.app.store.can_undo(), self.app.store.can_redo());
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut, Modifiers};
         const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
@@ -415,9 +458,13 @@ impl Shell {
             return;
         }
         self.app.autosave_tick();
+        #[cfg(target_os = "macos")]
+        self.native_menu_frame();
+        #[cfg(not(target_os = "macos"))]
         self.shortcuts(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.app.project_title()));
 
+        #[cfg(not(target_os = "macos"))]
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
