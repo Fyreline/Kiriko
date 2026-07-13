@@ -205,6 +205,12 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   folder (Kiriko remembers the folder itself, not its name). Compositions do the same
   with a Compositions folder. Multi-step creations like that land as a single undo
   step — a batch operation whose inverse is just the reversed inverses of its members.
+- **Epochs (`kiriko-eval::epoch`)** — the cancellation mechanism the whole scheduler
+  will stand on. Every scheduled job carries a ticket stamped with the number that was
+  on the wall when it started; scrubbing or stopping turns the wall number over, and
+  workers glance at the wall between small steps and quietly stop if their ticket is
+  stale. Nothing is ever force-killed. A test proves a deliberately slow job stops
+  within 15 milliseconds of the number changing.
 - **Mask editing in the Viewer** — select a layer with masks and its outlines draw
   over the picture in clay, with a square handle on every vertex. Drag a handle and
   the outline follows your cursor live; let go and the pixels update — one undo step
