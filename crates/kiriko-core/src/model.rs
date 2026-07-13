@@ -243,6 +243,13 @@ pub enum LayerKind {
     /// `zoom` is the AE model: focal distance in comp pixels — the z=0
     /// plane maps 1:1.
     Camera { zoom: Property },
+    /// A Sequence layer (docs/01-GLOSSARY.md, §5.3): clips cut back-to-back on
+    /// one row — Kiriko's Vegas-style editing surface. Resolution lives in
+    /// [`crate::sequence`].
+    Sequence {
+        #[serde(default)]
+        clips: Vec<crate::sequence::Clip>,
+    },
 }
 
 /// The active camera's evaluated placement at one comp time — what both the

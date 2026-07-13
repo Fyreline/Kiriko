@@ -295,6 +295,37 @@ fn feed_source(
         LayerKind::Camera { .. } => {
             h.update(b"camera"); // draws nothing; pose is hashed at comp level
         }
+        LayerKind::Sequence { clips } => {
+            // Key the active clip's resolved source (docs/04-RETIMING.md §1.3):
+            // a gap is transparent, a footage clip keys its retimed source
+            // frame, a comp clip recurses.
+            match kiriko_core::sequence::resolve(clips, lt) {
+                None => {
+                    h.update(b"gap");
+                }
+                Some((_id, kiriko_core::sequence::ClipSource::Footage(item), st)) => {
+                    let (identity, frame) = stamper.stamp(item, st)?;
+                    h.update(b"seq-footage/");
+                    h.update(identity.as_bytes());
+                    h.update(&frame.to_le_bytes());
+                }
+                Some((_id, kiriko_core::sequence::ClipSource::Comp(comp), st)) => {
+                    if visited.contains(&comp) {
+                        h.update(b"cycle");
+                        return Some(());
+                    }
+                    let Some(nested) = doc.comp(comp) else {
+                        h.update(b"nocomp");
+                        return Some(());
+                    };
+                    h.update(b"seq-comp/");
+                    visited.push(comp);
+                    let r = feed_comp(h, doc, nested, st, quality, stamper, visited);
+                    visited.pop();
+                    r?;
+                }
+            }
+        }
     }
     Some(())
 }
@@ -562,5 +593,30 @@ mod tests {
         assert_eq!(k(&half, 2.0), k(&plain, 1.0));
         // and differs from plain at t=2 (source 2.0).
         assert_ne!(k(&half, 2.0), k(&plain, 2.0));
+    }
+
+    /// A Sequence layer keys the active clip's source frame; a gap keys
+    /// distinctly and moving through clips changes the key.
+    #[test]
+    fn sequence_keys_the_active_clip() {
+        use kiriko_core::sequence::{Clip, ClipSource};
+        use kiriko_core::time::Rational;
+        let doc = Document::new();
+        let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+        let r = |n| Rational::new(n, 1).unwrap();
+        // Clip A [0,2), gap [2,3), clip B [3,5).
+        let clips = vec![
+            Clip::new(ClipSource::Footage(a), r(0), r(2), r(0), r(2)),
+            Clip::new(ClipSource::Footage(b), r(0), r(2), r(3), r(2)),
+        ];
+        let mut l = text_layer("", 0.0, 10.0, 0.0);
+        l.kind = LayerKind::Sequence { clips };
+        let comp = comp_with(vec![l]);
+        let k = |t| comp_frame_key(&doc, &comp, t, Quality::default(), &StubStamper);
+        // Both clips resolve (Some); the gap is still keyable (transparent).
+        assert!(k(1.0).is_some() && k(4.0).is_some() && k(2.5).is_some());
+        // Different clips → different keys; the gap differs from both.
+        assert_ne!(k(1.0), k(4.0));
+        assert_ne!(k(1.0), k(2.5));
     }
 }

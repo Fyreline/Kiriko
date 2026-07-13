@@ -1153,6 +1153,83 @@ impl AppState {
         self.refresh_preview();
     }
 
+    /// Add a Sequence layer (Vegas-style clip row). If a footage item is
+    /// selected in the Project panel it becomes the first clip spanning the
+    /// footage; otherwise the layer starts empty. This is a first, simple
+    /// build path — richer clip editing (drag, cut, trim) follows.
+    pub fn add_sequence_layer(&mut self) {
+        use kiriko_core::model::{Layer, LayerKind, Switches};
+        use kiriko_core::sequence::{Clip, ClipSource};
+        use kiriko_core::time::CompTime;
+        let Some(comp_id) = self.preview_comp.or(self.selected_comp) else {
+            self.error = Some("select a composition first".into());
+            return;
+        };
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        // One clip from the selected footage item, if there is one.
+        let mut clips = Vec::new();
+        let mut name = "Sequence".to_string();
+        if let Some(sel) = self.selected_item {
+            if let Some(ProjectItem::Footage(f)) = doc.item(sel) {
+                #[cfg(feature = "media")]
+                let dur = match self.media.map.get(&sel) {
+                    Some(media::MediaStatus::Ready { probe, .. }) => probe.duration_seconds,
+                    _ => comp.duration.0.to_f64(),
+                };
+                #[cfg(not(feature = "media"))]
+                let dur = comp.duration.0.to_f64();
+                let dur = Rational::from_f64_on_grid(
+                    dur.max(1.0 / comp.frame_rate.fps().max(1.0)),
+                    Rational::FLICK_DEN,
+                )
+                .unwrap_or(comp.duration.0);
+                clips.push(Clip::new(
+                    ClipSource::Footage(sel),
+                    Rational::ZERO,
+                    dur,
+                    Rational::ZERO,
+                    dur,
+                ));
+                name = f.name.clone();
+            }
+        }
+        let out = if let Some(c) = clips.first() {
+            CompTime(c.place_end())
+        } else {
+            CompTime(comp.duration.0)
+        };
+        let layer = Layer {
+            id: Uuid::now_v7(),
+            name,
+            kind: LayerKind::Sequence { clips },
+            in_point: CompTime(Rational::ZERO),
+            out_point: out,
+            start_offset: CompTime(Rational::ZERO),
+            transform: centred_transform(
+                f64::from(comp.width),
+                f64::from(comp.height),
+                comp.width,
+                comp.height,
+            ),
+            matte: None,
+            blend: Default::default(),
+            masks: Vec::new(),
+            switches: Switches::default(),
+            extra: serde_json::Map::new(),
+        };
+        self.commit(Op::AddLayer {
+            comp: comp_id,
+            index: 0,
+            layer: Box::new(layer),
+        });
+        self.preview_comp = Some(comp_id);
+        #[cfg(feature = "media")]
+        self.refresh_preview();
+    }
+
     /// Ops that guarantee the auto-filing folder for `kind` exists, plus its
     /// id. Tracks the folder by id (AE habit: renaming or nesting the Solids
     /// folder keeps it the Solids folder); a deleted one is recreated.
@@ -1824,6 +1901,35 @@ impl AppState {
             let lt = t - layer.start_offset.0.to_f64();
             match &layer.kind {
                 LayerKind::Solid { .. } | LayerKind::Text { .. } | LayerKind::Camera { .. } => {}
+                LayerKind::Sequence { clips } => {
+                    // Resolve the clip under the playhead to a footage frame
+                    // (comp-source clips + gaps are handled elsewhere/skip).
+                    if let Some((_id, kiriko_core::sequence::ClipSource::Footage(item), st)) =
+                        kiriko_core::sequence::resolve(clips, lt)
+                    {
+                        if let (
+                            Some(ProjectItem::Footage(f)),
+                            Some(media::MediaStatus::Ready {
+                                probe,
+                                frames: src_frames,
+                                ..
+                            }),
+                        ) = (doc.item(item), self.media.map.get(&item))
+                        {
+                            if let Some(video) = probe.video.as_ref() {
+                                let source_frame = ((st * video.fps()).round().max(0.0) as usize)
+                                    .min(src_frames.saturating_sub(1));
+                                jobs.push(preview::CompJob {
+                                    layer: layer.id,
+                                    item,
+                                    path: PathBuf::from(&f.media.absolute_path),
+                                    source_frame,
+                                    target_width: self.target_width_for(video.width),
+                                });
+                            }
+                        }
+                    }
+                }
                 LayerKind::Precomp { comp: nested_id } => {
                     if visited.contains(nested_id) {
                         continue; // cycle guard

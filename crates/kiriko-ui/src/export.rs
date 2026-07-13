@@ -95,6 +95,51 @@ struct Prepared {
 }
 
 impl Renderer<'_> {
+    /// Decode one footage item at `source_time` (seconds), apply the layer's
+    /// masks, and upload — shared by Footage layers and Sequence footage clips.
+    // contains_key + insert (not the entry API): the value is built fallibly
+    // (index + decoder open both return Result), which entry() can't express.
+    #[allow(clippy::map_entry)]
+    fn prepare_footage(
+        &mut self,
+        item: Uuid,
+        source_time: f64,
+        masks: &[kiriko_core::mask::Mask],
+    ) -> Result<Option<Prepared>, String> {
+        let Some(info) = self.items.get(&item) else {
+            return Ok(None);
+        };
+        let source_frame =
+            ((source_time * info.fps).round().max(0.0) as usize).min(info.frames.saturating_sub(1));
+        if !self.decoders.contains_key(&item) {
+            let index =
+                kiriko_media::index::build_frame_index(&info.path).map_err(|e| e.to_string())?;
+            let dec =
+                kiriko_media::VideoDecoder::open(&info.path, index).map_err(|e| e.to_string())?;
+            self.decoders.insert(item, dec);
+        }
+        let dec = self.decoders.get_mut(&item).ok_or("decoder missing")?;
+        let mut px = dec
+            .frame_rgba(source_frame, None)
+            .map_err(|e| e.to_string())?;
+        kiriko_core::mask::apply_masks(
+            &mut px.rgba,
+            px.width,
+            px.height,
+            f64::from(px.width),
+            f64::from(px.height),
+            masks,
+        );
+        let src = self
+            .colour
+            .upload_srgb8(self.gpu, &px.rgba, px.width, px.height);
+        Ok(Some(Prepared {
+            tex: self.colour.linearise(self.gpu, &src),
+            natural: (px.width as f32, px.height as f32),
+            mask: None,
+        }))
+    }
+
     /// Prepare one layer's source at comp time `t` (None = contributes
     /// nothing); `visited` guards precomp cycles.
     fn prepare(
@@ -109,41 +154,20 @@ impl Renderer<'_> {
         let lt = t - layer.start_offset.0.to_f64();
         match &layer.kind {
             LayerKind::Footage { item, retime } => {
-                let Some(info) = self.items.get(item) else {
-                    return Ok(None);
-                };
                 // Retime maps local → source time; preview uses the same
                 // Retime::evaluate, so export matches preview (K-031).
                 let source_time = retime.as_ref().map(|r| r.evaluate(lt)).unwrap_or(lt);
-                let source_frame = ((source_time * info.fps).round().max(0.0) as usize)
-                    .min(info.frames.saturating_sub(1));
-                if !self.decoders.contains_key(item) {
-                    let index = kiriko_media::index::build_frame_index(&info.path)
-                        .map_err(|e| e.to_string())?;
-                    let dec = kiriko_media::VideoDecoder::open(&info.path, index)
-                        .map_err(|e| e.to_string())?;
-                    self.decoders.insert(*item, dec);
+                self.prepare_footage(*item, source_time, &layer.masks)
+            }
+            LayerKind::Sequence { clips } => {
+                // The clip under the playhead, decoded like footage; a comp
+                // clip or a gap contributes nothing (comp clips join later).
+                match kiriko_core::sequence::resolve(clips, lt) {
+                    Some((_id, kiriko_core::sequence::ClipSource::Footage(item), st)) => {
+                        self.prepare_footage(item, st, &layer.masks)
+                    }
+                    _ => Ok(None),
                 }
-                let dec = self.decoders.get_mut(item).ok_or("decoder missing")?;
-                let mut px = dec
-                    .frame_rgba(source_frame, None)
-                    .map_err(|e| e.to_string())?;
-                kiriko_core::mask::apply_masks(
-                    &mut px.rgba,
-                    px.width,
-                    px.height,
-                    f64::from(px.width),
-                    f64::from(px.height),
-                    &layer.masks,
-                );
-                let src = self
-                    .colour
-                    .upload_srgb8(self.gpu, &px.rgba, px.width, px.height);
-                Ok(Some(Prepared {
-                    tex: self.colour.linearise(self.gpu, &src),
-                    natural: (px.width as f32, px.height as f32),
-                    mask: None,
-                }))
             }
             LayerKind::Solid { def } => {
                 let Some(sd) = self.doc.solid(*def) else {

@@ -2509,14 +2509,18 @@ fn build_comp_draws(
     };
     let pixels_for = |layer: &kiriko_core::model::Layer| -> Option<LayerPixels> {
         let raw = match &layer.kind {
-            LayerKind::Footage { .. } => pixels_by_layer.get(&layer.id).map(|lp| {
-                (
-                    lp.rgba.clone(),
-                    lp.width,
-                    lp.height,
-                    (lp.width as f32, lp.height as f32),
-                )
-            }),
+            // Footage and Sequence footage clips both arrive decoded, keyed by
+            // the layer id (collect_comp_jobs pushes one job per layer/frame).
+            LayerKind::Footage { .. } | LayerKind::Sequence { .. } => {
+                pixels_by_layer.get(&layer.id).map(|lp| {
+                    (
+                        lp.rgba.clone(),
+                        lp.width,
+                        lp.height,
+                        (lp.width as f32, lp.height as f32),
+                    )
+                })
+            }
             LayerKind::Solid { def } => doc.solid(*def).filter(|_| in_span(layer)).map(|sd| {
                 let px = crate::export::solid_rgba(sd.colour);
                 let (tw, th) = if layer.masks.is_empty() {
@@ -2705,6 +2709,7 @@ fn mask_space(
             .map(|n| (f64::from(n.width), f64::from(n.height)))
             .unwrap_or((f64::from(comp.width), f64::from(comp.height))),
         kiriko_core::model::LayerKind::Camera { .. }
+        | kiriko_core::model::LayerKind::Sequence { .. }
         | kiriko_core::model::LayerKind::Text { .. } => {
             (f64::from(comp.width), f64::from(comp.height))
         }
@@ -3232,6 +3237,7 @@ impl Shell {
                 MenuAction::AddSolidLayer => self.app.add_solid_layer(),
                 MenuAction::AddTextLayer => self.app.add_text_layer(),
                 MenuAction::AddCameraLayer => self.app.add_camera_layer(),
+                MenuAction::AddSequenceLayer => self.app.add_sequence_layer(),
                 MenuAction::AddMaskRectangle => self.add_mask_to_selected(ShapeKind::Rectangle),
                 MenuAction::AddMaskEllipse => self.add_mask_to_selected(ShapeKind::Ellipse),
                 MenuAction::AddMaskStar => self.add_mask_to_selected(ShapeKind::Star),
@@ -3897,6 +3903,10 @@ impl Shell {
                     }
                     if ui.button("Add camera layer").clicked() {
                         self.app.add_camera_layer();
+                        ui.close_menu();
+                    }
+                    if ui.button("Add sequence layer").clicked() {
+                        self.app.add_sequence_layer();
                         ui.close_menu();
                     }
                     ui.separator();

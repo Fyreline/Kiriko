@@ -143,8 +143,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   an exact place on the row; clips never overlap and a gap shows through transparent. This
   file answers the one question the renderer asks — "which clip is under the playhead, and
   which moment of its source does that map to?" — and checks the no-overlap rule. Drawing
-  those clips (wiring this into layers) and cutting come next; the resolution logic is
-  here and tested first.
+  those clips is now wired: a Sequence layer (Composition → Add sequence layer — it starts
+  from the selected footage as one clip) renders whichever clip is under the playhead
+  through the same footage decode path as a plain footage layer, so its clips preview,
+  export, and cache like any other source. Cutting a clip, dragging more clips in, and
+  per-clip trimming are the next steps; the resolution and rendering are here first.
 - `crates/kiriko-core/src/store.rs` — **The document store**: applies ops, publishes
   snapshots, keeps the undo/redo stacks.
 - `crates/kiriko-project/src/lib.rs` — **`.kir` files.** A `.kir` is a zip containing
