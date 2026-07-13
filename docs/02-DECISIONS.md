@@ -382,3 +382,15 @@ for the property-row timeline restructure (07-UI-SPEC §5, K-070), from Mack (20
   graphs that property). Keyframe-interpolation glyphs (bezier/linear/hold) on each key are
   a later refinement; the near-term requirement is that keyframes are *shown where set*, on
   the property's row rather than the layer bar.
+
+**K-073 · DECIDED · v1 shell is a fixed native-panel layout, not a dock.** The Viewer is a
+bare, full-bleed central area with **no tab bar**; the Project/effects panel (left), Scopes
+(right) and Timeline (bottom) are resizable native panels around it. Chosen 2026-07-13 at
+Mack's insistence that the viewport carry no "top bit": egui_dock (0.16) draws a tab bar on
+every leaf and offers no per-leaf toggle, so the only way to give the Viewer a bare frame was
+to leave the docking system. Consequences: egui_dock is dropped as a dependency; drag-to-dock,
+tab rearrangement across regions, and floating panels are gone for now; the left panel keeps a
+small Project / Effect controls / Effects & presets tab switcher so nothing is lost. Pop-out
+returns later as real OS windows (egui viewports), a cleaner pop-out than dock floats. This
+supersedes the docking mandate in [07-UI-SPEC.md](07-UI-SPEC.md) §1 for v1, which now documents
+the eventual target. The `kiriko-ui` crate must keep the UI layer swappable regardless (K-012).

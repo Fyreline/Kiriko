@@ -6,54 +6,29 @@
 use crate::app_state::{AppState, ShapeKind, ToolMode};
 use crate::splash::{BootLine, Splash};
 use crate::theme::Theme;
-use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle};
 use kiriko_core::model::ProjectItem;
 use serde::{Deserialize, Serialize};
 
 /// The dockable panels. Names are glossary names (docs/01-GLOSSARY.md §7).
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Which view the left panel shows. The Viewer is the bare central area and
+/// the Timeline is the bottom panel (both frameless — Mack: the viewport must
+/// have no tab bar), so those are no longer tabs; only the left panel switches.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Panel {
+    #[default]
     Project,
-    Viewer,
-    Timeline,
     EffectControls,
     EffectsAndPresets,
-    Scopes,
-    GraphEditor,
 }
 
 impl Panel {
     fn title(&self) -> &'static str {
         match self {
             Panel::Project => "Project",
-            Panel::Viewer => "Viewer",
-            Panel::Timeline => "Timeline",
             Panel::EffectControls => "Effect controls",
             Panel::EffectsAndPresets => "Effects & presets",
-            Panel::Scopes => "Scopes",
-            Panel::GraphEditor => "Graph editor",
         }
     }
-}
-
-/// Build the default Edit workspace arrangement.
-pub fn default_layout() -> DockState<Panel> {
-    let mut state = DockState::new(vec![Panel::Viewer]);
-    let surface = state.main_surface_mut();
-    let [centre, _timeline] = surface.split_below(
-        NodeIndex::root(),
-        0.68,
-        // The graph editor is a mode of the Timeline (bottom-right toggle),
-        // not a separate tab (K-070).
-        vec![Panel::Timeline],
-    );
-    // Project and Effect controls share the top-left dock (the AE model):
-    // Project is front until an effect is added. Effects & Presets stays out
-    // of the default layout until a layer actually has effects (K-068 style).
-    let [centre, _left] =
-        surface.split_left(centre, 0.22, vec![Panel::Project, Panel::EffectControls]);
-    let [_centre, _right] = surface.split_right(centre, 0.80, vec![Panel::Scopes]);
-    state
 }
 
 /// A text field that mirrors a model value when idle and holds the user's
@@ -146,51 +121,17 @@ fn aspect_ratio_label(w: u32, h: u32) -> String {
     format!("{}:{}", w / g, h / g)
 }
 
-struct PanelViewer<'a> {
-    theme: &'a Theme,
-    app: &'a mut AppState,
-    preview_display: Option<(egui::TextureId, egui::Vec2)>,
-}
-
-impl egui_dock::TabViewer for PanelViewer<'_> {
-    type Tab = Panel;
-
-    fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
-        match tab {
-            // The Viewer and Timeline are the workspace itself, not one view
-            // among several — their tabs carry no label (the Timeline instead
-            // shows the open comp's name, so comps read as tabs).
-            Panel::Viewer => "".into(),
-            Panel::Timeline => self
-                .app
-                .selected_comp
-                .and_then(|id| self.app.store.snapshot().comp(id).map(|c| c.name.clone()))
-                .unwrap_or_else(|| "Timeline".into())
-                .into(),
-            _ => tab.title().into(),
-        }
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
-        match tab {
-            Panel::Viewer => viewer_panel(ui, self.theme, self.app, self.preview_display),
-            Panel::Project => project_panel(ui, self.theme, self.app),
-            Panel::Timeline => timeline_panel(ui, self.theme, self.app),
-            Panel::EffectControls => empty_hint(
-                ui,
-                self.theme,
-                "No layer selected",
-                "Select a layer to see its effect stack.",
-            ),
-            Panel::EffectsAndPresets => effects_panel(ui, self.theme),
-            Panel::GraphEditor => graph_editor_panel(ui, self.theme, self.app),
-            Panel::Scopes => empty_hint(
-                ui,
-                self.theme,
-                "Scopes",
-                "Waveform, vectorscope and histogram arrive with the render pipeline.",
-            ),
-        }
+/// Render the left panel's currently-selected view.
+fn left_panel_body(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState, tab: Panel) {
+    match tab {
+        Panel::Project => project_panel(ui, theme, app),
+        Panel::EffectControls => empty_hint(
+            ui,
+            theme,
+            "No layer selected",
+            "Select a layer to see its effect stack.",
+        ),
+        Panel::EffectsAndPresets => effects_panel(ui, theme),
     }
 }
 
@@ -3439,10 +3380,12 @@ impl GpuViewer {
     }
 }
 
-/// Persisted UI state (dock layout only; app state is runtime).
+/// Persisted UI state (which left-panel view is shown; app state is runtime).
 #[derive(Serialize, Deserialize)]
 pub struct Shell {
-    dock: DockState<Panel>,
+    /// The view shown in the left panel (Project / Effect controls / browser).
+    #[serde(default)]
+    left_tab: Panel,
     #[serde(skip, default)]
     theme: Theme,
     #[serde(skip, default)]
@@ -3484,7 +3427,7 @@ pub struct Shell {
 impl Default for Shell {
     fn default() -> Self {
         Self {
-            dock: default_layout(),
+            left_tab: Panel::Project,
             theme: Theme::dark(),
             app: AppState::default(),
             splash: None,
@@ -3618,7 +3561,7 @@ impl Shell {
                         self.app.open_comp_settings(id);
                     }
                 }
-                MenuAction::ResetWorkspace => self.dock = default_layout(),
+                MenuAction::ResetWorkspace => self.left_tab = Panel::Project,
             }
         }
     }
@@ -4357,7 +4300,7 @@ impl Shell {
                 });
                 ui.menu_button("Window", |ui| {
                     if ui.button("Reset workspace").clicked() {
-                        self.dock = default_layout();
+                        self.left_tab = Panel::Project;
                         ui.close_menu();
                     }
                 });
@@ -4496,30 +4439,65 @@ impl Shell {
         self.recovery_modal(ctx);
         self.comp_dialog_modal(ctx);
 
-        let mut style = DockStyle::from_egui(&ctx.style());
-        style.tab_bar.bg_fill = self.theme.surface_0;
-        style.tab_bar.hline_color = self.theme.hairline;
-
         let Shell {
-            dock,
+            left_tab,
             theme,
             app,
             preview_display,
             ..
         } = self;
-        DockArea::new(dock)
-            .style(style)
-            // No per-panel collapse/close-all twirls (Mack: remove everywhere).
-            .show_leaf_collapse_buttons(false)
-            .show_leaf_close_all_buttons(false)
-            .show(
-                ctx,
-                &mut PanelViewer {
+        let preview_display = *preview_display;
+        // Native panels, not a dock: the Viewer is a bare full-bleed central
+        // area with no tab bar (Mack: the viewport must have no top bit). The
+        // surrounding panels are resizable regions — flexible enough for now,
+        // pop-out arrives later via real OS windows.
+        let panel_frame = egui::Frame::default()
+            .fill(theme.surface_0)
+            .inner_margin(egui::Margin::same(6));
+
+        egui::SidePanel::left("left-panel")
+            .resizable(true)
+            .default_width(260.0)
+            .frame(panel_frame)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for tab in [
+                        Panel::Project,
+                        Panel::EffectControls,
+                        Panel::EffectsAndPresets,
+                    ] {
+                        if ui.selectable_label(*left_tab == tab, tab.title()).clicked() {
+                            *left_tab = tab;
+                        }
+                    }
+                });
+                ui.separator();
+                left_panel_body(ui, theme, app, *left_tab);
+            });
+
+        egui::SidePanel::right("right-panel")
+            .resizable(true)
+            .default_width(200.0)
+            .frame(panel_frame)
+            .show(ctx, |ui| {
+                empty_hint(
+                    ui,
                     theme,
-                    app,
-                    preview_display: *preview_display,
-                },
-            );
+                    "Scopes",
+                    "Waveform, vectorscope and histogram arrive with the render pipeline.",
+                );
+            });
+
+        egui::TopBottomPanel::bottom("timeline-panel")
+            .resizable(true)
+            .default_height(300.0)
+            .frame(panel_frame)
+            .show(ctx, |ui| timeline_panel(ui, theme, app));
+
+        // The Viewer: no frame margin, so the picture fills the whole area.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(theme.surface_0))
+            .show(ctx, |ui| viewer_panel(ui, theme, app, preview_display));
     }
 }
 

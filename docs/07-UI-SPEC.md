@@ -17,6 +17,13 @@ the interface is truly the user's.
 
 ## 1. Application shell and docking
 
+> **v1 status (K-073):** the full docking system below is the *eventual* target, not the
+> current shell. v1 ships a fixed native-panel layout — a bare, tab-bar-free Viewer as the
+> central area with resizable Project/effects (left), Scopes (right) and Timeline (bottom)
+> regions — because the Viewer must have no tab bar and no library gives a per-panel tab-bar
+> toggle. Drag-to-dock, floating panels and pop-out (via real OS windows) come later. The
+> rest of this section describes that target.
+
 ### 1.1 Frames, groups, tabs
 
 - The main window is divided into a tree of **frames**. Each frame holds one **panel group**;
