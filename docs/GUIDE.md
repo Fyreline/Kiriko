@@ -133,8 +133,10 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   (nearest, blend, optical flow) is a separate per-clip policy. **This is wired up for
   Footage layers now**: a Speed % box in a footage layer's twirl-down retimes it (50% =
   half speed, and so on), and the same Retime map feeds preview, export, and the cache
-  key — so a retimed clip previews, exports, and caches consistently. Sequence layers,
-  the graph-editor lenses, and cutting come next.
+  key — so a retimed clip previews, exports, and caches consistently. The Speed box is a
+  ramp: a start speed → an end speed with an ease (Linear/Slow/Fast/Smooth/Sharp), so a
+  clip can rush in and settle — the core montage gesture — not just play at one flat rate.
+  Sequence layers, the graph-editor lenses, and per-beat cutting come next.
 - `crates/kiriko-core/src/store.rs` — **The document store**: applies ops, publishes
   snapshots, keeps the undo/redo stacks.
 - `crates/kiriko-project/src/lib.rs` — **`.kir` files.** A `.kir` is a zip containing

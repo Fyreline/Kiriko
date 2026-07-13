@@ -289,23 +289,43 @@ impl Retime {
     /// simple "play this clip faster/slower" case the timeline speed control
     /// produces; the graph-editor lenses build richer stores later.
     pub fn constant_speed(duration: Rational, source_in: Rational, speed: Rational) -> Self {
+        Self::single_ramp(duration, source_in, speed, speed, Ease::Linear)
+    }
+
+    /// A single ramping segment over [0, `duration`]: speed eases from `v0`
+    /// to `v1` (1 = 100%) with the given `ease`. The whole-clip velocity ramp
+    /// — the montage gesture — before per-boundary editing arrives. `v0 == v1`
+    /// with `Ease::Linear` is exactly [`Self::constant_speed`].
+    pub fn single_ramp(
+        duration: Rational,
+        source_in: Rational,
+        v0: Rational,
+        v1: Rational,
+        ease: Ease,
+    ) -> Self {
         let mut r = Self {
             boundaries: vec![
                 Boundary::new(Rational::ZERO, source_in),
                 Boundary::new(duration, source_in),
             ],
-            segments: vec![RetimeSegment::Rate(RateSegment::new(
-                speed,
-                speed,
-                Ease::Linear,
-            ))],
-            allow_reverse: speed.is_negative(),
+            segments: vec![RetimeSegment::Rate(RateSegment::new(v0, v1, ease))],
+            allow_reverse: v0.is_negative() || v1.is_negative(),
             interpolation: Interpolation::default(),
             extra: serde_json::Map::new(),
         };
         // Fill the end boundary's source position exactly from the rate.
         let _ = r.recompute_boundaries();
         r
+    }
+
+    /// If this retime is a single ramping segment, its (start speed, end
+    /// speed, ease) — for the timeline speed control to display and edit.
+    /// None for multi-segment stores (which need the graph editor).
+    pub fn single_ramp_view(&self) -> Option<(f64, f64, Ease)> {
+        match self.segments.as_slice() {
+            [RetimeSegment::Rate(seg)] => Some((seg.v0.to_f64(), seg.v1.to_f64(), seg.ease)),
+            _ => None,
+        }
     }
 
     /// Structural sanity (docs/04-RETIMING.md §3 invariants): n + 1
@@ -645,6 +665,21 @@ mod tests {
         assert!((r.evaluate(2.0) - 3.0).abs() < 1e-9);
         assert!((r.evaluate(4.0) - 4.0).abs() < 1e-9);
         assert!((r.speed_at(1.0) - 0.5).abs() < 1e-9);
+        r.validate().unwrap();
+    }
+
+    #[test]
+    fn single_ramp_eases_speed_across_the_clip() {
+        // 100% → 300% over a 2 s clip, Linear ease: end source advance is
+        // d·[v0 + (v1−v0)·E(1)] = 2·[1 + 2·½] = 4, exactly.
+        let r = Retime::single_ramp(rat(2, 1), rat(0, 1), rat(1, 1), rat(3, 1), Ease::Linear);
+        assert_eq!(r.boundaries[1].s, rat(4, 1));
+        // Speed at the ends and middle.
+        assert!((r.speed_at(0.0) - 1.0).abs() < 1e-9);
+        assert!((r.speed_at(2.0) - 3.0).abs() < 1e-9);
+        assert!((r.speed_at(1.0) - 2.0).abs() < 1e-9); // Linear: 2× at midpoint
+                                                       // Monotone increasing source position.
+        assert!(r.evaluate(0.5) < r.evaluate(1.5));
         r.validate().unwrap();
     }
 

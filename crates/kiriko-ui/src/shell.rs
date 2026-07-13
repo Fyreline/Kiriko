@@ -1231,56 +1231,93 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                     });
                 }
                 if let kiriko_core::model::LayerKind::Footage { retime, .. } = &layer.kind {
+                    use kiriko_core::retime::Ease;
+                    // Current ramp: (start%, end%, ease). 100/100/Linear = none.
+                    let (v0, v1, ease) = retime
+                        .as_ref()
+                        .and_then(|r| r.single_ramp_view())
+                        .map(|(a, b, e)| (a * 100.0, b * 100.0, e))
+                        .unwrap_or((100.0, 100.0, Ease::Linear));
+                    let ease_name = |e: Ease| match e {
+                        Ease::Linear => "Linear",
+                        Ease::Slow => "Slow",
+                        Ease::Fast => "Fast",
+                        Ease::Smooth => "Smooth",
+                        Ease::Sharp => "Sharp",
+                    };
                     ui.indent(("speed", layer.id), |ui| {
+                        let mut new_ramp: Option<(f64, f64, Ease)> = None;
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new("Speed %")
                                     .small()
                                     .color(theme.text_muted),
                             );
-                            // Displayed speed: the map's rate (100% when none).
-                            let current = retime
-                                .as_ref()
-                                .map(|r| r.speed_at(0.0) * 100.0)
-                                .unwrap_or(100.0);
-                            let id = egui::Id::new(("speed_edit", layer.id));
-                            let mut value = ui.data(|d| d.get_temp::<f64>(id)).unwrap_or(current);
-                            let resp = ui.add(
-                                egui::DragValue::new(&mut value)
+                            let mut a = v0;
+                            let ra = ui.add(
+                                egui::DragValue::new(&mut a)
                                     .speed(1.0)
-                                    .range(-800.0..=800.0)
-                                    .suffix(" %"),
+                                    .range(-800.0..=800.0),
                             );
-                            if resp.dragged() || resp.has_focus() {
-                                ui.data_mut(|d| d.insert_temp(id, value));
+                            ui.label(egui::RichText::new("→").small().color(theme.text_muted));
+                            let mut b = v1;
+                            let rb = ui.add(
+                                egui::DragValue::new(&mut b)
+                                    .speed(1.0)
+                                    .range(-800.0..=800.0),
+                            );
+                            if (ra.drag_stopped()
+                                || ra.lost_focus()
+                                || rb.drag_stopped()
+                                || rb.lost_focus())
+                                && (a != v0 || b != v1)
+                            {
+                                new_ramp = Some((a, b, ease));
                             }
-                            if resp.drag_stopped() || resp.lost_focus() {
-                                if (value - current).abs() > f64::EPSILON {
-                                    // 100% (identity) stores no retime at all.
-                                    let retime = if (value - 100.0).abs() < f64::EPSILON {
-                                        None
-                                    } else {
-                                        let d = layer.out_point.0;
-                                        let speed = kiriko_core::Rational::from_f64_on_grid(
-                                            value / 100.0,
-                                            1000,
-                                        )
-                                        .unwrap_or(kiriko_core::Rational::ONE);
-                                        Some(kiriko_core::retime::Retime::constant_speed(
-                                            d,
-                                            kiriko_core::Rational::ZERO,
-                                            speed,
-                                        ))
-                                    };
-                                    pending = Some(kiriko_core::Op::SetLayerRetime {
-                                        comp: comp_id,
-                                        layer: layer.id,
-                                        retime,
-                                    });
-                                }
-                                ui.data_mut(|d| d.remove::<f64>(id));
+                            // Ease only matters for an actual ramp (a != b).
+                            if (v0 - v1).abs() > f64::EPSILON {
+                                bare_dropdown(ui, ease_name(ease), |ui| {
+                                    for e in [
+                                        Ease::Linear,
+                                        Ease::Slow,
+                                        Ease::Fast,
+                                        Ease::Smooth,
+                                        Ease::Sharp,
+                                    ] {
+                                        if ui.selectable_label(e == ease, ease_name(e)).clicked() {
+                                            new_ramp = Some((v0, v1, e));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
                             }
                         });
+                        if let Some((a, b, e)) = new_ramp {
+                            // 100→100 Linear is identity: store no map at all.
+                            let retime = if (a - 100.0).abs() < f64::EPSILON
+                                && (b - 100.0).abs() < f64::EPSILON
+                            {
+                                None
+                            } else {
+                                let d = layer.out_point.0;
+                                let r = |pct: f64| {
+                                    kiriko_core::Rational::from_f64_on_grid(pct / 100.0, 1000)
+                                        .unwrap_or(kiriko_core::Rational::ONE)
+                                };
+                                Some(kiriko_core::retime::Retime::single_ramp(
+                                    d,
+                                    kiriko_core::Rational::ZERO,
+                                    r(a),
+                                    r(b),
+                                    e,
+                                ))
+                            };
+                            pending = Some(kiriko_core::Op::SetLayerRetime {
+                                comp: comp_id,
+                                layer: layer.id,
+                                retime,
+                            });
+                        }
                     });
                 }
                 if let kiriko_core::model::LayerKind::Camera { zoom } = &layer.kind {
