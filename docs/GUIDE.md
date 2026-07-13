@@ -289,12 +289,14 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   resolution you've chosen (Full, Half, Auto…). The quick draft frames are shown but never
   saved into the frame cache, so the cache only ever holds full-quality frames, and the
   background pre-rendering pauses while you scrub so it doesn't compete for the disc and CPU.
-- **Dragging a transform value updates the picture live.** When you drag a value like Position
-  or Scale, the viewport follows your drag immediately, before the edit is written down. It can
-  do this cheaply because moving or scaling a layer doesn't change *which* frame of the footage
-  is shown — only where it sits — so Kiriko keeps the last decoded frame and simply re-arranges
-  it with your in-progress value each tick, no re-decoding. The moment you let go, the edit is
-  committed as a single undo step and the frame re-renders normally.
+- **Dragging a value — or a keyframe — updates the picture live.** When you drag a value like
+  Position or Scale, the viewport follows your drag immediately, before the edit is written
+  down. Dragging a keyframe in the graph editor does the same: the picture shows what the curve
+  now gives *at the current frame* as you move the key. It can do this cheaply because moving or
+  scaling a layer doesn't change *which* frame of the footage is shown — only where it sits — so
+  Kiriko keeps the last decoded frame and simply re-arranges it with your in-progress value each
+  tick, no re-decoding. The moment you let go, the edit is committed as a single undo step and
+  the frame re-renders normally.
 - **Idle time is spent pre-caching nearby frames.** When you stop on a frame and aren't
   playing or dragging, Kiriko quietly renders the frames around the playhead into the cache
   at your chosen resolution, so stepping or scrubbing to them is instant instead of waiting

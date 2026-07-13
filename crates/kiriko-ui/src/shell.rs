@@ -4302,45 +4302,68 @@ impl Shell {
                 self.last_doc_ptr = doc_ptr;
             }
 
-            // Live value-drag preview: while a transform value is being dragged,
-            // re-composite the retained frame with the provisional value patched
-            // in for this frame only — instant feedback with no re-decode, since
-            // a transform change never alters which footage frame a layer shows.
-            if let (Some((edit_layer, prop, value)), Some(comp_id)) =
-                (self.app.prop_edit, self.app.preview_comp)
-            {
+            // Live edit preview: while a transform value OR a graph keyframe is
+            // being dragged, re-composite the retained frame with the provisional
+            // value patched in for this frame only — instant feedback with no
+            // re-decode, since a transform change never alters which footage
+            // frame a layer shows.
+            if let Some(comp_id) = self.app.preview_comp {
                 if let (Some(gpu), Some(cf)) = (&mut self.gpu, &self.last_comp) {
                     if cf.comp == comp_id && cf.frame == self.app.preview_frame {
                         let doc = self.app.store.snapshot();
                         if let Some(comp) = doc.comp(comp_id) {
-                            let patched = patch_layer_prop(comp, edit_layer, prop, value);
                             let t_comp = cf.frame as f64 / comp.frame_rate.fps().max(1.0);
-                            let pixels_by_layer: std::collections::HashMap<_, _> =
-                                cf.layers.iter().map(|lp| (lp.layer, lp)).collect();
-                            let mut visited = vec![comp_id];
-                            let draws = build_comp_draws(
-                                &doc,
-                                &patched,
-                                t_comp,
-                                &pixels_by_layer,
-                                &mut visited,
-                            );
-                            let bg = comp.background.0;
-                            let background = [
-                                f64::from(bg[0]),
-                                f64::from(bg[1]),
-                                f64::from(bg[2]),
-                                f64::from(bg[3]),
-                            ];
-                            let pose = patched.camera_pose(t_comp);
-                            self.preview_display = Some(gpu.present_comp(
-                                pose,
-                                comp.width,
-                                comp.height,
-                                background,
-                                &draws,
-                            ));
-                            ctx.request_repaint();
+                            // A direct value drag gives (layer, prop, value)
+                            // outright; a graph keyframe drag gives the property's
+                            // provisional value at the playhead instead.
+                            let live = self.app.prop_edit.or_else(|| {
+                                let (idx, kt, kv) = self.app.graph_edit?;
+                                let prop = self.app.graph_prop?;
+                                let layer_id = self.app.selected_layer?;
+                                let layer = comp.layers.iter().find(|l| l.id == layer_id)?;
+                                let kiriko_core::anim::Animation::Keyframed(keys) =
+                                    &layer.transform.get(prop).animation
+                                else {
+                                    return None;
+                                };
+                                let mut keys = keys.clone();
+                                let k = keys.get_mut(idx)?;
+                                k.time = rational_at(kt.max(0.0));
+                                k.value = kv;
+                                keys.sort_by_key(|k| k.time);
+                                let lt = t_comp - layer.start_offset.0.to_f64();
+                                let value = kiriko_core::anim::evaluate(&keys, lt)?;
+                                Some((layer_id, prop, value))
+                            });
+                            if let Some((edit_layer, prop, value)) = live {
+                                let patched = patch_layer_prop(comp, edit_layer, prop, value);
+                                let pixels_by_layer: std::collections::HashMap<_, _> =
+                                    cf.layers.iter().map(|lp| (lp.layer, lp)).collect();
+                                let mut visited = vec![comp_id];
+                                let draws = build_comp_draws(
+                                    &doc,
+                                    &patched,
+                                    t_comp,
+                                    &pixels_by_layer,
+                                    &mut visited,
+                                );
+                                let bg = comp.background.0;
+                                let background = [
+                                    f64::from(bg[0]),
+                                    f64::from(bg[1]),
+                                    f64::from(bg[2]),
+                                    f64::from(bg[3]),
+                                ];
+                                let pose = patched.camera_pose(t_comp);
+                                self.preview_display = Some(gpu.present_comp(
+                                    pose,
+                                    comp.width,
+                                    comp.height,
+                                    background,
+                                    &draws,
+                                ));
+                                ctx.request_repaint();
+                            }
                         }
                     }
                 }
