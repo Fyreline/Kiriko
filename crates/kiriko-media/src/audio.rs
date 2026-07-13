@@ -59,9 +59,9 @@ pub fn decode_all(path: &Path, target_rate: u32) -> Result<AudioBuffer, MediaErr
     swr.init().map_err(|e| MediaError::Ffmpeg(e.to_string()))?;
 
     let mut samples: Vec<f32> = Vec::new();
-    let mut push_frame = |swr: &mut SwrContext,
-                          frame: Option<&rsmpeg::avutil::AVFrame>,
-                          samples: &mut Vec<f32>|
+    let push_frame = |swr: &mut SwrContext,
+                      frame: Option<&rsmpeg::avutil::AVFrame>,
+                      samples: &mut Vec<f32>|
      -> Result<(), MediaError> {
         let in_count = frame.map(|f| f.nb_samples).unwrap_or(0);
         let max_out = swr.get_out_samples(in_count);
