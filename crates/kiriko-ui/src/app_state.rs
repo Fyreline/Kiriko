@@ -390,6 +390,8 @@ pub struct AppState {
     /// In-flight property drag (layer, property, provisional value): commits
     /// once on release so a drag is ONE undo step, not hundreds.
     pub prop_edit: Option<(Uuid, kiriko_core::model::TransformProp, f64)>,
+    /// In-flight bar-edge trim: (layer, trimming_out_edge, provisional seconds).
+    pub trim_edit: Option<(Uuid, bool, f64)>,
     /// Comp shown in the Viewer (takes precedence over preview_item).
     pub preview_comp: Option<Uuid>,
     /// Wall-clock comp playback v0 (the frame scheduler replaces this):
@@ -433,6 +435,7 @@ impl Default for AppState {
             #[cfg(feature = "media")]
             audio_tx,
             prop_edit: None,
+            trim_edit: None,
             preview_comp: None,
             comp_playback: None,
             preview_item: None,
