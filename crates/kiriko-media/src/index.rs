@@ -132,14 +132,15 @@ pub fn build_frame_index(path: &Path) -> Result<FrameIndex, MediaError> {
     })
 }
 
+/// Test fixtures shared by index and decode tests.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use super::*;
+pub(crate) mod tests_support {
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     /// Locate an ffmpeg CLI for fixture generation (any version encodes fine).
-    fn ffmpeg_bin() -> Option<&'static str> {
+    pub fn ffmpeg_bin() -> Option<&'static str> {
         [
             "ffmpeg",
             "/opt/homebrew/opt/ffmpeg@7/bin/ffmpeg",
@@ -157,7 +158,7 @@ mod tests {
     }
 
     /// 2 s of 60 fps test pattern, H.264, GOP 30 → 120 frames, keys at 0/30/60/90.
-    fn fixture(dir: &Path) -> Option<PathBuf> {
+    pub fn fixture(dir: &Path) -> Option<PathBuf> {
         let bin = ffmpeg_bin()?;
         let out = dir.join("fixture.mp4");
         let status = Command::new(bin)
@@ -181,6 +182,13 @@ mod tests {
             .ok()?;
         status.success().then_some(out)
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::tests_support::fixture;
+    use super::*;
 
     #[test]
     fn probe_and_index_agree_with_the_fixture() {
