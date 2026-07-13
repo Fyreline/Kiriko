@@ -27,6 +27,8 @@ pub enum Blend {
     Normal,
     Add,
     Multiply,
+    /// Shader-computed via the dst snapshot (perceptual — 06 §blend domains).
+    Screen,
 }
 
 /// A comp-space matte gating a layer (docs/06-RENDER-PIPELINE.md mattes).
@@ -86,10 +88,13 @@ pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
     pipeline_add: wgpu::RenderPipeline,
     pipeline_multiply: wgpu::RenderPipeline,
+    pipeline_screen: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// Bound at binding 3 when a layer has no matte.
     white: wgpu::Texture,
+    /// Bound at binding 4 when a layer needs no dst snapshot.
+    black: wgpu::Texture,
 }
 
 impl Compositor {
@@ -130,6 +135,16 @@ impl Compositor {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -206,6 +221,35 @@ impl Compositor {
         let pipeline = make_pipeline(blend, "composite-normal");
         let pipeline_add = make_pipeline(blend_add, "composite-add");
         let pipeline_multiply = make_pipeline(blend_multiply, "composite-multiply");
+        // Screen: no fixed-function blending — the fragment composites itself
+        // from the dst snapshot and writes the final value.
+        let pipeline_screen = ctx
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("composite-screen"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_layer"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_layer_screen"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: WORKING_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
         let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite-linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -241,13 +285,29 @@ impl Compositor {
                 depth_or_array_layers: 1,
             },
         );
+        let black = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dst-none"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::WORKING_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
         Self {
             pipeline,
             pipeline_add,
             pipeline_multiply,
+            pipeline_screen,
             layout,
             sampler,
             white,
+            black,
         }
     }
 
@@ -272,10 +332,31 @@ impl Compositor {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: WORKING_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = target.create_view(&Default::default());
+        // Snapshot of the accumulation for shader-computed blends: one
+        // per-frame scratch, copied into just before each such layer draws.
+        let needs_snapshot = layers.iter().any(|l| matches!(l.blend, Blend::Screen));
+        let snapshot = needs_snapshot.then(|| {
+            ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("comp-dst-snapshot"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: WORKING_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
 
         // Per-layer bind groups first (uniforms are tiny; pooling later).
         let binds: Vec<wgpu::BindGroup> = layers
@@ -328,6 +409,17 @@ impl Compositor {
                                     .create_view(&Default::default()),
                             ),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(
+                                &if matches!(layer.blend, Blend::Screen) {
+                                    snapshot.as_ref().unwrap_or(&self.black)
+                                } else {
+                                    &self.black
+                                }
+                                .create_view(&Default::default()),
+                            ),
+                        },
                     ],
                 })
             })
@@ -338,33 +430,97 @@ impl Compositor {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("composite"),
             });
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("composite"),
+
+        // Draw in pass segments: shader-computed blends need the accumulated
+        // target copied out first (a copy cannot happen inside a pass).
+        let clear = wgpu::LoadOp::Clear(wgpu::Color {
+            r: background[0],
+            g: background[1],
+            b: background[2],
+            a: background[3],
+        });
+        let mut first_pass = true;
+        let mut i = 0usize;
+        while i < layers.len() {
+            if matches!(layers[i].blend, Blend::Screen) {
+                if let Some(snap) = &snapshot {
+                    if first_pass {
+                        // Materialise the background before snapshotting.
+                        let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("composite-clear"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: clear,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            ..Default::default()
+                        });
+                        first_pass = false;
+                    }
+                    encoder.copy_texture_to_texture(
+                        target.as_image_copy(),
+                        snap.as_image_copy(),
+                        wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            }
+            // One pass: this layer plus any following fixed-function layers.
+            let mut end = i + 1;
+            while end < layers.len() && !matches!(layers[end].blend, Blend::Screen) {
+                end += 1;
+            }
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("composite"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: if first_pass {
+                                clear
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                first_pass = false;
+                for idx in i..end {
+                    rpass.set_pipeline(match layers[idx].blend {
+                        Blend::Normal => &self.pipeline,
+                        Blend::Add => &self.pipeline_add,
+                        Blend::Multiply => &self.pipeline_multiply,
+                        Blend::Screen => &self.pipeline_screen,
+                    });
+                    rpass.set_bind_group(0, &binds[idx], &[]);
+                    rpass.draw(0..6, 0..1);
+                }
+            }
+            i = end;
+        }
+        if first_pass {
+            // No layers at all: still clear to the background.
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("composite-clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: background[0],
-                            g: background[1],
-                            b: background[2],
-                            a: background[3],
-                        }),
+                        load: clear,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
-            for (bind, layer) in binds.iter().zip(layers) {
-                rpass.set_pipeline(match layer.blend {
-                    Blend::Normal => &self.pipeline,
-                    Blend::Add => &self.pipeline_add,
-                    Blend::Multiply => &self.pipeline_multiply,
-                });
-                rpass.set_bind_group(0, bind, &[]);
-                rpass.draw(0..6, 0..1);
-            }
         }
         ctx.queue.submit([encoder.finish()]);
         target
@@ -548,6 +704,47 @@ mod tests {
             red_at(6, 4) > 250,
             "inverted: right now in {}",
             red_at(6, 4)
+        );
+    }
+
+    /// Screen is computed perceptually: grey over grey must land at the
+    /// encoded-space screen result (~192), not the linear one.
+    #[test]
+    fn screen_blend_matches_the_perceptual_formula() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let colour = ColourEngine::new(&ctx);
+        let compositor = Compositor::new(&ctx);
+        let grey = solid_linear(&ctx, &colour, [128, 128, 128, 255], 4, 4);
+        let g_lin = srgb_decode(128.0 / 255.0);
+        let shown = render_for_display(
+            &ctx,
+            &colour,
+            &compositor,
+            4,
+            4,
+            [g_lin, g_lin, g_lin, 1.0],
+            &[CompositeLayer {
+                texture: &grey,
+                size: (4.0, 4.0),
+                position: (0.0, 0.0),
+                anchor: (0.0, 0.0),
+                scale: (100.0, 100.0),
+                rotation_deg: 0.0,
+                opacity: 100.0,
+                matte: None,
+                blend: Blend::Screen,
+            }],
+        );
+        let out = colour.readback8(&ctx, &shown).unwrap()[0];
+        // encoded screen: 1-(1-0.502)^2 = 0.752 → byte ≈ 192
+        let s = 128.0 / 255.0;
+        let expect = ((1.0 - (1.0 - s) * (1.0 - s)) * 255.0_f64).round() as i16;
+        assert!(
+            (i16::from(out) - expect).abs() <= 2,
+            "screen {out} vs {expect}"
         );
     }
 

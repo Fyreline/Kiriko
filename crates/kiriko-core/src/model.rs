@@ -201,6 +201,7 @@ pub enum BlendMode {
     Normal,
     Add,
     Multiply,
+    Screen,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

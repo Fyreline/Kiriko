@@ -587,12 +587,18 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                     BlendMode::Normal => "Normal",
                     BlendMode::Add => "Add",
                     BlendMode::Multiply => "Multiply",
+                    BlendMode::Screen => "Screen",
                 };
                 egui::ComboBox::from_id_salt(("blend", layer.id))
                     .selected_text(blend_name(layer.blend))
                     .width(90.0)
                     .show_ui(ui, |ui| {
-                        for mode in [BlendMode::Normal, BlendMode::Add, BlendMode::Multiply] {
+                        for mode in [
+                            BlendMode::Normal,
+                            BlendMode::Add,
+                            BlendMode::Multiply,
+                            BlendMode::Screen,
+                        ] {
                             if ui
                                 .selectable_label(layer.blend == mode, blend_name(mode))
                                 .clicked()
@@ -1212,6 +1218,7 @@ fn blend_of(b: kiriko_core::model::BlendMode) -> kiriko_gpu::Blend {
         kiriko_core::model::BlendMode::Normal => kiriko_gpu::Blend::Normal,
         kiriko_core::model::BlendMode::Add => kiriko_gpu::Blend::Add,
         kiriko_core::model::BlendMode::Multiply => kiriko_gpu::Blend::Multiply,
+        kiriko_core::model::BlendMode::Screen => kiriko_gpu::Blend::Screen,
     }
 }
 

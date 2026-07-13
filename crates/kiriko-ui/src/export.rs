@@ -270,6 +270,7 @@ fn run(
                     kiriko_core::model::BlendMode::Normal => kiriko_gpu::Blend::Normal,
                     kiriko_core::model::BlendMode::Add => kiriko_gpu::Blend::Add,
                     kiriko_core::model::BlendMode::Multiply => kiriko_gpu::Blend::Multiply,
+                    kiriko_core::model::BlendMode::Screen => kiriko_gpu::Blend::Screen,
                 },
             });
         }
