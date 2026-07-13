@@ -571,6 +571,11 @@ impl AppState {
             )
             .pick_files();
         let Some(files) = picked else { return };
+        self.import_paths(files);
+    }
+
+    /// Import media files (dialogue or drag-and-drop onto the window).
+    pub fn import_paths(&mut self, files: Vec<PathBuf>) {
         let base = self.store.snapshot().items.len();
         for (i, file) in files.into_iter().enumerate() {
             let name = file
@@ -596,6 +601,62 @@ impl AppState {
             #[cfg(feature = "media")]
             self.media.spawn_probe(probe_target.0, probe_target.1);
         }
+    }
+
+    /// Add a footage item as a new top layer of the target comp
+    /// (docs/16-ROADMAP.md phase 1: comps become buildable by hand).
+    pub fn add_footage_to_comp(&mut self, item_id: Uuid) {
+        use kiriko_core::model::{Layer, LayerKind, Switches, TransformGroup};
+        use kiriko_core::time::CompTime;
+        let Some(comp_id) = self.preview_comp.or(self.selected_comp) else {
+            self.error = Some("select a composition first".into());
+            return;
+        };
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let Some(ProjectItem::Footage(f)) = doc.item(item_id) else {
+            return;
+        };
+
+        // Span: media duration when known (frame-exact via the comp grid),
+        // else the full comp.
+        let comp_dur = comp.duration.0;
+        #[cfg(feature = "media")]
+        let out = match self.media.map.get(&item_id) {
+            Some(media::MediaStatus::Ready { probe, .. }) => {
+                let frames = (probe.duration_seconds * comp.frame_rate.fps()).round() as i64;
+                comp.frame_rate
+                    .time_of_frame(frames.max(1))
+                    .map(|t| if t.0 < comp_dur { t.0 } else { comp_dur })
+                    .unwrap_or(comp_dur)
+            }
+            _ => comp_dur,
+        };
+        #[cfg(not(feature = "media"))]
+        let out = comp_dur;
+
+        let layer = Layer {
+            id: Uuid::now_v7(),
+            name: f.name.clone(),
+            kind: LayerKind::Footage { item: item_id },
+            in_point: CompTime(Rational::ZERO),
+            out_point: CompTime(out),
+            start_offset: CompTime(Rational::ZERO),
+            transform: TransformGroup::default(),
+            matte: None,
+            switches: Switches::default(),
+            extra: serde_json::Map::new(),
+        };
+        self.commit(Op::AddLayer {
+            comp: comp_id,
+            index: 0,
+            layer: Box::new(layer),
+        });
+        self.preview_comp = Some(comp_id);
+        #[cfg(feature = "media")]
+        self.refresh_preview();
     }
 
     pub fn new_composition(&mut self) {

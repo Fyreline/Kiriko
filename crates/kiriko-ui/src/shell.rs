@@ -204,6 +204,7 @@ fn project_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     }
     ui.add_space(4.0);
     let mut select = None;
+    let mut add_to_comp: Option<uuid::Uuid> = None;
     for item in &doc.items {
         let (kind, colour) = match item {
             ProjectItem::Footage(_) => ("footage", theme.text_muted),
@@ -244,6 +245,18 @@ fn project_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                 }
                 _ => {}
             }
+        }
+        if let ProjectItem::Footage(_) = item {
+            let target = app.preview_comp.or(app.selected_comp);
+            ui.indent(("addto", item.id()), |ui| {
+                if ui
+                    .add_enabled(target.is_some(), egui::Button::new("Add to comp").small())
+                    .on_hover_text("Add as the top layer of the selected composition")
+                    .clicked()
+                {
+                    add_to_comp = Some(item.id());
+                }
+            });
         }
         #[cfg(feature = "media")]
         if let ProjectItem::Footage(_) = item {
@@ -301,6 +314,9 @@ fn project_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     }
     if let Some(id) = select {
         app.selected_comp = Some(id);
+    }
+    if let Some(id) = add_to_comp {
+        app.add_footage_to_comp(id);
     }
 }
 
@@ -986,6 +1002,16 @@ impl Shell {
             return;
         }
         self.app.autosave_tick();
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.app.import_paths(dropped);
+        }
         #[cfg(feature = "media")]
         {
             self.app.poll_audio();
