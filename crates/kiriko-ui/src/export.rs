@@ -44,7 +44,6 @@ pub struct ItemInfo {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn start(
     doc: Arc<Document>,
     comp_id: Uuid,
