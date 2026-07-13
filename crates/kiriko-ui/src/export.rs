@@ -144,12 +144,21 @@ fn run(
                 LayerKind::Footage { item } => item,
                 LayerKind::Solid { colour } => {
                     let px = solid_rgba(*colour);
+                    let mut rgba = px_tile(&px, comp.width, comp.height);
+                    kiriko_core::mask::apply_masks(
+                        &mut rgba,
+                        comp.width,
+                        comp.height,
+                        f64::from(comp.width),
+                        f64::from(comp.height),
+                        &l.masks,
+                    );
                     pixels.insert(
                         l.id,
                         kiriko_media::DecodedFrame {
                             width: comp.width,
                             height: comp.height,
-                            rgba: px_tile(&px, comp.width, comp.height),
+                            rgba,
                         },
                     );
                     continue;
@@ -169,9 +178,17 @@ fn run(
                 decoders.insert(*item, dec);
             }
             let dec = decoders.get_mut(item).ok_or("decoder missing")?;
-            let px = dec
+            let mut px = dec
                 .frame_rgba(source_frame, None)
                 .map_err(|e| e.to_string())?;
+            kiriko_core::mask::apply_masks(
+                &mut px.rgba,
+                px.width,
+                px.height,
+                f64::from(px.width),
+                f64::from(px.height),
+                &l.masks,
+            );
             pixels.insert(l.id, px);
         }
 

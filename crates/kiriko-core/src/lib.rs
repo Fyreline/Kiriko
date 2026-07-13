@@ -3,6 +3,7 @@
 //! (docs/05-ARCHITECTURE.md dependency rules).
 
 pub mod anim;
+pub mod mask;
 pub mod model;
 pub mod ops;
 pub mod store;

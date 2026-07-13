@@ -223,6 +223,10 @@ pub struct Layer {
     pub matte: Option<MatteRef>,
     #[serde(default)]
     pub blend: BlendMode,
+    /// Masks gate the layer's alpha before effects/transform
+    /// (docs/06-RENDER-PIPELINE.md render order).
+    #[serde(default)]
+    pub masks: Vec<crate::mask::Mask>,
     pub switches: Switches,
     /// Unknown fields from newer Kiriko versions, preserved on load/save
     /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).

@@ -718,6 +718,7 @@ impl AppState {
             transform: TransformGroup::default(),
             matte: None,
             blend: Default::default(),
+            masks: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -756,6 +757,7 @@ impl AppState {
             transform: TransformGroup::default(),
             matte: None,
             blend: Default::default(),
+            masks: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };

@@ -59,6 +59,13 @@ pub enum Op {
         layer: Uuid,
         name: String,
     },
+    /// Replace a layer's whole mask list (coarse + exactly invertible, like
+    /// SetTransformProperty; per-vertex ops arrive with the pen tool).
+    SetLayerMasks {
+        comp: Uuid,
+        layer: Uuid,
+        masks: Vec<crate::mask::Mask>,
+    },
     SetWorkArea {
         comp: Uuid,
         work_area: Option<(CompTime, CompTime)>,
@@ -171,6 +178,20 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
             l.out_point = *out_point;
             l.start_offset = *start_offset;
             Ok(inverse)
+        }
+        Op::SetLayerMasks { comp, layer, masks } => {
+            let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
+            let l = c
+                .layers
+                .iter_mut()
+                .find(|l| l.id == *layer)
+                .ok_or(OpError::UnknownLayer)?;
+            let previous = std::mem::replace(&mut l.masks, masks.clone());
+            Ok(Op::SetLayerMasks {
+                comp: *comp,
+                layer: *layer,
+                masks: previous,
+            })
         }
         Op::SetWorkArea { comp, work_area } => {
             if let Some((a, b)) = work_area {

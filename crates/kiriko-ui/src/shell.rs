@@ -613,6 +613,63 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                         }
                     });
             });
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Masks").small().color(theme.text_muted));
+                if ui.small_button("+ Rect").clicked() {
+                    let mut masks = layer.masks.clone();
+                    let (w, h) = mask_space(layer, app, comp);
+                    masks.push(kiriko_core::mask::Mask::rectangle(
+                        w * 0.25,
+                        h * 0.25,
+                        w * 0.5,
+                        h * 0.5,
+                    ));
+                    pending = Some(kiriko_core::Op::SetLayerMasks {
+                        comp: comp_id,
+                        layer: layer.id,
+                        masks,
+                    });
+                }
+                if ui.small_button("+ Ellipse").clicked() {
+                    let mut masks = layer.masks.clone();
+                    let (w, h) = mask_space(layer, app, comp);
+                    masks.push(kiriko_core::mask::Mask::ellipse(
+                        w * 0.5,
+                        h * 0.5,
+                        w * 0.3,
+                        h * 0.3,
+                    ));
+                    pending = Some(kiriko_core::Op::SetLayerMasks {
+                        comp: comp_id,
+                        layer: layer.id,
+                        masks,
+                    });
+                }
+                for (mi, mask) in layer.masks.iter().enumerate() {
+                    let mut masks = layer.masks.clone();
+                    if ui
+                        .selectable_label(
+                            mask.inverted,
+                            egui::RichText::new(format!("{} inv", mask.name)).small(),
+                        )
+                        .clicked()
+                    {
+                        masks[mi].inverted = !masks[mi].inverted;
+                        pending = Some(kiriko_core::Op::SetLayerMasks {
+                            comp: comp_id,
+                            layer: layer.id,
+                            masks,
+                        });
+                    } else if ui.small_button("×").on_hover_text("Remove mask").clicked() {
+                        masks.remove(mi);
+                        pending = Some(kiriko_core::Op::SetLayerMasks {
+                            comp: comp_id,
+                            layer: layer.id,
+                            masks,
+                        });
+                    }
+                }
+            });
         });
         ui.indent(("transform", layer.id), |ui| {
             ui.collapsing(
@@ -1209,6 +1266,32 @@ fn graph_editor_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
             prop: current,
             animation,
         });
+    }
+}
+
+/// The layer's natural pixel space (mask coordinates live here).
+fn mask_space(
+    layer: &kiriko_core::model::Layer,
+    app: &AppState,
+    comp: &kiriko_core::model::Composition,
+) -> (f64, f64) {
+    match &layer.kind {
+        kiriko_core::model::LayerKind::Solid { .. } => {
+            (f64::from(comp.width), f64::from(comp.height))
+        }
+        #[cfg(feature = "media")]
+        kiriko_core::model::LayerKind::Footage { item } => match app.media.map.get(item) {
+            Some(crate::app_state::media::MediaStatus::Ready { probe, .. }) => probe
+                .video
+                .as_ref()
+                .map(|v| (f64::from(v.width), f64::from(v.height)))
+                .unwrap_or((f64::from(comp.width), f64::from(comp.height))),
+            _ => (f64::from(comp.width), f64::from(comp.height)),
+        },
+        #[cfg(not(feature = "media"))]
+        kiriko_core::model::LayerKind::Footage { .. } => {
+            (f64::from(comp.width), f64::from(comp.height))
+        }
     }
 }
 
@@ -1876,7 +1959,7 @@ impl Shell {
                             let t_now = cf.frame as f64 / comp.frame_rate.fps().max(1.0);
                             let pixels_for =
                                 |layer: &kiriko_core::model::Layer| -> Option<LayerPixels> {
-                                    match &layer.kind {
+                                    let raw = match &layer.kind {
                                         kiriko_core::model::LayerKind::Footage { .. } => {
                                             pixels_by_layer.get(&layer.id).map(|lp| {
                                                 (
@@ -1891,16 +1974,34 @@ impl Shell {
                                             let in_span = t_now >= layer.in_point.0.to_f64()
                                                 && t_now < layer.out_point.0.to_f64();
                                             in_span.then(|| {
+                                                // Masked solids rasterise at comp
+                                                // res; plain ones stay tiny tiles.
                                                 let px = crate::export::solid_rgba(*colour);
+                                                let (tw, th) = if layer.masks.is_empty() {
+                                                    (8, 8)
+                                                } else {
+                                                    (comp.width, comp.height)
+                                                };
                                                 (
-                                                    crate::export::px_tile(&px, 8, 8),
-                                                    8,
-                                                    8,
+                                                    crate::export::px_tile(&px, tw, th),
+                                                    tw,
+                                                    th,
                                                     (comp.width as f32, comp.height as f32),
                                                 )
                                             })
                                         }
-                                    }
+                                    };
+                                    raw.map(|(mut rgba, w, h, natural)| {
+                                        kiriko_core::mask::apply_masks(
+                                            &mut rgba,
+                                            w,
+                                            h,
+                                            f64::from(natural.0),
+                                            f64::from(natural.1),
+                                            &layer.masks,
+                                        );
+                                        (rgba, w, h, natural)
+                                    })
                                 };
                             let mut draws: Vec<CompLayerDraw> = Vec::new();
                             for layer in comp.layers.iter().rev() {
