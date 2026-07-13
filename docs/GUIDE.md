@@ -123,6 +123,14 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   That solver quality is exactly what makes handles feel right in a graph editor at the
   extremes (AE's 100% influence "spike" case is a test here). Property tests fire
   thousands of random curves at it per CI run.
+- `crates/kiriko-core/src/retime.rs` — **the Retime maths.** One store per clip answers
+  "when the clip's clock reads t, which moment of the source shows?". Speed ramps,
+  freezes and slow motion are all segments of that one curve, and the editor's speed
+  graph and value graph are two views of the same store — never two systems. Every
+  segment boundary keeps its source position as an exact fraction, so cutting and
+  re-editing a ramp never drifts: a frame synced to a beat stays on the beat. The map
+  only chooses *which* source moment shows; how in-between moments become pixels
+  (nearest, blend, optical flow) is a separate per-clip policy.
 - `crates/kiriko-core/src/store.rs` — **The document store**: applies ops, publishes
   snapshots, keeps the undo/redo stacks.
 - `crates/kiriko-project/src/lib.rs` — **`.kir` files.** A `.kir` is a zip containing

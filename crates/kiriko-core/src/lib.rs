@@ -6,6 +6,7 @@ pub mod anim;
 pub mod mask;
 pub mod model;
 pub mod ops;
+pub mod retime;
 pub mod store;
 pub mod time;
 
