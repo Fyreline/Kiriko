@@ -950,63 +950,14 @@ impl AppState {
         self.preview_frame = self.preview_frame.min(frames.saturating_sub(1));
         let t = self.preview_frame as f64 / comp.frame_rate.fps();
 
-        // Visible layers plus any layers they reference as mattes (a matte
-        // source decodes even when its own visibility is off).
-        let visible: Vec<&kiriko_core::model::Layer> = comp
-            .layers
-            .iter()
-            .filter(|l| {
-                l.switches.visible && t >= l.in_point.0.to_f64() && t < l.out_point.0.to_f64()
-            })
-            .collect();
-        let mut wanted: Vec<Uuid> = visible.iter().map(|l| l.id).collect();
-        for l in &visible {
-            if let Some(m) = &l.matte {
-                if !wanted.contains(&m.layer) {
-                    wanted.push(m.layer);
-                }
-            }
-        }
+        // Recursive job collection: visible layers, their matte sources, and
+        // everything nested comps need at their mapped times (cycle-guarded).
         let mut jobs = Vec::new();
-        for layer in &comp.layers {
-            if !wanted.contains(&layer.id) {
-                continue;
-            }
-            if t < layer.in_point.0.to_f64() || t >= layer.out_point.0.to_f64() {
-                continue;
-            }
-            let item = match &layer.kind {
-                LayerKind::Footage { item } => item,
-                LayerKind::Solid { .. } => continue, // no decode: drawn directly
-                // Stage 1: nested comps render in the follow-up (recursive jobs).
-                LayerKind::Precomp { .. } => continue,
-            };
-            let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
-                continue;
-            };
-            let Some(media::MediaStatus::Ready {
-                probe,
-                frames: src_frames,
-                ..
-            }) = self.media.map.get(item)
-            else {
-                continue; // not probed yet; retried once Ready
-            };
-            let Some(video) = probe.video.as_ref() else {
-                continue;
-            };
-            let lt = t - layer.start_offset.0.to_f64();
-            let source_frame =
-                ((lt * video.fps()).round().max(0.0) as usize).min(src_frames.saturating_sub(1));
-            let target = self.target_width_for(video.width);
-            jobs.push(preview::CompJob {
-                layer: layer.id,
-                item: *item,
-                path: PathBuf::from(&f.media.absolute_path),
-                source_frame,
-                target_width: target,
-            });
-        }
+        let mut visited = vec![comp_id];
+        self.collect_comp_jobs(&doc, comp, t, &mut jobs, &mut visited);
+        let _ = LayerKind::Footage {
+            item: Uuid::now_v7(),
+        }; // keep the import used in both cfg modes
         self.preview_engine
             .request_comp(comp_id, self.preview_frame, jobs);
     }
@@ -1021,6 +972,78 @@ impl AppState {
             (w < natural_w).then_some(w.max(16))
         } else {
             (self.preview_divisor > 1).then(|| natural_w / self.preview_divisor)
+        }
+    }
+
+    /// Recursively collect decode jobs for a comp at time `t`
+    /// (docs/06-RENDER-PIPELINE.md: Precomp evaluation).
+    #[cfg(feature = "media")]
+    fn collect_comp_jobs(
+        &self,
+        doc: &Document,
+        comp: &Composition,
+        t: f64,
+        jobs: &mut Vec<preview::CompJob>,
+        visited: &mut Vec<Uuid>,
+    ) {
+        use kiriko_core::model::LayerKind;
+        let in_span = |l: &kiriko_core::model::Layer| {
+            t >= l.in_point.0.to_f64() && t < l.out_point.0.to_f64()
+        };
+        let mut wanted: Vec<Uuid> = Vec::new();
+        for l in &comp.layers {
+            if l.switches.visible && in_span(l) {
+                wanted.push(l.id);
+                if let Some(m) = &l.matte {
+                    if !wanted.contains(&m.layer) {
+                        wanted.push(m.layer);
+                    }
+                }
+            }
+        }
+        for layer in &comp.layers {
+            if !wanted.contains(&layer.id) || !in_span(layer) {
+                continue;
+            }
+            let lt = t - layer.start_offset.0.to_f64();
+            match &layer.kind {
+                LayerKind::Solid { .. } => {}
+                LayerKind::Precomp { comp: nested_id } => {
+                    if visited.contains(nested_id) {
+                        continue; // cycle guard
+                    }
+                    if let Some(nested) = doc.comp(*nested_id) {
+                        visited.push(*nested_id);
+                        self.collect_comp_jobs(doc, nested, lt, jobs, visited);
+                        visited.pop();
+                    }
+                }
+                LayerKind::Footage { item } => {
+                    let Some(ProjectItem::Footage(f)) = doc.item(*item) else {
+                        continue;
+                    };
+                    let Some(media::MediaStatus::Ready {
+                        probe,
+                        frames: src_frames,
+                        ..
+                    }) = self.media.map.get(item)
+                    else {
+                        continue; // not probed yet; retried once Ready
+                    };
+                    let Some(video) = probe.video.as_ref() else {
+                        continue;
+                    };
+                    let source_frame = ((lt * video.fps()).round().max(0.0) as usize)
+                        .min(src_frames.saturating_sub(1));
+                    jobs.push(preview::CompJob {
+                        layer: layer.id,
+                        item: *item,
+                        path: PathBuf::from(&f.media.absolute_path),
+                        source_frame,
+                        target_width: self.target_width_for(video.width),
+                    });
+                }
+            }
         }
     }
 

@@ -109,8 +109,8 @@ impl Renderer<'_> {
                 let Some(info) = self.items.get(item) else {
                     return Ok(None);
                 };
-                let source_frame = ((lt * info.fps).round().max(0.0) as usize)
-                    .min(info.frames.saturating_sub(1));
+                let source_frame =
+                    ((lt * info.fps).round().max(0.0) as usize).min(info.frames.saturating_sub(1));
                 if !self.decoders.contains_key(item) {
                     let index = kiriko_media::index::build_frame_index(&info.path)
                         .map_err(|e| e.to_string())?;
@@ -248,7 +248,9 @@ impl Renderer<'_> {
             if !l.switches.visible {
                 continue;
             }
-            let Some(p) = prepared.get(&l.id) else { continue };
+            let Some(p) = prepared.get(&l.id) else {
+                continue;
+            };
             let lt = t - l.start_offset.0.to_f64();
             let tr = &l.transform;
             draws.push(kiriko_gpu::CompositeLayer {
@@ -385,7 +387,9 @@ pub fn solid_rgba(c: kiriko_core::model::LinearColour) -> [u8; 4] {
 }
 
 pub fn px_tile(px: &[u8; 4], w: u32, h: u32) -> Vec<u8> {
-    std::iter::repeat_n(*px, (w * h) as usize).flatten().collect()
+    std::iter::repeat_n(*px, (w * h) as usize)
+        .flatten()
+        .collect()
 }
 
 /// Collect the ItemInfo map from probed media (UI thread, cheap).

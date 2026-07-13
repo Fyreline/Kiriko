@@ -1286,6 +1286,166 @@ fn graph_editor_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     }
 }
 
+/// Build a comp's draw list recursively (preview side of Precomp layers).
+/// Bottom-up order; matte sources come from decoded pixels (precomp mattes
+/// await the GPU mask pass, mirroring export).
+#[cfg(feature = "media")]
+fn build_comp_draws(
+    doc: &kiriko_core::model::Document,
+    comp: &kiriko_core::model::Composition,
+    t_comp: f64,
+    pixels_by_layer: &std::collections::HashMap<
+        uuid::Uuid,
+        &crate::app_state::preview::CompLayerPixels,
+    >,
+    visited: &mut Vec<uuid::Uuid>,
+) -> Vec<CompLayerDraw> {
+    use kiriko_core::model::LayerKind;
+    let in_span = |l: &kiriko_core::model::Layer| {
+        t_comp >= l.in_point.0.to_f64() && t_comp < l.out_point.0.to_f64()
+    };
+    let pixels_for = |layer: &kiriko_core::model::Layer| -> Option<LayerPixels> {
+        let raw = match &layer.kind {
+            LayerKind::Footage { .. } => pixels_by_layer.get(&layer.id).map(|lp| {
+                (
+                    lp.rgba.clone(),
+                    lp.width,
+                    lp.height,
+                    (lp.width as f32, lp.height as f32),
+                )
+            }),
+            LayerKind::Solid { colour } => in_span(layer).then(|| {
+                let px = crate::export::solid_rgba(*colour);
+                let (tw, th) = if layer.masks.is_empty() {
+                    (8, 8)
+                } else {
+                    (comp.width, comp.height)
+                };
+                (
+                    crate::export::px_tile(&px, tw, th),
+                    tw,
+                    th,
+                    (comp.width as f32, comp.height as f32),
+                )
+            }),
+            LayerKind::Precomp { .. } => None, // handled as Nested below
+        };
+        raw.map(|(mut rgba, w, h, natural)| {
+            kiriko_core::mask::apply_masks(
+                &mut rgba,
+                w,
+                h,
+                f64::from(natural.0),
+                f64::from(natural.1),
+                &layer.masks,
+            );
+            (rgba, w, h, natural)
+        })
+    };
+
+    let mut draws: Vec<CompLayerDraw> = Vec::new();
+    for layer in comp.layers.iter().rev() {
+        if !layer.switches.visible || !in_span(layer) {
+            continue;
+        }
+        let lt = t_comp - layer.start_offset.0.to_f64();
+        let tr = &layer.transform;
+
+        let (source, natural) = match &layer.kind {
+            LayerKind::Precomp { comp: nested_id } => {
+                if visited.contains(nested_id) {
+                    continue; // cycle guard
+                }
+                let Some(nested) = doc.comp(*nested_id) else {
+                    continue;
+                };
+                visited.push(*nested_id);
+                let nested_draws = build_comp_draws(doc, nested, lt, pixels_by_layer, visited);
+                visited.pop();
+                let nbg = nested.background.0;
+                (
+                    DrawSource::Nested {
+                        width: nested.width,
+                        height: nested.height,
+                        background: [
+                            f64::from(nbg[0]),
+                            f64::from(nbg[1]),
+                            f64::from(nbg[2]),
+                            f64::from(nbg[3]),
+                        ],
+                        draws: nested_draws,
+                    },
+                    (nested.width as f32, nested.height as f32),
+                )
+            }
+            _ => {
+                let Some((rgba, w, h, natural)) = pixels_for(layer) else {
+                    continue;
+                };
+                (
+                    DrawSource::Pixels {
+                        rgba,
+                        tex_w: w,
+                        tex_h: h,
+                    },
+                    natural,
+                )
+            }
+        };
+
+        let matte = layer.matte.as_ref().and_then(|mr| {
+            let src = comp.layers.iter().find(|l| l.id == mr.layer)?;
+            let (m_rgba, m_w, m_h, m_nat) = pixels_for(src)?;
+            let mlt = t_comp - src.start_offset.0.to_f64();
+            let mtr = &src.transform;
+            Some(MatteDraw {
+                rgba: m_rgba,
+                tex_w: m_w,
+                tex_h: m_h,
+                natural_size: m_nat,
+                position: (
+                    mtr.position_x.value_at(mlt) as f32,
+                    mtr.position_y.value_at(mlt) as f32,
+                ),
+                anchor: (
+                    mtr.anchor_x.value_at(mlt) as f32,
+                    mtr.anchor_y.value_at(mlt) as f32,
+                ),
+                scale: (
+                    mtr.scale_x.value_at(mlt) as f32,
+                    mtr.scale_y.value_at(mlt) as f32,
+                ),
+                rotation_deg: mtr.rotation.value_at(mlt) as f32,
+                opacity: mtr.opacity.value_at(mlt) as f32,
+                luma: matches!(mr.channel, kiriko_core::model::MatteChannel::Luma),
+                inverted: mr.inverted,
+            })
+        });
+
+        draws.push(CompLayerDraw {
+            source,
+            natural_size: natural,
+            position: (
+                tr.position_x.value_at(lt) as f32,
+                tr.position_y.value_at(lt) as f32,
+            ),
+            anchor: (
+                tr.anchor_x.value_at(lt) as f32,
+                tr.anchor_y.value_at(lt) as f32,
+            ),
+            scale: (
+                tr.scale_x.value_at(lt) as f32,
+                tr.scale_y.value_at(lt) as f32,
+            ),
+            rotation_deg: tr.rotation.value_at(lt) as f32,
+            opacity: tr.opacity.value_at(lt) as f32,
+            matte,
+            blend: blend_of(layer.blend),
+        });
+    }
+    draws
+}
+
 /// The layer's natural pixel space (mask coordinates live here).
 fn mask_space(
     layer: &kiriko_core::model::Layer,
@@ -1406,11 +1566,26 @@ pub struct MatteDraw {
     pub inverted: bool,
 }
 
+/// Where a draw's pixels come from: decoded/synthesised bytes, or a nested
+/// comp realised recursively on the GPU (Precomp layers).
+#[cfg(feature = "media")]
+pub enum DrawSource {
+    Pixels {
+        rgba: Vec<u8>,
+        tex_w: u32,
+        tex_h: u32,
+    },
+    Nested {
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        draws: Vec<CompLayerDraw>,
+    },
+}
+
 #[cfg(feature = "media")]
 pub struct CompLayerDraw {
-    pub rgba: Vec<u8>,
-    pub tex_w: u32,
-    pub tex_h: u32,
+    pub source: DrawSource,
     /// The layer's natural pixel size — transforms act in comp pixels even
     /// when the texture was decoded at a reduced preview resolution.
     pub natural_size: (f32, f32),
@@ -1461,20 +1636,27 @@ impl GpuViewer {
 
     /// Composite a comp frame (evaluator v0) and register it for painting.
     /// `layers` is bottom-up draw order.
-    fn present_comp(
-        &mut self,
+    /// Realise a draw list into a linear comp texture (recursive for Nested).
+    fn realise(
+        &self,
         width: u32,
         height: u32,
         background: [f64; 4],
         layers: &[CompLayerDraw],
-    ) -> (egui::TextureId, egui::Vec2) {
+    ) -> egui_wgpu::wgpu::Texture {
         let linear_textures: Vec<egui_wgpu::wgpu::Texture> = layers
             .iter()
-            .map(|l| {
-                let src = self
-                    .engine
-                    .upload_srgb8(&self.ctx, &l.rgba, l.tex_w, l.tex_h);
-                self.engine.linearise(&self.ctx, &src)
+            .map(|l| match &l.source {
+                DrawSource::Pixels { rgba, tex_w, tex_h } => {
+                    let src = self.engine.upload_srgb8(&self.ctx, rgba, *tex_w, *tex_h);
+                    self.engine.linearise(&self.ctx, &src)
+                }
+                DrawSource::Nested {
+                    width,
+                    height,
+                    background,
+                    draws,
+                } => self.realise(*width, *height, *background, draws),
             })
             .collect();
         // Matte layers render alone into comp space (one texture per consumer;
@@ -1527,9 +1709,19 @@ impl GpuViewer {
                 blend: l.blend,
             })
             .collect();
-        let linear = self
-            .compositor
-            .composite(&self.ctx, width, height, background, &comp_layers);
+        self.compositor
+            .composite(&self.ctx, width, height, background, &comp_layers)
+    }
+
+    /// Realise a comp's draws and register the frame for painting.
+    fn present_comp(
+        &mut self,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        layers: &[CompLayerDraw],
+    ) -> (egui::TextureId, egui::Vec2) {
+        let linear = self.realise(width, height, background, layers);
         let shown = self.engine.display(&self.ctx, &linear);
         let view = shown.create_view(&Default::default());
         let id = self.render_state.renderer.write().register_native_texture(
@@ -1968,124 +2160,16 @@ impl Shell {
                         let doc = self.app.store.snapshot();
                         if let Some(comp) = doc.comp(cf.comp) {
                             let t_comp = cf.frame as f64 / comp.frame_rate.fps().max(1.0);
-                            // Bottom-up: document order is top-first.
-                            // Matte sources decode too but draw only if visible.
                             let pixels_by_layer: std::collections::HashMap<_, _> =
                                 cf.layers.iter().map(|lp| (lp.layer, lp)).collect();
-                            // Pixels for any layer kind: decoded footage or a
-                            // synthesised solid tile (stretched by natural size).
-                            let t_now = cf.frame as f64 / comp.frame_rate.fps().max(1.0);
-                            let pixels_for =
-                                |layer: &kiriko_core::model::Layer| -> Option<LayerPixels> {
-                                    let raw = match &layer.kind {
-                                        kiriko_core::model::LayerKind::Footage { .. } => {
-                                            pixels_by_layer.get(&layer.id).map(|lp| {
-                                                (
-                                                    lp.rgba.clone(),
-                                                    lp.width,
-                                                    lp.height,
-                                                    (lp.width as f32, lp.height as f32),
-                                                )
-                                            })
-                                        }
-                                        kiriko_core::model::LayerKind::Precomp { .. } => None, // stage 2: recursion
-                                        kiriko_core::model::LayerKind::Solid { colour } => {
-                                            let in_span = t_now >= layer.in_point.0.to_f64()
-                                                && t_now < layer.out_point.0.to_f64();
-                                            in_span.then(|| {
-                                                // Masked solids rasterise at comp
-                                                // res; plain ones stay tiny tiles.
-                                                let px = crate::export::solid_rgba(*colour);
-                                                let (tw, th) = if layer.masks.is_empty() {
-                                                    (8, 8)
-                                                } else {
-                                                    (comp.width, comp.height)
-                                                };
-                                                (
-                                                    crate::export::px_tile(&px, tw, th),
-                                                    tw,
-                                                    th,
-                                                    (comp.width as f32, comp.height as f32),
-                                                )
-                                            })
-                                        }
-                                    };
-                                    raw.map(|(mut rgba, w, h, natural)| {
-                                        kiriko_core::mask::apply_masks(
-                                            &mut rgba,
-                                            w,
-                                            h,
-                                            f64::from(natural.0),
-                                            f64::from(natural.1),
-                                            &layer.masks,
-                                        );
-                                        (rgba, w, h, natural)
-                                    })
-                                };
-                            let mut draws: Vec<CompLayerDraw> = Vec::new();
-                            for layer in comp.layers.iter().rev() {
-                                if !layer.switches.visible {
-                                    continue;
-                                }
-                                let Some((rgba, tex_w, tex_h, natural)) = pixels_for(layer) else {
-                                    continue;
-                                };
-                                let lt = t_comp - layer.start_offset.0.to_f64();
-                                let tr = &layer.transform;
-                                let matte = layer.matte.as_ref().and_then(|mr| {
-                                    let src = comp.layers.iter().find(|l| l.id == mr.layer)?;
-                                    let (m_rgba, m_w, m_h, m_nat) = pixels_for(src)?;
-                                    let mlt = t_comp - src.start_offset.0.to_f64();
-                                    let mtr = &src.transform;
-                                    Some(MatteDraw {
-                                        rgba: m_rgba,
-                                        tex_w: m_w,
-                                        tex_h: m_h,
-                                        natural_size: m_nat,
-                                        position: (
-                                            mtr.position_x.value_at(mlt) as f32,
-                                            mtr.position_y.value_at(mlt) as f32,
-                                        ),
-                                        anchor: (
-                                            mtr.anchor_x.value_at(mlt) as f32,
-                                            mtr.anchor_y.value_at(mlt) as f32,
-                                        ),
-                                        scale: (
-                                            mtr.scale_x.value_at(mlt) as f32,
-                                            mtr.scale_y.value_at(mlt) as f32,
-                                        ),
-                                        rotation_deg: mtr.rotation.value_at(mlt) as f32,
-                                        opacity: mtr.opacity.value_at(mlt) as f32,
-                                        luma: matches!(
-                                            mr.channel,
-                                            kiriko_core::model::MatteChannel::Luma
-                                        ),
-                                        inverted: mr.inverted,
-                                    })
-                                });
-                                draws.push(CompLayerDraw {
-                                    rgba,
-                                    tex_w,
-                                    tex_h,
-                                    natural_size: natural,
-                                    position: (
-                                        tr.position_x.value_at(lt) as f32,
-                                        tr.position_y.value_at(lt) as f32,
-                                    ),
-                                    anchor: (
-                                        tr.anchor_x.value_at(lt) as f32,
-                                        tr.anchor_y.value_at(lt) as f32,
-                                    ),
-                                    scale: (
-                                        tr.scale_x.value_at(lt) as f32,
-                                        tr.scale_y.value_at(lt) as f32,
-                                    ),
-                                    rotation_deg: tr.rotation.value_at(lt) as f32,
-                                    opacity: tr.opacity.value_at(lt) as f32,
-                                    matte,
-                                    blend: blend_of(layer.blend),
-                                });
-                            }
+                            let mut visited = vec![comp.id];
+                            let draws = build_comp_draws(
+                                &doc,
+                                comp,
+                                t_comp,
+                                &pixels_by_layer,
+                                &mut visited,
+                            );
                             let bg = comp.background.0;
                             self.preview_display = Some(gpu.present_comp(
                                 comp.width,
