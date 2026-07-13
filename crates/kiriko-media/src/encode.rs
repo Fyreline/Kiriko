@@ -134,15 +134,10 @@ impl Encoder {
             match self.encoder.receive_packet() {
                 Ok(mut packet) => {
                     packet.set_stream_index(0);
-                    packet.rescale_ts(
-                        self.encoder.time_base,
-                        self.output.streams()[0].time_base,
-                    );
+                    packet.rescale_ts(self.encoder.time_base, self.output.streams()[0].time_base);
                     self.output.write_frame(&mut packet)?;
                 }
-                Err(rsmpeg::error::RsmpegError::EncoderDrainError) if !at_eof => {
-                    return Ok(())
-                }
+                Err(rsmpeg::error::RsmpegError::EncoderDrainError) if !at_eof => return Ok(()),
                 Err(rsmpeg::error::RsmpegError::EncoderDrainError)
                 | Err(rsmpeg::error::RsmpegError::EncoderFlushedError) => return Ok(()),
                 Err(e) => return Err(e.into()),
@@ -169,9 +164,7 @@ fn copy_rgba_into(frame: &mut AVFrame, rgba: &[u8], width: i32, height: i32) {
     let stride = frame.linesize[0] as usize;
     let row = (width * 4) as usize;
     #[allow(unsafe_code)]
-    let dst = unsafe {
-        std::slice::from_raw_parts_mut(frame.data[0], stride * height as usize)
-    };
+    let dst = unsafe { std::slice::from_raw_parts_mut(frame.data[0], stride * height as usize) };
     for y in 0..height as usize {
         dst[y * stride..y * stride + row].copy_from_slice(&rgba[y * row..(y + 1) * row]);
     }

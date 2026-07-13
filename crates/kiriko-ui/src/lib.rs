@@ -2,6 +2,7 @@
 //! the dependency arrow points the other way (docs/05-ARCHITECTURE.md).
 
 pub mod app_state;
+pub mod export;
 pub mod native_menu;
 pub mod shell;
 pub mod splash;

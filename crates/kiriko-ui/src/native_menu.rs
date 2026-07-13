@@ -17,6 +17,7 @@ pub enum MenuAction {
     OpenProject,
     ImportFootage,
     Save,
+    ExportComp,
     Undo,
     Redo,
     NewComposition,
@@ -73,6 +74,7 @@ impl NativeMenu {
             &item("file.import", "Import footage…", cmd(Code::KeyI)),
             &PredefinedMenuItem::separator(),
             &item("file.save", "Save", cmd(Code::KeyS)),
+            &item("file.export", "Export comp…", cmd_shift(Code::KeyE)),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(None),
         ])?;
@@ -120,6 +122,7 @@ impl NativeMenu {
                 "file.open" => Some(MenuAction::OpenProject),
                 "file.import" => Some(MenuAction::ImportFootage),
                 "file.save" => Some(MenuAction::Save),
+                "file.export" => Some(MenuAction::ExportComp),
                 "edit.undo" => Some(MenuAction::Undo),
                 "edit.redo" => Some(MenuAction::Redo),
                 "comp.new" => Some(MenuAction::NewComposition),

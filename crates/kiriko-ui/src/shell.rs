@@ -781,6 +781,11 @@ impl GpuViewer {
         }
     }
 
+    /// A second handle to the shared device for the export thread.
+    pub fn export_context(&self) -> kiriko_gpu::GpuContext {
+        kiriko_gpu::GpuContext::from_parts(self.ctx.device.clone(), self.ctx.queue.clone())
+    }
+
     /// Composite a comp frame (evaluator v0) and register it for painting.
     /// `layers` is bottom-up draw order.
     fn present_comp(
@@ -905,6 +910,12 @@ pub struct Shell {
     gpu: Option<GpuViewer>,
     #[serde(skip, default)]
     last_doc_ptr: usize,
+    #[cfg(feature = "media")]
+    #[serde(skip, default)]
+    export: Option<crate::export::ExportHandle>,
+    #[cfg(feature = "media")]
+    #[serde(skip, default)]
+    export_progress: Option<(usize, usize)>,
     /// Native macOS menu bar; None on other platforms (07-UI-SPEC).
     #[cfg(target_os = "macos")]
     #[serde(skip, default)]
@@ -923,6 +934,10 @@ impl Default for Shell {
             #[cfg(feature = "media")]
             gpu: None,
             last_doc_ptr: 0,
+            #[cfg(feature = "media")]
+            export: None,
+            #[cfg(feature = "media")]
+            export_progress: None,
             #[cfg(target_os = "macos")]
             native_menu: None,
         }
@@ -999,19 +1014,25 @@ impl Shell {
         let Some(menu) = &self.native_menu else {
             return;
         };
-        for action in menu.poll() {
+        let actions = menu.poll();
+        let (can_undo, can_redo) = (self.app.store.can_undo(), self.app.store.can_redo());
+        menu.sync(can_undo, can_redo);
+        for action in actions {
             match action {
                 MenuAction::NewProject => self.app.new_project(),
                 MenuAction::OpenProject => self.app.open_dialog(),
                 MenuAction::ImportFootage => self.app.import_footage_dialog(),
                 MenuAction::Save => self.app.save(),
+                MenuAction::ExportComp => {
+                    #[cfg(feature = "media")]
+                    self.start_export();
+                }
                 MenuAction::Undo => self.app.undo(),
                 MenuAction::Redo => self.app.redo(),
                 MenuAction::NewComposition => self.app.new_composition(),
                 MenuAction::ResetWorkspace => self.dock = default_layout(),
             }
         }
-        menu.sync(self.app.store.can_undo(), self.app.store.can_redo());
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1030,6 +1051,36 @@ impl Shell {
         if ctx.input_mut(|i| i.consume_shortcut(&SAVE)) {
             self.app.save();
         }
+    }
+
+    #[cfg(feature = "media")]
+    fn start_export(&mut self) {
+        if self.export.is_some() {
+            return;
+        }
+        let Some(comp_id) = self.app.preview_comp.or(self.app.selected_comp) else {
+            self.app.error = Some("select a composition to export".into());
+            return;
+        };
+        let Some(gpu) = &self.gpu else {
+            self.app.error = Some("export needs the GPU pipeline".into());
+            return;
+        };
+        let picked = rfd::FileDialog::new()
+            .add_filter("MP4 video", &["mp4"])
+            .set_file_name("export.mp4")
+            .save_file();
+        let Some(path) = picked else { return };
+        let doc = self.app.store.snapshot();
+        let items = crate::export::item_infos(&doc, &self.app.media);
+        self.export = Some(crate::export::start(
+            doc,
+            comp_id,
+            items,
+            gpu.export_context(),
+            path,
+        ));
+        self.export_progress = Some((0, 0));
     }
 
     fn recovery_modal(&mut self, ctx: &egui::Context) {
@@ -1128,6 +1179,37 @@ impl Shell {
                     };
                     self.app.preview_frame = frame;
                     self.app.refresh_preview();
+                }
+            }
+            if let Some(export) = &self.export {
+                let mut finished: Option<Result<std::path::PathBuf, String>> = None;
+                while let Ok(ev) = export.events.try_recv() {
+                    match ev {
+                        crate::export::ExportEvent::Progress { frame, total } => {
+                            self.export_progress = Some((frame, total));
+                        }
+                        crate::export::ExportEvent::Done(path) => {
+                            finished = Some(Ok(path));
+                        }
+                        crate::export::ExportEvent::Failed(e) => {
+                            finished = Some(Err(e));
+                        }
+                    }
+                }
+                match finished {
+                    Some(Ok(path)) => {
+                        self.export = None;
+                        self.export_progress = None;
+                        self.app.error = Some(format!("exported {}", path.display()));
+                    }
+                    Some(Err(e)) => {
+                        self.export = None;
+                        self.export_progress = None;
+                        self.app.error = Some(format!("export: {e}"));
+                    }
+                    None => {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(120));
+                    }
                 }
             }
             if self.app.comp_playback_tick() {
@@ -1323,6 +1405,11 @@ impl Shell {
                         self.app.save();
                         ui.close_menu();
                     }
+                    #[cfg(feature = "media")]
+                    if ui.button("Export comp…").clicked() {
+                        self.start_export();
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Edit", |ui| {
                     if ui
@@ -1375,6 +1462,21 @@ impl Shell {
                         .small()
                         .color(self.theme.text_muted),
                 );
+                #[cfg(feature = "media")]
+                if let Some((frame, total)) = self.export_progress {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!("exporting {frame}/{total}"))
+                            .monospace()
+                            .small()
+                            .color(self.theme.accent),
+                    );
+                    if ui.small_button("Cancel").clicked() {
+                        if let Some(export) = &self.export {
+                            export.cancel();
+                        }
+                    }
+                }
                 if let Some(err) = self.app.error.clone() {
                     ui.separator();
                     ui.label(egui::RichText::new(&err).small().color(self.theme.warning));
