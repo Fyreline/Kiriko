@@ -272,6 +272,13 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   worked out from the footage's real pixel dimensions, not the shrunk-down preview copy. If
   they were ever worked out from the preview copy, a layer would appear to grow as you
   zoomed in — which is exactly the bug this rule exists to prevent.
+- **Scrubbing shows a draft instantly, then sharpens.** While you drag the playhead (on the
+  timeline ruler or the footage scrub bar), Kiriko decodes a small, quick version of each
+  frame so the picture keeps up with your cursor — the same "keep moving, drop quality" idea
+  the playback engine uses. The instant you let go, it reloads that one frame at whatever
+  resolution you've chosen (Full, Half, Auto…). The quick draft frames are shown but never
+  saved into the frame cache, so the cache only ever holds full-quality frames, and the
+  background pre-rendering pauses while you scrub so it doesn't compete for the disc and CPU.
 - **Mask editing in the Viewer** — select a layer with masks and its outlines draw
   over the picture in clay, with a square handle on every vertex. Drag a handle and
   the outline follows your cursor live; let go and the pixels update — one undo step

@@ -363,22 +363,35 @@ pub mod media {
     }
 }
 
+/// While the user is actively scrubbing or dragging, footage decodes at most
+/// this wide so a frame comes back fast (the specified resolution reloads the
+/// moment they stop). Chosen to keep even 4K sources instant to draft.
+const DRAFT_MAX_WIDTH: u32 = 640;
+
 /// Infallible constructor for small literal rationals.
 /// One decode-width policy for requests AND cache keys — if these ever
-/// disagreed, a cached frame could present at the wrong resolution.
+/// disagreed, a cached frame could present at the wrong resolution. `draft`
+/// caps the width for instant feedback and never exceeds the specified tier.
 fn decode_target_width(
     natural_w: u32,
+    draft: bool,
     auto_res: bool,
     display_scale: f32,
     divisor: u32,
 ) -> Option<u32> {
-    if auto_res {
+    let specified = if auto_res {
         let scale = display_scale.clamp(0.05, 1.0);
         let w = (natural_w as f32 * scale).round() as u32;
         (w < natural_w).then_some(w.max(16))
     } else {
         (divisor > 1).then(|| natural_w / divisor)
+    };
+    if draft {
+        // Never coarser than needed: cap the specified width, never raise it.
+        let w = specified.unwrap_or(natural_w).min(DRAFT_MAX_WIDTH);
+        return (w < natural_w).then_some(w.max(16));
     }
+    specified
 }
 
 /// Pan-behind: the position that keeps a layer visually fixed when its origin
@@ -521,8 +534,15 @@ impl kiriko_eval::SourceStamper for PreviewStamper<'_> {
         let video = probe.video.as_ref()?;
         let source_frame =
             ((lt * video.fps()).round().max(0.0) as usize).min(frames.saturating_sub(1));
-        let target =
-            decode_target_width(video.width, self.auto_res, self.display_scale, self.divisor);
+        // Key at the specified resolution: draft frames are never cached, so
+        // the content-hash key always represents the settled resolution.
+        let target = decode_target_width(
+            video.width,
+            false,
+            self.auto_res,
+            self.display_scale,
+            self.divisor,
+        );
         Some((
             format!("{}#w{}", f.media.absolute_path, target.unwrap_or(0)),
             source_frame as u64,
@@ -614,6 +634,10 @@ pub struct AppState {
     /// Auto resolution (K-030 family): decode at the size actually displayed,
     /// capped at 100% — zooming past 1:1 never upsamples the decode.
     pub preview_auto_res: bool,
+    /// True while the user is actively scrubbing the playhead: the preview
+    /// decodes a coarse draft for instant feedback, then reloads at the
+    /// specified resolution once scrubbing stops (Mack's "force realtime").
+    pub preview_draft: bool,
     /// View zoom (1.0 = fit) and pan, in screen pixels. View controls only —
     /// never part of any render (07-UI-SPEC: Viewer).
     pub view_zoom: f32,
@@ -693,6 +717,7 @@ impl Default for AppState {
             preview_frame: 0,
             preview_divisor: 1,
             preview_auto_res: false,
+            preview_draft: false,
             view_zoom: 1.0,
             view_pan: egui::Vec2::ZERO,
             last_display_scale: 1.0,
@@ -1995,9 +2020,22 @@ impl AppState {
     /// Decode target width for a source of `natural_w` px under the current
     /// resolution mode. Auto: displayed size, capped at 100% (never above
     /// native, however far the view is zoomed in).
+    /// Any live pointer interaction (scrubbing or a drag) — background cache
+    /// fills pause while it is true so they don't fight the interaction.
+    pub fn is_interacting(&self) -> bool {
+        self.preview_draft
+            || self.prop_edit.is_some()
+            || self.trim_edit.is_some()
+            || self.graph_edit.is_some()
+            || self.mask_drag.is_some()
+            || self.origin_drag.is_some()
+            || self.shape_drag.is_some()
+    }
+
     pub fn target_width_for(&self, natural_w: u32) -> Option<u32> {
         decode_target_width(
             natural_w,
+            self.preview_draft,
             self.preview_auto_res,
             self.last_display_scale,
             self.preview_divisor,
@@ -2474,6 +2512,28 @@ impl AppState {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_width_caps_for_instant_scrub_but_never_exceeds_specified() {
+        // Full res, dragging: capped at the draft width for a fast decode.
+        assert_eq!(decode_target_width(1920, true, false, 1.0, 1), Some(640));
+        // Draft never coarser than needed: half res (960) already below no cap,
+        // still above 640 -> draft caps to 640.
+        assert_eq!(decode_target_width(1920, true, false, 1.0, 2), Some(640));
+        // Quarter res (480) is finer than the draft cap: keep 480, don't raise.
+        assert_eq!(decode_target_width(1920, true, false, 1.0, 4), Some(480));
+        // Auto res zoomed right out (192) stays 192 under draft.
+        assert_eq!(decode_target_width(1920, true, true, 0.1, 1), Some(192));
+        // A source already smaller than the cap needs no draft decode.
+        assert_eq!(decode_target_width(320, true, false, 1.0, 1), None);
+    }
+
+    #[test]
+    fn specified_width_is_unchanged_when_not_drafting() {
+        assert_eq!(decode_target_width(1920, false, false, 1.0, 1), None);
+        assert_eq!(decode_target_width(1920, false, false, 1.0, 2), Some(960));
+        assert_eq!(decode_target_width(1000, false, true, 0.5, 1), Some(500));
+    }
 
     /// K-068: solids are assets auto-filed into a "Solids" folder that is
     /// followed by id (rename it, it still collects); comps auto-file into

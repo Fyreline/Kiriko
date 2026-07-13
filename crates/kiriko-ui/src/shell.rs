@@ -817,9 +817,18 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
             app.preview_comp = Some(comp_id);
             app.comp_playback = None; // scrubbing pauses
             app.preview_frame = ((frac * frames as f64) as usize).min(frames.saturating_sub(1));
+            // Dragging is scrubbing: decode a coarse draft for instant feedback.
+            // A plain click jumps once and wants the specified resolution.
+            app.preview_draft = ruler_resp.dragged();
             #[cfg(feature = "media")]
             app.refresh_preview();
         }
+    }
+    if ruler_resp.drag_stopped() {
+        // Scrub finished: reload the frame at the specified resolution.
+        app.preview_draft = false;
+        #[cfg(feature = "media")]
+        app.refresh_preview();
     }
     let rows_top = ui.cursor().top();
 
@@ -2100,6 +2109,13 @@ fn viewer_footage(
                             ui.add_sized(egui::vec2(ui.available_width() - 96.0, 18.0), slider);
                         if response.changed() {
                             app.preview_frame = frame;
+                            // Dragging the scrub slider decodes a draft; releasing
+                            // it reloads at the specified resolution.
+                            app.preview_draft = response.dragged();
+                            app.refresh_preview();
+                        }
+                        if response.drag_stopped() {
+                            app.preview_draft = false;
                             app.refresh_preview();
                         }
                     }
@@ -3934,8 +3950,12 @@ impl Shell {
                 }
             }
             // Idle: fill the work area around the playhead, one frame at a
-            // time (any real request supersedes the fill mid-flight).
-            if !self.app.is_playing() && self.app.fill_in_flight.is_none() {
+            // time (any real request supersedes the fill mid-flight). Paused
+            // while scrubbing/dragging so fills don't fight the interaction.
+            if !self.app.is_playing()
+                && !self.app.is_interacting()
+                && self.app.fill_in_flight.is_none()
+            {
                 if let Some(comp_id) = self.app.preview_comp {
                     if let Some(frame) = self.app.next_fill_frame(comp_id) {
                         self.app.request_fill_frame(comp_id, frame);
@@ -4008,10 +4028,11 @@ impl Shell {
                                     background,
                                     &draws,
                                 ));
-                                // Paused or scrubbing: bank the frame while
-                                // it's hot (playback misses skip the readback
-                                // to protect the frame budget).
-                                if !self.app.is_playing() {
+                                // Paused: bank the frame while it's hot (playback
+                                // misses skip the readback to protect the frame
+                                // budget; draft frames are never banked — the
+                                // cache holds specified-resolution frames only).
+                                if !self.app.is_playing() && !self.app.preview_draft {
                                     if let Some(key) = self.app.frame_key_for(cf.comp, cf.frame) {
                                         if !self.app.comp_frame_cache.contains_key(&key) {
                                             if let Some(rgba) = gpu.realise_to_bytes(
