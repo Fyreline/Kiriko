@@ -152,6 +152,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   covenant). Crucially, a clip's first frame is always its own trim-in whatever its
   speed, so splitting and re-speeding the second half never shifts where it starts.
   Dragging more clips in and per-clip trimming are the next steps.
+  You can also **right-click a footage layer → Convert to sequenced layer** (K-071): it
+  becomes a single-source layer bound to that one clip — a "fancy precomp" you'll soon
+  open in its own editing tab to cut and retime, where a camera track (run once on the
+  full footage) can follow the edits. For now it converts in place, keeping the layer's
+  id, transform, masks and any speed you'd set.
 - `crates/kiriko-core/src/store.rs` — **The document store**: applies ops, publishes
   snapshots, keeps the undo/redo stacks.
 - `crates/kiriko-project/src/lib.rs` — **`.kir` files.** A `.kir` is a zip containing

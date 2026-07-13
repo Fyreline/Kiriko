@@ -1230,6 +1230,77 @@ impl AppState {
         self.refresh_preview();
     }
 
+    /// Convert the selected imported-footage layer into a sequenced layer
+    /// (K-071): its one footage becomes a single clip you can then cut and
+    /// retime. Only footage layers qualify. One undo step; the layer keeps its
+    /// id, transform, masks and span, carrying any existing retime into the
+    /// clip.
+    pub fn convert_to_sequenced_layer(&mut self) {
+        use kiriko_core::model::LayerKind;
+        use kiriko_core::sequence::{Clip, ClipSource};
+        let Some(comp_id) = self.preview_comp.or(self.selected_comp) else {
+            return;
+        };
+        let Some(layer_id) = self.selected_layer else {
+            self.error = Some("select a footage layer to convert".into());
+            return;
+        };
+        let doc = self.store.snapshot();
+        let Some(comp) = doc.comp(comp_id) else {
+            return;
+        };
+        let Some(index) = comp.layers.iter().position(|l| l.id == layer_id) else {
+            return;
+        };
+        let layer = &comp.layers[index];
+        let LayerKind::Footage { item, retime } = &layer.kind else {
+            self.error = Some("only footage layers convert to sequenced".into());
+            return;
+        };
+        // Footage duration → the clip's source/place length.
+        #[cfg(feature = "media")]
+        let dur_s = match self.media.map.get(item) {
+            Some(media::MediaStatus::Ready { probe, .. }) => probe.duration_seconds,
+            _ => (layer.out_point.0.to_f64() - layer.in_point.0.to_f64()).max(0.04),
+        };
+        #[cfg(not(feature = "media"))]
+        let dur_s = (layer.out_point.0.to_f64() - layer.in_point.0.to_f64()).max(0.04);
+        let dur = Rational::from_f64_on_grid(dur_s.max(0.04), Rational::FLICK_DEN)
+            .unwrap_or(layer.out_point.0);
+        let clip = Clip {
+            id: Uuid::now_v7(),
+            source: ClipSource::Footage(*item),
+            source_in: Rational::ZERO,
+            source_out: dur,
+            place_start: Rational::ZERO,
+            place_duration: dur,
+            retime: retime
+                .clone()
+                .unwrap_or_else(|| kiriko_core::retime::Retime::identity(dur, Rational::ZERO)),
+            interpolation: Default::default(),
+            extra: serde_json::Map::new(),
+        };
+        let mut new_layer = layer.clone();
+        new_layer.kind = LayerKind::Sequence { clips: vec![clip] };
+        // One undo step: drop the footage layer, add the sequenced one in its
+        // place (same id and index, so it's a true in-place conversion).
+        self.commit(Op::Batch {
+            ops: vec![
+                Op::RemoveLayer {
+                    comp: comp_id,
+                    layer: layer_id,
+                },
+                Op::AddLayer {
+                    comp: comp_id,
+                    index,
+                    layer: Box::new(new_layer),
+                },
+            ],
+        });
+        #[cfg(feature = "media")]
+        self.refresh_preview();
+    }
+
     /// Razor: cut the selected Sequence layer's clip at the playhead into two
     /// (one undo step). The beat-sync covenant holds — clip places don't move.
     pub fn cut_sequence_at_playhead(&mut self) {

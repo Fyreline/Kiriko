@@ -866,6 +866,7 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         // Right-click a layer to add things (the house pattern: right-click or
         // menu, never scattered buttons).
         let mut ctx_op: Option<kiriko_core::Op> = None;
+        let mut convert_layer = false;
         row_resp.context_menu(|ui| {
             ui.menu_button("Add mask", |ui| {
                 let (w, h) = mask_space(layer, app, comp);
@@ -908,10 +909,21 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                     });
                 }
             });
+            // Footage → sequenced layer (K-071).
+            if matches!(layer.kind, kiriko_core::model::LayerKind::Footage { .. })
+                && ui.button("Convert to sequenced layer").clicked()
+            {
+                convert_layer = true;
+                ui.close_menu();
+            }
         });
         if ctx_op.is_some() {
             pending = ctx_op;
             app.selected_layer = Some(layer.id);
+        }
+        if convert_layer {
+            app.selected_layer = Some(layer.id);
+            app.convert_to_sequenced_layer();
         }
         // Disclosure twirl: layer options hide until opened (AE behaviour).
         let twirl_id = ui.id().with(("twirl", layer.id));
