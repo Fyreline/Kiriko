@@ -458,6 +458,17 @@ fn fill_walk_order(playhead: usize, start: usize, end: usize) -> Vec<usize> {
     order
 }
 
+/// Frames to warm ahead of the playhead during playback: the bounded forward
+/// window `[playhead + 1, playhead + lookahead]`, clamped to the work-area end
+/// (`end` exclusive). Playback presentation chases the audio clock, so warming
+/// a little ahead of it keeps the work-area loop smooth once frames are cached
+/// (docs/impl/playback-scheduler.md §5). Empty once the playhead reaches the end.
+fn playback_lookahead(playhead: usize, end: usize, lookahead: usize) -> Vec<usize> {
+    let first = playhead.saturating_add(1);
+    let stop = first.saturating_add(lookahead).min(end);
+    (first..stop).collect()
+}
+
 /// Pan-behind: the position that keeps a layer visually fixed when its origin
 /// (anchor) moves from `anchor` to `new_anchor`. Position places the anchor in
 /// comp space, so shifting the anchor by Δ in layer space must shift position
@@ -2244,6 +2255,24 @@ impl AppState {
             })
     }
 
+    /// The next frame worth warming ahead of the playhead during playback: the
+    /// first uncached frame in the bounded forward lookahead window, or None
+    /// when that window is fully cached or unkeyable. Unlike the idle fill this
+    /// is strictly forward — it chases the audio clock, never behind it
+    /// (docs/impl/playback-scheduler.md §5).
+    #[cfg(feature = "media")]
+    fn next_playback_prefetch(&self, comp_id: Uuid, playhead: usize, end: usize) -> Option<usize> {
+        // Fixed lookahead for now; the impl note adapts it to render cost in a
+        // later slice. Eight to sixteen frames per the note; twelve is a middle.
+        const LOOKAHEAD: usize = 12;
+        playback_lookahead(playhead, end, LOOKAHEAD)
+            .into_iter()
+            .find_map(|frame| {
+                let key = self.frame_key_for(comp_id, frame)?;
+                (!self.comp_frame_cache.contains_key(&key)).then_some(frame)
+            })
+    }
+
     /// One number capturing the preview-quality state (memo key component).
     #[cfg(feature = "media")]
     fn quality_tag(&self) -> u32 {
@@ -2991,6 +3020,20 @@ impl AppState {
             self.preview_frame = frame;
             self.refresh_preview();
         }
+        // Warm a little ahead of the clock so the work-area loop stays smooth
+        // once frames are cached (docs/impl/playback-scheduler.md §5). Only when
+        // the frame under the playhead is already cached — so this never
+        // pre-empts the present request above — and one prefetch at a time.
+        if self.fill_in_flight.is_none() {
+            let present_cached = self
+                .frame_key_for(comp_id, frame)
+                .is_some_and(|k| self.comp_frame_cache.contains_key(&k));
+            if present_cached {
+                if let Some(prefetch) = self.next_playback_prefetch(comp_id, frame, wa_end) {
+                    self.request_fill_frame(comp_id, prefetch);
+                }
+            }
+        }
         true
     }
 
@@ -3108,6 +3151,18 @@ mod tests {
         // Degenerate spans return cleanly.
         assert_eq!(fill_walk_order(0, 0, 1), vec![0]);
         assert!(fill_walk_order(0, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn playback_lookahead_is_a_bounded_forward_window() {
+        // Strictly forward, starting just past the playhead.
+        assert_eq!(playback_lookahead(5, 100, 4), vec![6, 7, 8, 9]);
+        // Clamps to the (exclusive) work-area end.
+        assert_eq!(playback_lookahead(8, 10, 4), vec![9]);
+        // Empty at or past the end, and with a zero lookahead.
+        assert!(playback_lookahead(9, 10, 4).is_empty());
+        assert!(playback_lookahead(10, 10, 4).is_empty());
+        assert!(playback_lookahead(5, 100, 0).is_empty());
     }
 
     #[test]
