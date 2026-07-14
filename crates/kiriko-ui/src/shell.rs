@@ -1323,8 +1323,8 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                 }
             });
 
-            // Transform label + footage speed sit in the left column; the
-            // properties themselves are full-width timeline rows below.
+            // Transform label sits in the left column; the properties (and, for
+            // footage, the keyframable Speed row) are full-width rows below.
             ui.scope(|ui| {
                 ui.set_max_width(name_w - 10.0);
                 ui.indent(("txlabel", layer.id), |ui| {
@@ -1333,9 +1333,6 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                             .small()
                             .color(theme.text_muted),
                     );
-                    if let kiriko_core::model::LayerKind::Footage { retime, .. } = &layer.kind {
-                        speed_row(ui, theme, comp_id, layer, retime, &mut pending);
-                    }
                 });
             });
             // Each animatable property as its own timeline row: stopwatch/name/
@@ -3022,6 +3019,12 @@ fn transform_property_rows(
         duration,
     };
 
+    // Footage speed is a keyframable property too (K-072): its own row above
+    // the transform, its keys building the retime's speed lens.
+    if let LayerKind::Footage { retime, .. } = &layer.kind {
+        speed_property_row(ui, &ctx, retime, pending);
+    }
+
     if !is_camera {
         prop_row(
             ui,
@@ -3441,74 +3444,139 @@ fn link_toggle_row(ui: &mut egui::Ui, ctx: &RowCtx) -> bool {
         .clicked()
 }
 
-/// A single "Speed %" row for a footage layer, inside Transform. Editing sets
-/// a constant-speed retime (100% clears it); ramps are shown read-only and
-/// edited in the graph editor (K-070).
-fn speed_row(
+/// Insert or replace a speed keyframe at local time `lt` (seconds) with `speed`
+/// (1.0 = 100%), keeping the [0, dur] endpoints, and rebuild the retime store.
+fn speed_with_key(
+    retime: &Option<kiriko_core::retime::Retime>,
+    dur: kiriko_core::Rational,
+    lt: f64,
+    speed: kiriko_core::Rational,
+) -> Option<kiriko_core::retime::Retime> {
+    use kiriko_core::Rational;
+    let mut keys = retime
+        .as_ref()
+        .and_then(|r| r.speed_keyframes())
+        .unwrap_or_else(|| vec![(Rational::ZERO, Rational::ONE), (dur, Rational::ONE)]);
+    let t = Rational::from_f64_on_grid(lt.clamp(0.0, dur.to_f64()), 1000).unwrap_or(Rational::ZERO);
+    if let Some(k) = keys.iter_mut().find(|k| k.0 == t) {
+        k.1 = speed;
+    } else {
+        keys.push((t, speed));
+        keys.sort_by_key(|k| k.0);
+    }
+    kiriko_core::retime::Retime::from_speed_keyframes(Rational::ZERO, &keys)
+}
+
+/// The footage speed as a full-width, keyframable property row (K-072): a
+/// stopwatch toggles keyframing; editing sets a constant speed or, once
+/// animated, a speed keyframe at the playhead; keys show on the track. Linear
+/// speed ramps read back as keyframes; smooth-eased ramps live in the graph
+/// editor and here read as a constant.
+fn speed_property_row(
     ui: &mut egui::Ui,
-    theme: &Theme,
-    comp_id: uuid::Uuid,
-    layer: &kiriko_core::model::Layer,
+    ctx: &RowCtx,
     retime: &Option<kiriko_core::retime::Retime>,
     pending: &mut Option<kiriko_core::Op>,
 ) {
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Speed %")
-                .small()
-                .color(theme.text_muted),
-        );
-        let current = retime
-            .as_ref()
-            .map(|r| r.speed_at(0.0) * 100.0)
-            .unwrap_or(100.0);
-        let id = egui::Id::new(("speed", layer.id));
-        let mut v = ui.data(|d| d.get_temp::<f64>(id)).unwrap_or(current);
-        let resp = ui.add(
-            egui::DragValue::new(&mut v)
-                .speed(1.0)
-                .range(-800.0..=800.0)
-                .suffix(" %"),
-        );
-        if resp.dragged() || resp.has_focus() {
-            ui.data_mut(|d| d.insert_temp(id, v));
-        }
-        if resp.drag_stopped() || resp.lost_focus() {
-            if (v - current).abs() > 1e-6 {
-                let new_retime = if (v - 100.0).abs() < 1e-6 {
-                    None
-                } else {
-                    let d = layer.out_point.0;
-                    let speed = kiriko_core::Rational::from_f64_on_grid(v / 100.0, 1000)
-                        .unwrap_or(kiriko_core::Rational::ONE);
-                    Some(kiriko_core::retime::Retime::constant_speed(
-                        d,
-                        kiriko_core::Rational::ZERO,
-                        speed,
-                    ))
-                };
-                *pending = Some(kiriko_core::Op::SetLayerRetime {
-                    comp: comp_id,
-                    layer: layer.id,
-                    retime: new_retime,
-                });
+    use kiriko_core::Rational;
+    let dur = ctx.layer.out_point.0;
+    let keys = retime.as_ref().and_then(|r| r.speed_keyframes());
+    // Animated = an internal key, or differing endpoint speeds (a ramp).
+    let animated = keys
+        .as_ref()
+        .is_some_and(|k| k.len() > 2 || k.first().map(|f| f.1) != k.last().map(|l| l.1));
+    let current = retime
+        .as_ref()
+        .map(|r| r.speed_at(ctx.lt) * 100.0)
+        .unwrap_or(100.0);
+    let to_speed =
+        |pct: f64| Rational::from_f64_on_grid(pct / 100.0, 1000).unwrap_or(Rational::ONE);
+
+    let (row_rect, mut c) = row_frame(ui, ctx, false);
+
+    let clock = if animated { "⏱" } else { "◦" };
+    if c.selectable_label(animated, egui::RichText::new(clock).small())
+        .on_hover_text(if animated {
+            "Freeze speed (constant at the current value)"
+        } else {
+            "Animate speed: keyframe at the playhead"
+        })
+        .clicked()
+    {
+        let new_retime = if animated {
+            if (current - 100.0).abs() < 1e-6 {
+                None
+            } else {
+                Some(kiriko_core::retime::Retime::constant_speed(
+                    dur,
+                    Rational::ZERO,
+                    to_speed(current),
+                ))
             }
-            ui.data_mut(|d| d.remove::<f64>(id));
+        } else {
+            speed_with_key(retime, dur, ctx.lt, to_speed(current))
+        };
+        *pending = Some(kiriko_core::Op::SetLayerRetime {
+            comp: ctx.comp_id,
+            layer: ctx.layer.id,
+            retime: new_retime,
+        });
+    }
+    c.label(
+        egui::RichText::new("Speed %")
+            .small()
+            .color(ctx.theme.text_muted),
+    );
+
+    // Temp-value pattern: a drag is one commit.
+    let id = egui::Id::new(("speedv", ctx.layer.id));
+    let mut v = c.data(|d| d.get_temp::<f64>(id)).unwrap_or(current);
+    let resp = c.add(
+        egui::DragValue::new(&mut v)
+            .speed(1.0)
+            .range(-800.0..=800.0)
+            .suffix(" %"),
+    );
+    if resp.dragged() || resp.has_focus() {
+        c.data_mut(|d| d.insert_temp(id, v));
+    }
+    if resp.drag_stopped() || resp.lost_focus() {
+        if (v - current).abs() > 1e-6 {
+            let new_retime = if animated {
+                speed_with_key(retime, dur, ctx.lt, to_speed(v))
+            } else if (v - 100.0).abs() < 1e-6 {
+                None
+            } else {
+                Some(kiriko_core::retime::Retime::constant_speed(
+                    dur,
+                    Rational::ZERO,
+                    to_speed(v),
+                ))
+            };
+            *pending = Some(kiriko_core::Op::SetLayerRetime {
+                comp: ctx.comp_id,
+                layer: ctx.layer.id,
+                retime: new_retime,
+            });
         }
-        // If the map is an actual ramp (start ≠ end), flag it read-only.
-        if retime
-            .as_ref()
-            .and_then(|r| r.single_ramp_view())
-            .is_some_and(|(a, b, _)| (a - b).abs() > 1e-9)
-        {
-            ui.label(
-                egui::RichText::new("ramp")
-                    .small()
-                    .color(theme.text_disabled),
-            )
-            .on_hover_text("Ramps are edited in the graph editor");
+        c.data_mut(|d| d.remove::<f64>(id));
+    }
+
+    // Track: speed keyframes as diamonds (meaningful once animated).
+    if animated {
+        if let Some(keys) = &keys {
+            let kf: Vec<kiriko_core::anim::Keyframe> = keys
+                .iter()
+                .map(|(t, _)| kiriko_core::anim::Keyframe {
+                    time: *t,
+                    value: 0.0,
+                    interp_in: kiriko_core::anim::SideInterp::Linear,
+                    interp_out: kiriko_core::anim::SideInterp::Linear,
+                })
+                .collect();
+            draw_key_diamonds(ui, ctx, row_rect, &kf);
         }
-    });
+    }
 }
 
 fn mask_space(

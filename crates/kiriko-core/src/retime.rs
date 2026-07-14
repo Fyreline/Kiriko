@@ -328,6 +328,61 @@ impl Retime {
         }
     }
 
+    /// Build a retime whose speed is piecewise-linear through `keys` (local
+    /// time → speed, 1.0 = 100%): each consecutive pair becomes a Linear-ease
+    /// Rate segment, and boundary source positions are integrated from
+    /// `source_in` (§4.1). This is the store the timeline's keyframable speed
+    /// row produces (K-072). Needs ≥ 2 keys, the first at local time 0, times
+    /// strictly increasing; returns None otherwise (caller keeps its store).
+    pub fn from_speed_keyframes(
+        source_in: Rational,
+        keys: &[(Rational, Rational)],
+    ) -> Option<Self> {
+        if keys.len() < 2 || keys[0].0 != Rational::ZERO {
+            return None;
+        }
+        if keys.windows(2).any(|w| w[1].0 <= w[0].0) {
+            return None;
+        }
+        let boundaries = keys
+            .iter()
+            .map(|(t, _)| Boundary::new(*t, source_in))
+            .collect();
+        let segments = keys
+            .windows(2)
+            .map(|w| RetimeSegment::Rate(RateSegment::new(w[0].1, w[1].1, Ease::Linear)))
+            .collect();
+        let mut r = Self {
+            boundaries,
+            segments,
+            allow_reverse: keys.iter().any(|(_, v)| v.is_negative()),
+            interpolation: Interpolation::default(),
+            extra: serde_json::Map::new(),
+        };
+        r.recompute_boundaries().ok()?;
+        Some(r)
+    }
+
+    /// The speed keyframes (local time → speed) that reproduce this retime,
+    /// when every segment is a Linear-ease Rate segment; None otherwise (eased
+    /// or Map stores are edited in the graph editor, not as plain keys).
+    pub fn speed_keyframes(&self) -> Option<Vec<(Rational, Rational)>> {
+        let mut out = Vec::with_capacity(self.segments.len() + 1);
+        for (i, seg) in self.segments.iter().enumerate() {
+            let RetimeSegment::Rate(s) = seg else {
+                return None;
+            };
+            if s.ease != Ease::Linear {
+                return None;
+            }
+            out.push((self.boundaries[i].t, s.v0));
+            if i + 1 == self.segments.len() {
+                out.push((self.boundaries[i + 1].t, s.v1));
+            }
+        }
+        Some(out)
+    }
+
     /// Split this retime at local time `t` into two retimes covering [0, t]
     /// and [t, D], each with its own domain starting at 0 (docs/04-RETIMING.md
     /// §5.3, §8: cutting a clip partitions its retime exactly). Exact when the
@@ -682,6 +737,47 @@ mod tests {
 
     fn rat(n: i64, d: i64) -> Rational {
         Rational::new(n, d).unwrap()
+    }
+
+    #[test]
+    fn speed_keyframes_build_and_round_trip() {
+        // 100% for [0,2], then ramp up to 200% by t=4.
+        let keys = [
+            (rat(0, 1), rat(1, 1)),
+            (rat(2, 1), rat(1, 1)),
+            (rat(4, 1), rat(2, 1)),
+        ];
+        let r = Retime::from_speed_keyframes(rat(0, 1), &keys).unwrap();
+        assert_eq!(r.speed_keyframes().unwrap(), keys.to_vec());
+        // 1× for the first 2s ⇒ source time 2 at t = 2.
+        assert!((r.evaluate(2.0) - 2.0).abs() < 1e-9);
+        // Halfway up the 1→2 ramp at t = 3 ⇒ instantaneous speed 1.5.
+        assert!((r.speed_at(3.0) - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn from_speed_keyframes_rejects_bad_input() {
+        // Fewer than two keys.
+        assert!(Retime::from_speed_keyframes(rat(0, 1), &[(rat(0, 1), rat(1, 1))]).is_none());
+        // First key not at local time zero.
+        assert!(Retime::from_speed_keyframes(
+            rat(0, 1),
+            &[(rat(1, 1), rat(1, 1)), (rat(2, 1), rat(1, 1))]
+        )
+        .is_none());
+        // Times not strictly increasing.
+        assert!(Retime::from_speed_keyframes(
+            rat(0, 1),
+            &[(rat(0, 1), rat(1, 1)), (rat(0, 1), rat(2, 1))]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn speed_keyframes_none_for_eased_store() {
+        // An eased ramp is a graph-editor store, not plain keys.
+        let eased = Retime::single_ramp(rat(4, 1), rat(0, 1), rat(1, 1), rat(2, 1), Ease::Smooth);
+        assert!(eased.speed_keyframes().is_none());
     }
 
     /// Build a store from (t, s) boundary pairs and segments.

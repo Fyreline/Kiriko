@@ -236,7 +236,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   keeps their ratio as you drag; the 🔓 button unlocks them into two separate rows for
   independent editing, and 🔗 re-locks. (Re-locking keeps whatever ratio the two currently
   have and loses nothing — a small, friendlier deviation from the original "relinking may
-  discard one axis" idea.)
+  discard one axis" idea.) Footage layers also get a **Speed %** row with the same stopwatch:
+  turn it on and speed becomes keyframable, so you can slow-mo one moment and speed through
+  another. Under the bonnet each speed keyframe becomes a segment of the retiming curve (a
+  straight speed ramp between keys); the frame-accurate maths that keeps cuts on the beat is
+  the same engine described above. Curved (eased) speed ramps are still the graph editor's job.
 - The **2.5D camera** — the parallax tool. Every layer has a z position and x/y
   rotations alongside the flat transform; they sleep until you switch the layer to 3D
   (the "3D" toggle in its twirl-down) *and* the comp has a Camera layer
