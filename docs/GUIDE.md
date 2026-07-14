@@ -413,6 +413,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   each time. It works outwards from the playhead but favours the frames *ahead* — roughly
   three ahead for every one behind — because that's usually where you're going next. It fills
   one frame at a time and any real request (a scrub, an edit) immediately takes priority.
+  During playback it keeps warming *ahead of itself* too: the audio card's clock decides which
+  frame to show and never waits, so whenever the frame under the playhead is already cached
+  Kiriko spends the spare moment decoding the next uncached frame a short way in front of the
+  clock (about a dozen frames' lookahead). That's why the first pass over a cold section can
+  stutter but the work-area loop settles into perfectly smooth playback once round.
 - **Mask editing in the Viewer** — select a layer with masks and its outlines draw
   over the picture in clay, with a square handle on every vertex. Drag a handle and
   the outline follows your cursor live; let go and the pixels update — one undo step
