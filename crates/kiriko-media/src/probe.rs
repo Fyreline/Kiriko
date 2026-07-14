@@ -100,3 +100,42 @@ pub fn probe(path: &Path) -> Result<MediaProbe, MediaError> {
         audio,
     })
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::index::tests_support::{fixture, garbage_file, truncated_copy, zero_byte_file};
+
+    /// Regression: probing a zero-byte file must return a typed error and
+    /// never panic (docs/14-ENGINEERING-RULES.md §4).
+    #[test]
+    fn probe_zero_byte_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = zero_byte_file(dir.path());
+        assert!(probe(&path).is_err());
+    }
+
+    /// Regression: probing arbitrary non-media bytes must return a typed
+    /// error and never panic.
+    #[test]
+    fn probe_garbage_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = garbage_file(dir.path());
+        assert!(probe(&path).is_err());
+    }
+
+    /// Regression: probing a file cut off before any usable stream
+    /// information (moov written at the end by this muxer) must return a
+    /// typed error and never panic.
+    #[test]
+    fn probe_truncated_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(file) = fixture(dir.path()) else {
+            eprintln!("skipping: no ffmpeg CLI available for fixture generation");
+            return;
+        };
+        let truncated = truncated_copy(&file, dir.path(), 200);
+        assert!(probe(&truncated).is_err());
+    }
+}
