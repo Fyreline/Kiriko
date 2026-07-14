@@ -252,6 +252,8 @@ fn fmt_duration(secs: f64) -> String {
 /// `HH:MM:SS:FF` frame timecode from seconds at `fps` — the Retime value lens
 /// reading (K-075: "which source frame is showing here"). The frame field wraps
 /// at `fps`; a whole extra second is carried up so `59:24`→`00`+1s at 25 fps.
+/// The frame field is padded to the digit-width of `fps` (min two), so a 600 fps
+/// clip reads `…:599` and a 1000 fps clip `…:0999`, whatever the comp's own rate.
 fn fmt_timecode_frames(secs: f64, fps: f64) -> String {
     let fps_i = fps.round().max(1.0) as u64;
     let total_frames = (secs.max(0.0) * fps).round() as u64;
@@ -260,7 +262,8 @@ fn fmt_timecode_frames(secs: f64, fps: f64) -> String {
     let s = total_s % 60;
     let m = (total_s / 60) % 60;
     let h = total_s / 3600;
-    format!("{h:02}:{m:02}:{s:02}:{ff:02}")
+    let width = fps_i.to_string().len().max(2);
+    format!("{h:02}:{m:02}:{s:02}:{ff:0width$}")
 }
 
 /// Parse a source frame count from a timecode the user typed into the Retime
@@ -3243,26 +3246,12 @@ fn graph_lane_plot(
     // property — value lens = source position as timecode, derivative = speed %.
     if app.graph_retime {
         if let kiriko_core::model::LayerKind::Footage {
-            item,
-            retime: Some(rt),
+            retime: Some(rt), ..
         } = &layer.kind
         {
             // Source frame rate for the timecode: the probed footage fps when
             // media is present, else the comp's rate as a reasonable fallback.
-            #[cfg(feature = "media")]
-            let src_fps = app
-                .media
-                .map
-                .get(item)
-                .and_then(|s| match s {
-                    crate::app_state::media::MediaStatus::Ready { probe, .. } => {
-                        probe.video.as_ref().map(|v| v.fps())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| comp.frame_rate.fps());
-            #[cfg(not(feature = "media"))]
-            let src_fps = comp.frame_rate.fps();
+            let src_fps = layer_source_fps(app, layer, comp.frame_rate.fps());
             // The marquee lives on transform-property curves only; a keyframe
             // selection lives only while its channel is the one graphed.
             app.graph_marquee = None;
@@ -5380,20 +5369,48 @@ fn speed_with_key(
     kiriko_core::retime::Retime::from_speed_keyframes(Rational::ZERO, &keys)
 }
 
-/// Insert or replace a value keyframe (local time → source time) at the
-/// playhead `lt`, both snapped to the frame grid so keys land on frames, keeping
-/// the list sorted and its times unique. Used by the Retime value lens.
+/// The source footage frame rate for a layer's Retime value-lens timecode: the
+/// probed footage fps when the media is present, else `fallback_fps` (the comp
+/// rate). Frames then count within a second at the *footage's* own rate — a
+/// 600 fps clip in a 30 fps comp still reads frames 0..599 — matching the graph
+/// editor's value lens.
+#[cfg(feature = "media")]
+fn layer_source_fps(app: &AppState, layer: &kiriko_core::model::Layer, fallback_fps: f64) -> f64 {
+    use kiriko_core::model::LayerKind;
+    if let LayerKind::Footage { item, .. } = &layer.kind {
+        if let Some(crate::app_state::media::MediaStatus::Ready { probe, .. }) =
+            app.media.map.get(item)
+        {
+            if let Some(v) = probe.video.as_ref() {
+                return v.fps();
+            }
+        }
+    }
+    fallback_fps
+}
+#[cfg(not(feature = "media"))]
+fn layer_source_fps(_app: &AppState, _layer: &kiriko_core::model::Layer, fallback_fps: f64) -> f64 {
+    fallback_fps
+}
+
+/// Insert or replace a value keyframe (local time → source time) at the playhead
+/// `lt`, keeping the list sorted and its times unique. Local time snaps to the
+/// comp frame grid (`comp_fps`, the playhead's own rate); source time snaps to
+/// the footage frame grid (`src_fps`), so keys land on real source frames. Used
+/// by the Retime value lens.
 fn upsert_value_key(
     keys: &mut Vec<(kiriko_core::Rational, kiriko_core::Rational)>,
     lt: f64,
     src: f64,
     dur: kiriko_core::Rational,
-    fps: f64,
+    comp_fps: f64,
+    src_fps: f64,
 ) {
     use kiriko_core::Rational;
-    let g = fps.round().max(1.0) as i64;
-    let t = Rational::from_f64_on_grid(lt.clamp(0.0, dur.to_f64()), g).unwrap_or(Rational::ZERO);
-    let s = Rational::from_f64_on_grid(src.max(0.0), g).unwrap_or(Rational::ZERO);
+    let gt = comp_fps.round().max(1.0) as i64;
+    let gs = src_fps.round().max(1.0) as i64;
+    let t = Rational::from_f64_on_grid(lt.clamp(0.0, dur.to_f64()), gt).unwrap_or(Rational::ZERO);
+    let s = Rational::from_f64_on_grid(src.max(0.0), gs).unwrap_or(Rational::ZERO);
     if let Some(k) = keys.iter_mut().find(|k| k.0 == t) {
         k.1 = s;
     } else {
@@ -5437,6 +5454,9 @@ fn speed_property_row(
     // timecode) — AE's Time Remap. Which one is live follows the graph lens.
     let speed_lens = app.graph_speed_view;
     let fps = ctx.fps;
+    // The value lens reads and keys the source time at the footage's own frame
+    // rate, not the comp's, so a 600 fps clip counts frames 0..599.
+    let src_fps = layer_source_fps(app, ctx.layer, ctx.fps);
     // Value-lens state: the source time at the playhead, and the value keys
     // (every boundary). The Time stopwatch is ON as soon as any retime exists —
     // like AE's Time Remap, enabling it always yields at least the start/end
@@ -5489,7 +5509,7 @@ fn speed_property_row(
                 let mut keys = value_keys
                     .clone()
                     .unwrap_or_else(|| vec![(Rational::ZERO, Rational::ZERO), (dur, dur)]);
-                upsert_value_key(&mut keys, ctx.lt, src_now, dur, fps);
+                upsert_value_key(&mut keys, ctx.lt, src_now, dur, fps, src_fps);
                 kiriko_core::retime::Retime::from_value_keyframes(&keys)
             };
             *pending = Some(kiriko_core::Op::SetLayerRetime {
@@ -5563,7 +5583,7 @@ fn speed_property_row(
                 let mut kv = value_keys
                     .clone()
                     .unwrap_or_else(|| vec![(Rational::ZERO, Rational::ZERO), (dur, dur)]);
-                upsert_value_key(&mut kv, ctx.lt, src_now, dur, fps);
+                upsert_value_key(&mut kv, ctx.lt, src_now, dur, fps, src_fps);
                 kiriko_core::retime::Retime::from_value_keyframes(&kv)
             };
             *pending = Some(kiriko_core::Op::SetLayerRetime {
@@ -5649,28 +5669,31 @@ fn speed_property_row(
             c.data_mut(|d| d.remove::<f64>(id));
         }
     } else {
-        // Source time as an editable HH:MM:SS:FF timecode, scrubbed in frames.
+        // Source time as an editable HH:MM:SS:FF timecode, scrubbed in source
+        // frames at the footage's own rate.
         let id = egui::Id::new(("timev", ctx.layer.id));
-        let mut frames = c.data(|d| d.get_temp::<f64>(id)).unwrap_or(src_now * fps);
+        let mut frames = c
+            .data(|d| d.get_temp::<f64>(id))
+            .unwrap_or(src_now * src_fps);
         let resp = c.add(
             egui::DragValue::new(&mut frames)
                 .speed(1.0)
                 .range(0.0..=1.0e9)
-                .custom_formatter(move |n, _| fmt_timecode_frames(n / fps, fps))
-                .custom_parser(move |s| parse_timecode_frames(s, fps)),
+                .custom_formatter(move |n, _| fmt_timecode_frames(n / src_fps, src_fps))
+                .custom_parser(move |s| parse_timecode_frames(s, src_fps)),
         );
         if resp.dragged() || resp.has_focus() {
             c.data_mut(|d| d.insert_temp(id, frames));
         }
         if resp.drag_stopped() || resp.lost_focus() {
-            let new_src = frames.max(0.0) / fps;
+            let new_src = frames.max(0.0) / src_fps;
             // Editing the time keyframes it (AE Time Remap), seeding endpoints
             // from the current curve when none exist yet.
-            if (new_src - src_now).abs() > 0.5 / fps {
+            if (new_src - src_now).abs() > 0.5 / src_fps {
                 let mut keys = value_keys
                     .clone()
                     .unwrap_or_else(|| vec![(Rational::ZERO, Rational::ZERO), (dur, dur)]);
-                upsert_value_key(&mut keys, ctx.lt, new_src, dur, fps);
+                upsert_value_key(&mut keys, ctx.lt, new_src, dur, fps, src_fps);
                 *pending = Some(kiriko_core::Op::SetLayerRetime {
                     comp: ctx.comp_id,
                     layer: ctx.layer.id,
@@ -7961,15 +7984,37 @@ mod dock_tests {
         let dur = Rational::new(4, 1).unwrap();
         let mut keys = vec![(Rational::ZERO, Rational::ZERO), (dur, dur)];
         // At 24 fps, a playhead at 1.0 s over an identity clip keys source 1.0 s.
-        upsert_value_key(&mut keys, 1.0, 1.0, dur, 24.0);
+        upsert_value_key(&mut keys, 1.0, 1.0, dur, 24.0, 24.0);
         assert_eq!(keys.len(), 3);
         let r = Retime::from_value_keyframes(&keys).unwrap();
         assert!((r.evaluate(1.0) - 1.0).abs() < 1e-9);
         // Re-keying the same frame replaces rather than duplicates it.
-        upsert_value_key(&mut keys, 1.0, 2.0, dur, 24.0);
+        upsert_value_key(&mut keys, 1.0, 2.0, dur, 24.0, 24.0);
         assert_eq!(keys.len(), 3);
         let r = Retime::from_value_keyframes(&keys).unwrap();
         assert!((r.evaluate(1.0) - 2.0).abs() < 1e-9);
+    }
+
+    // The value lens counts source frames at the footage's rate, not the comp's:
+    // source time snaps to the footage grid, and the timecode's frame field wraps
+    // and pads to that rate (600 fps → frames 0..599, three digits).
+    #[test]
+    fn value_lens_uses_the_source_frame_rate() {
+        use kiriko_core::retime::Retime;
+        use kiriko_core::Rational;
+        let dur = Rational::new(2, 1).unwrap();
+        let mut keys = vec![(Rational::ZERO, Rational::ZERO), (dur, dur)];
+        // Comp at 30 fps, footage at 600 fps: a playhead 0.1 s in, keying source
+        // 0.105 s, snaps source to the 600-grid (exactly 63/600 s = frame 63).
+        upsert_value_key(&mut keys, 0.1, 0.105, dur, 30.0, 600.0);
+        let interior = keys.iter().find(|(t, _)| *t != Rational::ZERO && *t != dur);
+        let (_t, s) = interior.expect("interior key");
+        assert_eq!(*s, Rational::new(63, 600).unwrap());
+        assert!(Retime::from_value_keyframes(&keys).is_some());
+        // The timecode reads that as frame 63, three digits wide at 600 fps.
+        assert_eq!(fmt_timecode_frames(63.0 / 600.0, 600.0), "00:00:00:063");
+        // A 1000 fps clip pads the frame field to four digits.
+        assert_eq!(fmt_timecode_frames(5.0 / 1000.0, 1000.0), "00:00:00:0005");
     }
 
     // Regression: enabling Time keyframes with the playhead at the layer's very
@@ -7983,13 +8028,13 @@ mod dock_tests {
         let dur = Rational::new(4, 1).unwrap();
         // Playhead at t = 0 on an un-retimed layer: keys stay the endpoint pair.
         let mut keys = vec![(Rational::ZERO, Rational::ZERO), (dur, dur)];
-        upsert_value_key(&mut keys, 0.0, 0.0, dur, 24.0);
+        upsert_value_key(&mut keys, 0.0, 0.0, dur, 24.0, 24.0);
         assert_eq!(keys.len(), 2);
         let r = Retime::from_value_keyframes(&keys).unwrap();
         assert!((r.evaluate(2.0) - 2.0).abs() < 1e-9); // identity pass-through
                                                        // Playhead at t = dur (and past it — upsert clamps): same story.
         let mut keys = vec![(Rational::ZERO, Rational::ZERO), (dur, dur)];
-        upsert_value_key(&mut keys, 5.0, 4.0, dur, 24.0);
+        upsert_value_key(&mut keys, 5.0, 4.0, dur, 24.0, 24.0);
         assert_eq!(keys.len(), 2);
         assert!(Retime::from_value_keyframes(&keys).is_some());
     }
