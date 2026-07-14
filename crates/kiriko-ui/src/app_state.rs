@@ -754,6 +754,15 @@ pub struct AppState {
     /// value-units/second). Separate from `graph_edit` because the speed lens
     /// edits a keyframe's tangent (K-070), not its value or time.
     pub graph_speed_edit: Option<(usize, f64)>,
+    /// In-flight value-lens tangent-handle drag: (key index, out side?,
+    /// provisional slope in value-units/second, provisional influence in (0, 1]).
+    /// `out` chooses the forward or backward handle; the curve previews live and
+    /// the release writes the bezier side(s) back (unified unless Alt-dragged).
+    pub graph_tangent_edit: Option<(usize, bool, f64, f64)>,
+    /// A pending interpolation change for the graphed transform channel's keys
+    /// (selection, or all keys when nothing is selected): set by F9 and the
+    /// bottom-bar Linear/Bezier buttons, consumed by `graph_plot`.
+    pub graph_set_interp: Option<kiriko_core::anim::SideInterp>,
     /// Graph editor lens: false = value graph, true = speed graph
     /// (docs/01-GLOSSARY.md §3: two views of the same data, never separate).
     pub graph_speed_view: bool,
@@ -884,6 +893,8 @@ impl Default for AppState {
             graph_marquee: None,
             graph_selection: None,
             graph_speed_edit: None,
+            graph_tangent_edit: None,
+            graph_set_interp: None,
             graph_speed_view: false,
             graph_retime: false,
             vegas_default_lens: false,
@@ -2441,6 +2452,7 @@ impl AppState {
             || self.graph_edit.is_some()
             || self.graph_marquee.is_some()
             || self.graph_speed_edit.is_some()
+            || self.graph_tangent_edit.is_some()
             || self.graph_retime_edit.is_some()
             || self.mask_drag.is_some()
             || self.origin_drag.is_some()

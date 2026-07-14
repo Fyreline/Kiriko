@@ -2463,6 +2463,37 @@ fn timeline_bottom_bar(
         {
             app.graph_speed_view = true;
         }
+
+        // Interpolation buttons for a graphed transform property (not the Retime
+        // channel): convert the selected keys — or all of them — to straight or
+        // eased. Linear is the default key; Bezier is AE's easy-ease (also F9),
+        // after which the key's yellow tangent handles are draggable.
+        if !retime && app.graph_prop.is_some() {
+            zc.add_space(10.0);
+            let x = zc.cursor().left();
+            zc.painter().line_segment(
+                [
+                    egui::pos2(x, bar_top + 5.0),
+                    egui::pos2(x, panel.bottom() - 5.0),
+                ],
+                egui::Stroke::new(1.0_f32, theme.hairline_strong),
+            );
+            zc.add_space(10.0);
+            if zc
+                .small_button("Linear")
+                .on_hover_text("Straighten the selected keys (or all)")
+                .clicked()
+            {
+                app.graph_set_interp = Some(kiriko_core::anim::SideInterp::Linear);
+            }
+            if zc
+                .small_button("Bezier")
+                .on_hover_text("Easy-ease the selected keys (or all) — AE's F9")
+                .clicked()
+            {
+                app.graph_set_interp = Some(kiriko_core::anim::EASY_EASE);
+            }
+        }
     }
 
     // View toggle, bottom-right of the lanes.
@@ -3598,6 +3629,52 @@ fn side_influence(side: kiriko_core::anim::SideInterp) -> f64 {
     }
 }
 
+/// A keyframe side's bezier slope (value-units/second), or None if that side is
+/// Linear/Hold and carries no single slope.
+fn side_speed(side: kiriko_core::anim::SideInterp) -> Option<f64> {
+    match side {
+        kiriko_core::anim::SideInterp::Bezier { speed, .. } => Some(speed),
+        _ => None,
+    }
+}
+
+/// Write a value-lens tangent-handle drag back onto a keyframe: the dragged side
+/// takes the new `speed`/`influence`; a smooth key (both sides bezier, equal
+/// slope) keeps its handles collinear by mirroring the slope to the other side
+/// (its own reach preserved), unless `alt` breaks it or the key is already
+/// broken. This is the AE handle: unified by default, Alt-drag to move one end.
+fn apply_tangent(
+    k: &mut kiriko_core::anim::Keyframe,
+    is_out: bool,
+    speed: f64,
+    influence: f64,
+    alt: bool,
+) {
+    use kiriko_core::anim::SideInterp::Bezier;
+    let unified = matches!((side_speed(k.interp_in), side_speed(k.interp_out)),
+        (Some(a), Some(b)) if (a - b).abs() < 1e-6);
+    let mirror = unified && !alt;
+    if is_out {
+        let in_reach = side_influence(k.interp_in);
+        k.interp_out = Bezier { speed, influence };
+        if mirror {
+            k.interp_in = Bezier {
+                speed,
+                influence: in_reach,
+            };
+        }
+    } else {
+        let out_reach = side_influence(k.interp_out);
+        k.interp_in = Bezier { speed, influence };
+        if mirror {
+            k.interp_out = Bezier {
+                speed,
+                influence: out_reach,
+            };
+        }
+    }
+}
+
 /// Indices of the plotted keyframe points that fall inside a marquee band.
 fn keys_in_band(points: &[egui::Pos2], band: egui::Rect) -> Vec<usize> {
     points
@@ -3674,31 +3751,14 @@ fn graph_plot(
     use kiriko_core::anim::{Animation, Keyframe, SideInterp};
     let layer_id = layer.id;
 
-    // Compact header: blanket ease/linear (the value/speed lens toggle lives
-    // in the timeline's bottom bar).
-    let header = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + 22.0));
-    let mut set_sides: Option<SideInterp> = None;
-    {
-        let mut h = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(header)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        h.set_clip_rect(header);
-        if h.small_button("Ease")
-            .on_hover_text("Easy-ease every key of this curve (AE's F9)")
-            .clicked()
-        {
-            set_sides = Some(kiriko_core::anim::EASY_EASE);
-        }
-        if h.small_button("Linear")
-            .on_hover_text("Straighten every key of this curve")
-            .clicked()
-        {
-            set_sides = Some(SideInterp::Linear);
-        }
+    // Interpolation change for this pass: the bottom-bar Linear/Bezier buttons
+    // (which set graph_set_interp) or F9 (easy-ease), applied to the selection —
+    // or every key when nothing is selected. The value/speed lens toggle and the
+    // Linear/Bezier buttons live in the timeline's bottom bar, not a plot header.
+    let mut set_sides: Option<SideInterp> = app.graph_set_interp.take();
+    if ui.input(|i| i.key_pressed(egui::Key::F9)) {
+        set_sides = Some(kiriko_core::anim::EASY_EASE);
     }
-    let rect = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + 22.0), rect.max);
 
     let slot = layer.transform.get(current);
     // A still (Static) property has no keys yet: graph a flat line at its value
@@ -3846,6 +3906,14 @@ fn graph_plot(
             };
             k.interp_in = side;
             k.interp_out = side;
+        }
+    }
+    // A value-lens tangent-handle drag previews live too — the dragged side (and
+    // its unified partner) re-tangents so the curve bends as you pull.
+    if let Some((idx, is_out, sp, inf)) = app.graph_tangent_edit {
+        let alt = ui.input(|i| i.modifiers.alt);
+        if let Some(k) = shown.get_mut(idx) {
+            apply_tangent(k, is_out, sp, inf, alt);
         }
     }
 
@@ -4045,6 +4113,110 @@ fn graph_plot(
                 ));
             }
         }
+
+        // Tangent handles (value lens): a selected key shows a draggable yellow
+        // handle on each bezier side. Dragging sets that side's slope (speed) and
+        // reach (influence); a smooth key mirrors the slope across itself, and
+        // Alt-drag breaks it to move one end alone (apply_tangent). Handles are
+        // interacted after the key so a grab on the handle wins over the key drag.
+        if selected {
+            let handle_colour = theme.curve[3]; // the tangent (gold) accent
+            let alt_now = ui.input(|i| i.modifiers.alt);
+            // A smooth key (both sides bezier, equal slope) mirrors a drag across
+            // itself, so the partner handle previews the same slope live.
+            let key_unified = matches!(
+                (side_speed(key.interp_in), side_speed(key.interp_out)),
+                (Some(a), Some(b)) if (a - b).abs() < 1e-6
+            );
+            for is_out in [true, false] {
+                let side = if is_out {
+                    key.interp_out
+                } else {
+                    key.interp_in
+                };
+                let has_neighbour = if is_out {
+                    idx + 1 < keys.len()
+                } else {
+                    idx > 0
+                };
+                if !has_neighbour || !matches!(side, SideInterp::Bezier { .. }) {
+                    continue;
+                }
+                let seg = if is_out {
+                    keys[idx + 1].time.to_f64() - kt
+                } else {
+                    kt - keys[idx - 1].time.to_f64()
+                };
+                if seg <= 1e-6 {
+                    continue;
+                }
+                // The in-flight drag overrides this side's rest tangent; the
+                // unified partner mirrors the dragged slope (its own reach kept).
+                let (speed, influence) = match app.graph_tangent_edit {
+                    Some((i, o, sp, inf)) if i == idx && o == is_out => (sp, inf),
+                    Some((i, _, sp, _)) if i == idx && key_unified && !alt_now => {
+                        (sp, side_influence(side))
+                    }
+                    _ => (side_speed(side).unwrap_or(0.0), side_influence(side)),
+                };
+                let reach = influence * seg;
+                let (et, ev) = if is_out {
+                    (kt + reach, kv + speed * reach)
+                } else {
+                    (kt - reach, kv - speed * reach)
+                };
+                let hpos = egui::pos2(x_of(et), y_of(ev));
+                ui.painter()
+                    .line_segment([pos, hpos], egui::Stroke::new(1.0_f32, handle_colour));
+                let hresp = ui.interact(
+                    egui::Rect::from_center_size(hpos, egui::vec2(10.0, 10.0)),
+                    ui.id().with(("gtan", layer_id, idx, is_out)),
+                    egui::Sense::click_and_drag(),
+                );
+                let hot = hresp.hovered()
+                    || app
+                        .graph_tangent_edit
+                        .is_some_and(|(i, o, ..)| i == idx && o == is_out);
+                ui.painter()
+                    .circle_filled(hpos, if hot { 4.5 } else { 3.0 }, handle_colour);
+                if hresp.dragged() {
+                    if let Some(p) = hresp.interact_pointer_pos() {
+                        let (pt, pv) = (t_of(p.x), v_of(p.y));
+                        let dt = if is_out {
+                            (pt - kt).clamp(1e-4, seg)
+                        } else {
+                            (kt - pt).clamp(1e-4, seg)
+                        };
+                        let inf = (dt / seg).clamp(0.02, 1.0);
+                        let sp = if is_out {
+                            (pv - kv) / dt
+                        } else {
+                            (kv - pv) / dt
+                        };
+                        app.graph_tangent_edit = Some((idx, is_out, sp, inf));
+                    }
+                }
+                if hresp.drag_stopped() {
+                    if let Some((i, o, sp, inf)) = app.graph_tangent_edit.take() {
+                        if i == idx {
+                            let alt = ui.input(|inp| inp.modifiers.alt);
+                            let mut new_keys = keys.clone();
+                            apply_tangent(&mut new_keys[i], o, sp, inf, alt);
+                            pending = Some(new_keys);
+                        }
+                    }
+                }
+            }
+        }
+
+        // A plain click selects just this key, so its handles appear.
+        if resp.clicked() {
+            app.graph_selection = Some(crate::app_state::GraphSelection {
+                layer: layer_id,
+                prop: current,
+                keys: vec![(idx, key.time)],
+            });
+        }
         if resp.dragged() {
             if let Some(p) = resp.interact_pointer_pos() {
                 if multi && selected {
@@ -4107,6 +4279,17 @@ fn graph_plot(
                 sides = Some(SideInterp::Hold);
                 ui.close_menu();
             }
+            // Re-join a broken bezier key: both handles take the average slope,
+            // each keeping its own reach — the inverse of an Alt-drag break.
+            let mut unify = false;
+            if matches!(key.interp_in, SideInterp::Bezier { .. })
+                && matches!(key.interp_out, SideInterp::Bezier { .. })
+                && side_speed(key.interp_in) != side_speed(key.interp_out)
+                && ui.button("Unify handles").clicked()
+            {
+                unify = true;
+                ui.close_menu();
+            }
             ui.separator();
             if ui.button("Delete key").clicked() {
                 delete = true;
@@ -4116,6 +4299,20 @@ fn graph_plot(
                 let mut new_keys = keys.clone();
                 new_keys[idx].interp_in = si;
                 new_keys[idx].interp_out = si;
+                pending = Some(new_keys);
+            } else if unify {
+                let mut new_keys = keys.clone();
+                let avg = 0.5
+                    * (side_speed(key.interp_in).unwrap_or(0.0)
+                        + side_speed(key.interp_out).unwrap_or(0.0));
+                new_keys[idx].interp_in = SideInterp::Bezier {
+                    speed: avg,
+                    influence: side_influence(key.interp_in),
+                };
+                new_keys[idx].interp_out = SideInterp::Bezier {
+                    speed: avg,
+                    influence: side_influence(key.interp_out),
+                };
                 pending = Some(new_keys);
             } else if delete {
                 let mut new_keys = keys.clone();
@@ -4141,9 +4338,17 @@ fn graph_plot(
 
     if let Some(sides) = set_sides {
         let mut new_keys = keys.clone();
-        for k in &mut new_keys {
-            k.interp_in = sides;
-            k.interp_out = sides;
+        // The selection, or every key when nothing is picked out.
+        let targets: Vec<usize> = if selection.is_empty() {
+            (0..new_keys.len()).collect()
+        } else {
+            selection.clone()
+        };
+        for i in targets {
+            if let Some(k) = new_keys.get_mut(i) {
+                k.interp_in = sides;
+                k.interp_out = sides;
+            }
         }
         pending = Some(new_keys);
     }
@@ -7897,6 +8102,47 @@ mod dock_tests {
         );
         assert!((side_influence(SideInterp::Linear) - 1.0 / 3.0).abs() < 1e-9);
         assert!((side_influence(SideInterp::Hold) - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    // A value-lens tangent drag: a smooth key mirrors the slope across itself
+    // (each side keeps its own reach); Alt-drag, and an already-broken key, move
+    // one end alone.
+    #[test]
+    fn tangent_drag_unifies_by_default_and_alt_breaks() {
+        use kiriko_core::anim::{Keyframe, SideInterp::Bezier, EASY_EASE};
+        let base = || Keyframe {
+            time: rational_at(1.0),
+            value: 0.0,
+            interp_in: EASY_EASE, // speed 0, influence 1/3
+            interp_out: EASY_EASE,
+        };
+        // Plain drag of the out handle sets both slopes; reaches are preserved.
+        let mut k = base();
+        apply_tangent(&mut k, true, 5.0, 0.5, false);
+        assert_eq!(side_speed(k.interp_out), Some(5.0));
+        assert_eq!(side_speed(k.interp_in), Some(5.0)); // mirrored
+        assert!((side_influence(k.interp_out) - 0.5).abs() < 1e-9);
+        assert!((side_influence(k.interp_in) - 1.0 / 3.0).abs() < 1e-9); // in reach kept
+                                                                         // Alt-drag breaks: only the dragged side changes.
+        let mut k = base();
+        apply_tangent(&mut k, true, 5.0, 0.5, true);
+        assert_eq!(side_speed(k.interp_out), Some(5.0));
+        assert_eq!(side_speed(k.interp_in), Some(0.0)); // untouched
+                                                        // A key already broken (slopes differ) moves one end even on a plain drag.
+        let mut k = Keyframe {
+            interp_in: Bezier {
+                speed: 2.0,
+                influence: 1.0 / 3.0,
+            },
+            interp_out: Bezier {
+                speed: -3.0,
+                influence: 1.0 / 3.0,
+            },
+            ..base()
+        };
+        apply_tangent(&mut k, false, 9.0, 0.4, false);
+        assert_eq!(side_speed(k.interp_in), Some(9.0));
+        assert_eq!(side_speed(k.interp_out), Some(-3.0)); // stays broken
     }
 
     // K-070: setting a key's speed (what a speed-lens drag commits — both sides

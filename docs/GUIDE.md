@@ -318,6 +318,18 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   or changing a keyframe anywhere in the timeline — a stopwatch click, scrubbing a value in a
   property row, dragging a key — selects that layer and points the graph at that channel, so
   the curve you see is always the one you just touched.
+  **Shaping a key (bezier handles).** New keys are **linear** — straight lines in, straight
+  lines out. Select a key (click it, or marquee several) and press **F9**, or the **Bezier**
+  button in the bottom bar, to *easy-ease* it — After Effects' smooth default. A bezier key
+  grows two short **gold handles** in the value view, one reaching back toward the previous
+  key and one forward toward the next. Drag a handle to shape the curve: how steeply it leaves
+  the handle sets the **speed** there, how far the handle reaches sets the **influence** (how
+  long that ease holds sway). By default the two handles are **unified** — they stay in a
+  straight line through the key, so the motion glides through smoothly; **Alt-drag** a handle
+  to *break* it and shape the two sides independently (a corner). Right-click a broken key and
+  choose **Unify handles** to smooth it back out. The **Linear** button (bottom bar) straightens
+  the selected keys again, and right-clicking a key still offers Easy ease / Linear / Hold /
+  Delete. Whatever the handles, the curve always passes exactly through the keys.
   A **footage layer** also carries a **Retime channel** here, named for the lens you are in
   (K-076): **Time** in the value view, **Velocity** in the speed view. In the **Time** lens it
   behaves like every other property — a stopwatch turns keyframing on (adding a key that holds
