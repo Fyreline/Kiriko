@@ -449,6 +449,24 @@ impl Retime {
         Some(r)
     }
 
+    /// A copy with the endpoint speeds of the RateSegment covering local time `t`
+    /// set to `(v0, v1)`, downstream source positions recomputed (docs/04-RETIMING.md
+    /// §9.2: "drag a RateSegment endpoint level — downstream boundary `s` values
+    /// recompute exactly"). The segment start is pinned (K-070). Unlike the
+    /// speed-keyframe path this works on eased segments too. None for a MapSegment
+    /// or out-of-domain `t`.
+    pub fn with_segment_speeds(&self, t: Rational, v0: Rational, v1: Rational) -> Option<Retime> {
+        let i = self.segment_index_at(t)?;
+        let mut r = self.clone();
+        let RetimeSegment::Rate(seg) = &mut r.segments[i] else {
+            return None;
+        };
+        seg.v0 = v0;
+        seg.v1 = v1;
+        r.recompute_boundaries().ok()?;
+        Some(r)
+    }
+
     /// Split this retime at local time `t` into two retimes covering [0, t]
     /// and [t, D], each with its own domain starting at 0 (docs/04-RETIMING.md
     /// §5.3, §8: cutting a clip partitions its retime exactly). Exact when the
@@ -1240,6 +1258,25 @@ mod tests {
             "downstream source recomputed for the new ease"
         );
         slow.validate().unwrap();
+    }
+
+    #[test]
+    fn setting_segment_speeds_recomputes_and_pins_start() {
+        // Constant 100% over 2 s → end source 2.0.
+        let base = Retime::constant_speed(rat(2, 1), rat(0, 1), rat(1, 1));
+        assert!((base.evaluate(2.0 - 1e-9) - 2.0).abs() < 1e-6);
+        // Ramp it to 100% → 50%: Δs = 2·[1 + (½−1)·½] = 1.5, start pinned at 0.
+        let ramp = base
+            .with_segment_speeds(rat(1, 1), rat(1, 1), rat(1, 2))
+            .unwrap();
+        assert!(ramp.evaluate(0.0).abs() < 1e-9, "start pinned");
+        assert!(
+            (ramp.evaluate(2.0 - 1e-9) - 1.5).abs() < 1e-3,
+            "downstream source recomputed"
+        );
+        // Linear ramp reads 75% at the midpoint.
+        assert!((ramp.speed_at(1.0) - 0.75).abs() < 1e-3);
+        ramp.validate().unwrap();
     }
 
     #[test]
