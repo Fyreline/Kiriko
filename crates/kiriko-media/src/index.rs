@@ -35,8 +35,17 @@ impl FrameIndex {
     }
 
     /// Frame number of the nearest keyframe at or before frame `n`.
+    ///
+    /// Returns 0 if the index has no entries at all (e.g. a video stream was
+    /// declared in the container but no readable packets were found for it —
+    /// a truncated-file scenario). 0 is not a valid frame number in that
+    /// case either, but it is a well-defined, non-panicking answer; callers
+    /// that care should check `frame_count() == 0` first.
     pub fn nearest_keyframe_at_or_before(&self, n: usize) -> usize {
-        let n = n.min(self.entries.len().saturating_sub(1));
+        if self.entries.is_empty() {
+            return 0;
+        }
+        let n = n.min(self.entries.len() - 1);
         (0..=n)
             .rev()
             .find(|&i| self.entries[i].keyframe)
@@ -183,6 +192,74 @@ pub mod tests_support {
             .ok()?;
         status.success().then_some(out)
     }
+
+    /// A variable-frame-rate fixture: from a 60 fps source, keep only frames
+    /// whose index is a multiple of 5 or of 13 and write with `-fps_mode
+    /// vfr` so the container keeps the resulting irregular packet spacing
+    /// (some gaps 5/60 s, some 13/60 s, some shorter where both coincide).
+    /// This is the ShadowPlay/OBS-style case docs/impl/media-io.md §2 calls
+    /// out: distinct pts deltas that are not all equal.
+    pub fn vfr_fixture(dir: &Path) -> Option<PathBuf> {
+        let bin = ffmpeg_bin()?;
+        let out = dir.join("vfr_fixture.mp4");
+        let status = Command::new(bin)
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=3:size=320x240:rate=60",
+                "-vf",
+                "select='not(mod(n\\,5))+not(mod(n\\,13))'",
+                "-fps_mode",
+                "vfr",
+                "-c:v",
+                "libx264",
+                "-g",
+                "9999",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&out)
+            .status()
+            .ok()?;
+        status.success().then_some(out)
+    }
+
+    /// A zero-byte file — the simplest malformed input a footage import can
+    /// be pointed at.
+    pub fn zero_byte_file(dir: &Path) -> PathBuf {
+        let path = dir.join("empty.bin");
+        std::fs::write(&path, []).expect("write zero-byte fixture");
+        path
+    }
+
+    /// Deterministic non-media bytes: not a zero-byte file, not any known
+    /// container magic, just noise.
+    pub fn garbage_file(dir: &Path) -> PathBuf {
+        let path = dir.join("garbage.bin");
+        let mut state: u32 = 0x9E3779B9;
+        let bytes: Vec<u8> = (0..4096)
+            .map(|_| {
+                state = state.wrapping_mul(2_654_435_761).wrapping_add(1);
+                (state >> 24) as u8
+            })
+            .collect();
+        std::fs::write(&path, &bytes).expect("write garbage fixture");
+        path
+    }
+
+    /// A copy of `src` cut down to its first `keep_bytes` bytes — simulates
+    /// a cut-short download, a crashed export, or a half-written proxy.
+    pub fn truncated_copy(src: &Path, dir: &Path, keep_bytes: usize) -> PathBuf {
+        let bytes = std::fs::read(src).expect("read source fixture");
+        let cut = &bytes[..keep_bytes.min(bytes.len())];
+        let path = dir.join("truncated.mp4");
+        std::fs::write(&path, cut).expect("write truncated fixture");
+        path
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +329,87 @@ mod tests {
         let fb = Fingerprint::of(&b).unwrap();
         assert_ne!(fa.content_hash, fb.content_hash);
         assert_eq!(fa.size, fb.size);
+    }
+
+    /// Regression: `nearest_keyframe_at_or_before` used to index
+    /// `entries[0]` unconditionally, which panicked when a `FrameIndex` had
+    /// zero entries (a video stream declared but no readable packets — e.g.
+    /// a file truncated right after the header). It must return a plain 0
+    /// instead.
+    #[test]
+    fn nearest_keyframe_on_empty_index_does_not_panic() {
+        let index = FrameIndex {
+            timebase_num: 1,
+            timebase_den: 30,
+            entries: Vec::new(),
+            vfr: false,
+            median_delta: 0,
+            fingerprint: Fingerprint {
+                size: 0,
+                mtime_unix: 0,
+                content_hash: String::new(),
+            },
+        };
+        assert_eq!(index.frame_count(), 0);
+        assert_eq!(index.nearest_keyframe_at_or_before(0), 0);
+        assert_eq!(index.nearest_keyframe_at_or_before(50), 0);
+        assert_eq!(index.pts_of_frame(0), None);
+    }
+
+    #[test]
+    fn build_frame_index_on_zero_byte_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = tests_support::zero_byte_file(dir.path());
+        assert!(build_frame_index(&path).is_err());
+    }
+
+    #[test]
+    fn build_frame_index_on_garbage_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = tests_support::garbage_file(dir.path());
+        assert!(build_frame_index(&path).is_err());
+    }
+
+    #[test]
+    fn build_frame_index_on_truncated_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(file) = fixture(dir.path()) else {
+            eprintln!("skipping: no ffmpeg CLI available for fixture generation");
+            return;
+        };
+        // Cut well before the moov atom (written at the end by default for
+        // this muxer), so stream info can never be recovered.
+        let truncated = tests_support::truncated_copy(&file, dir.path(), 200);
+        assert!(build_frame_index(&truncated).is_err());
+    }
+
+    /// docs/impl/media-io.md §2: VFR reality — detect it, and keep the
+    /// index usable (sorted, strictly increasing pts, sane keyframe lookup)
+    /// even when packet spacing is irregular.
+    #[test]
+    fn vfr_source_is_detected_and_index_stays_consistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(file) = tests_support::vfr_fixture(dir.path()) else {
+            eprintln!("skipping: no ffmpeg CLI available for fixture generation");
+            return;
+        };
+        let index = build_frame_index(&file).unwrap();
+        assert!(
+            index.frame_count() > 10,
+            "expected a good number of selected frames, got {}",
+            index.frame_count()
+        );
+        assert!(index.vfr, "irregular packet spacing should flag as VFR");
+
+        // pts strictly increasing regardless of the irregular spacing.
+        assert!(index.entries.windows(2).all(|w| w[0].pts < w[1].pts));
+
+        // Every frame number resolves to a keyframe at-or-before itself,
+        // and never panics across the whole range.
+        for n in 0..index.frame_count() {
+            let k = index.nearest_keyframe_at_or_before(n);
+            assert!(k <= n, "keyframe {k} should be at or before frame {n}");
+            assert!(index.entries[k].keyframe, "frame {k} should be a keyframe");
+        }
     }
 }

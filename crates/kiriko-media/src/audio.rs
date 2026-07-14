@@ -73,7 +73,7 @@ pub fn decode_all(path: &Path, target_rate: u32) -> Result<AudioBuffer, MediaErr
         let converted = convert_samples(swr, &mut out, max_out, frame, in_count)?;
         if converted > 0 {
             let floats = usize::try_from(converted).unwrap_or(0) * 2;
-            let bytes = plane_slice(out.audio_data[0], floats * 4);
+            let bytes = plane_slice(out.audio_data[0], floats * 4)?;
             let mut chunk = vec![0f32; floats];
             byte_to_f32(bytes, &mut chunk);
             samples.extend_from_slice(&chunk);
@@ -115,6 +115,12 @@ pub fn decode_all(path: &Path, target_rate: u32) -> Result<AudioBuffer, MediaErr
 
 /// The resampler call needs raw pointers on both sides; isolated here so the
 /// unsafety is one auditable function (engineering rules §unsafe policy).
+///
+/// SAFETY: `out.audio_data[0]` was just allocated by `AVSamples::new` for at
+/// least `max_out` samples, and `swr_convert`/`swr.convert` only ever writes
+/// up to `max_out` samples into it. `frame`'s `extended_data`, when present,
+/// is owned by the decoder-produced `AVFrame` for the lifetime of this call
+/// and is read-only from swresample's side.
 #[allow(unsafe_code)]
 fn convert_samples(
     swr: &mut SwrContext,
@@ -137,10 +143,22 @@ fn convert_samples(
 }
 
 /// The two raw-pointer touches in audio decode, kept small and auditable.
-fn plane_slice<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+/// Returns an error rather than dereferencing a null plane pointer — a
+/// defensive check against exotic sample formats/channel layouts where the
+/// resampler could in principle leave a plane unset.
+fn plane_slice<'a>(ptr: *const u8, len: usize) -> Result<&'a [u8], MediaError> {
+    if ptr.is_null() {
+        return Err(MediaError::Ffmpeg(
+            "resampler returned a null output buffer".into(),
+        ));
+    }
+    // SAFETY: caller (`push_frame`) only reaches here after `convert_samples`
+    // reported `converted > 0` samples written into this same plane by
+    // `AVSamples::new`'s allocation, and `len` is derived from that count,
+    // so the read stays within the allocation.
     #[allow(unsafe_code)]
     unsafe {
-        std::slice::from_raw_parts(ptr, len)
+        Ok(std::slice::from_raw_parts(ptr, len))
     }
 }
 
@@ -207,5 +225,48 @@ mod tests {
         let l = buf.samples[1000];
         let r = buf.samples[1001];
         assert!((l - r).abs() < 1e-3, "L {l} vs R {r}");
+    }
+
+    #[test]
+    fn decode_all_on_zero_byte_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = crate::index::tests_support::zero_byte_file(dir.path());
+        assert!(decode_all(&path, 48_000).is_err());
+    }
+
+    #[test]
+    fn decode_all_on_garbage_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = crate::index::tests_support::garbage_file(dir.path());
+        assert!(decode_all(&path, 48_000).is_err());
+    }
+
+    #[test]
+    fn decode_all_on_truncated_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(file) = audio_fixture(dir.path()) else {
+            eprintln!("skipping: no ffmpeg CLI available");
+            return;
+        };
+        let truncated = crate::index::tests_support::truncated_copy(&file, dir.path(), 200);
+        // A cut-short m4a should fail cleanly; the important assertion is
+        // that decode_all returns rather than panicking either way.
+        let _ = decode_all(&truncated, 48_000);
+    }
+
+    /// Regression: a video-only file has no audio stream, so `decode_all`
+    /// must return `NoStreams` rather than panicking anywhere in the
+    /// packet/frame loop.
+    #[test]
+    fn decode_all_on_video_only_file_errors_not_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(file) = crate::index::tests_support::fixture(dir.path()) else {
+            eprintln!("skipping: no ffmpeg CLI available");
+            return;
+        };
+        assert!(matches!(
+            decode_all(&file, 48_000),
+            Err(MediaError::NoStreams)
+        ));
     }
 }

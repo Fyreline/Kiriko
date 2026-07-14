@@ -113,7 +113,7 @@ impl Encoder {
 
     /// Encode one tightly-packed RGBA frame (sRGB-encoded display output).
     pub fn write_rgba(&mut self, rgba: &[u8]) -> Result<(), MediaError> {
-        let expect = (self.width * self.height * 4) as usize;
+        let expect = rgba_frame_len(self.width, self.height)?;
         if rgba.len() != expect {
             return Err(MediaError::Ffmpeg(format!(
                 "frame size {} != expected {expect}",
@@ -127,7 +127,7 @@ impl Encoder {
         src.set_format(ffi::AV_PIX_FMT_RGBA);
         src.alloc_buffer()
             .map_err(|e| MediaError::Ffmpeg(e.to_string()))?;
-        copy_rgba_into(&mut src, rgba, self.width, self.height);
+        copy_rgba_into(&mut src, rgba, self.width, self.height)?;
 
         let mut dst = AVFrame::new();
         dst.set_width(self.width);
@@ -150,6 +150,9 @@ impl Encoder {
             match self.encoder.receive_packet() {
                 Ok(mut packet) => {
                     packet.set_stream_index(0);
+                    // INVARIANT: `open_with_bitrate` always adds exactly one
+                    // output stream before an `Encoder` exists, so index 0
+                    // is always present for the lifetime of `self`.
                     packet.rescale_ts(self.encoder.time_base, self.output.streams()[0].time_base);
                     self.output.write_frame(&mut packet)?;
                 }
@@ -174,16 +177,54 @@ impl Encoder {
     }
 }
 
+/// Exact byte length of one packed RGBA frame, checked against overflow so a
+/// nonsensical width/height (bad caller input, not file input, but the rule
+/// is the same: no panics — docs/14-ENGINEERING-RULES.md §4) errors instead
+/// of overflowing `i32` arithmetic.
+fn rgba_frame_len(width: i32, height: i32) -> Result<usize, MediaError> {
+    width
+        .checked_mul(height)
+        .and_then(|px| px.checked_mul(4))
+        .and_then(|len| usize::try_from(len).ok())
+        .ok_or_else(|| MediaError::Ffmpeg("frame dimensions overflow".into()))
+}
+
 /// Copy tight RGBA rows into the (possibly padded) AVFrame planes — the one
 /// raw-pointer touch of the encode path, kept small and auditable.
-fn copy_rgba_into(frame: &mut AVFrame, rgba: &[u8], width: i32, height: i32) {
-    let stride = frame.linesize[0] as usize;
-    let row = (width * 4) as usize;
+fn copy_rgba_into(
+    frame: &mut AVFrame,
+    rgba: &[u8],
+    width: i32,
+    height: i32,
+) -> Result<(), MediaError> {
+    let stride = usize::try_from(frame.linesize[0]).unwrap_or(0);
+    let row = usize::try_from(width).unwrap_or(0).saturating_mul(4);
+    let height = usize::try_from(height).unwrap_or(0);
+    if stride < row {
+        return Err(MediaError::Ffmpeg(
+            "encode frame stride smaller than one row".into(),
+        ));
+    }
+    if frame.data[0].is_null() {
+        return Err(MediaError::Ffmpeg("encode frame has no data plane".into()));
+    }
+    let buf_len = stride
+        .checked_mul(height)
+        .ok_or_else(|| MediaError::Ffmpeg("encode frame buffer size overflow".into()))?;
+    if rgba.len() < row.saturating_mul(height) {
+        return Err(MediaError::Ffmpeg("rgba buffer too small for frame".into()));
+    }
+    // SAFETY: `frame` was just filled by `alloc_buffer` in `write_rgba`,
+    // which allocates at least `linesize[0] * height` bytes for plane 0;
+    // `stride`/`height` are read from that same frame, the null check above
+    // rules out the one case rsmpeg cannot statically guarantee, and the
+    // stride/row check makes every row write below stay in bounds.
     #[allow(unsafe_code)]
-    let dst = unsafe { std::slice::from_raw_parts_mut(frame.data[0], stride * height as usize) };
-    for y in 0..height as usize {
+    let dst = unsafe { std::slice::from_raw_parts_mut(frame.data[0], buf_len) };
+    for y in 0..height {
         dst[y * stride..y * stride + row].copy_from_slice(&rgba[y * row..(y + 1) * row]);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -230,5 +271,22 @@ mod tests {
             "index fps {}",
             index.fps_estimate()
         );
+    }
+
+    /// Regression: `width * height * 4` used to be raw `i32` arithmetic in
+    /// `write_rgba`, which overflow-panics (debug builds) or wraps into a
+    /// wrong, too-small size (release builds) for large-but-plausible
+    /// dimensions. It must report a typed error instead.
+    #[test]
+    fn rgba_frame_len_errors_instead_of_overflowing() {
+        // 50,000 x 50,000 x 4 overflows i32::MAX (2,147,483,647).
+        assert!(rgba_frame_len(50_000, 50_000).is_err());
+        assert_eq!(rgba_frame_len(2, 2).unwrap(), 16);
+        assert_eq!(rgba_frame_len(320, 240).unwrap(), 320 * 240 * 4);
+    }
+
+    #[test]
+    fn rgba_frame_len_rejects_negative_dimensions_without_panicking() {
+        assert!(rgba_frame_len(-1, 100).is_err());
     }
 }
