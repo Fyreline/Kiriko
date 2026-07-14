@@ -269,6 +269,25 @@ fn fmt_timecode_frames(secs: f64, fps: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}:{ff:02}")
 }
 
+/// The (in, out, start_offset) after moving a layer by `delta` comp seconds: all
+/// three shift together, so the bar and its content move as one. Shifting the
+/// span without `start_offset` would *slip* the content instead of moving it.
+fn moved_span(
+    in_point: kiriko_core::time::CompTime,
+    out_point: kiriko_core::time::CompTime,
+    start_offset: kiriko_core::time::CompTime,
+    delta: f64,
+) -> (
+    kiriko_core::time::CompTime,
+    kiriko_core::time::CompTime,
+    kiriko_core::time::CompTime,
+) {
+    let shift = |t: kiriko_core::time::CompTime| {
+        kiriko_core::time::CompTime(rational_at(t.0.to_f64() + delta))
+    };
+    (shift(in_point), shift(out_point), shift(start_offset))
+}
+
 /// Parse a flexible duration: `SS(.sss)`, `MM:SS`, `HH:MM:SS`, or
 /// `HH:MM:SS:mmm`. None on anything unparseable.
 fn parse_duration(text: &str) -> Option<f64> {
@@ -1215,9 +1234,30 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         if select_this {
             app.selected_layer = Some(layer.id);
         }
+        // A whole-layer move (dragging the bar body) slides the bar for preview;
+        // the snapped landing is what draws.
+        let move_dx = match app.move_edit {
+            Some((id, raw_in)) if id == layer.id => {
+                let thr = 6.0 / track_w as f64 * duration;
+                let snapped = kiriko_core::markers::snap_time(
+                    rational_at(raw_in.max(0.0)),
+                    &comp.markers,
+                    rational_at(thr),
+                )
+                .to_f64();
+                snapped - layer.in_point.0.to_f64()
+            }
+            _ => 0.0,
+        };
         let bar = egui::Rect::from_min_max(
-            egui::pos2(x_of(layer.in_point.0.to_f64()), row_rect.top() + 2.0),
-            egui::pos2(x_of(layer.out_point.0.to_f64()), row_rect.bottom() - 2.0),
+            egui::pos2(
+                x_of(layer.in_point.0.to_f64() + move_dx),
+                row_rect.top() + 2.0,
+            ),
+            egui::pos2(
+                x_of(layer.out_point.0.to_f64() + move_dx),
+                row_rect.bottom() - 2.0,
+            ),
         );
         ui.painter().rect(
             bar,
@@ -1401,6 +1441,64 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                                 out_point: kiriko_core::time::CompTime(rational_at(new_out)),
                                 start_offset: layer.start_offset,
                             });
+                        }
+                    }
+                }
+            }
+        }
+        // Body drag: move the whole layer in comp time — shift in/out and
+        // start_offset together so the bar and its content move as one. Sequence
+        // layers keep their bodies for clip selection.
+        if !matches!(layer.kind, kiriko_core::model::LayerKind::Sequence { .. }) {
+            let body = bar.shrink2(egui::vec2(6.0, 0.0));
+            if body.width() > 2.0 {
+                let resp = ui.interact(
+                    body,
+                    ui.id().with(("move", layer.id)),
+                    egui::Sense::click_and_drag(),
+                );
+                if resp.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                } else if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
+                if resp.clicked() {
+                    app.selected_layer = Some(layer.id);
+                }
+                if resp.dragged() {
+                    let dx_secs = resp.drag_delta().x as f64 / track_w as f64 * duration;
+                    let base = match app.move_edit {
+                        Some((id, s)) if id == layer.id => s,
+                        _ => layer.in_point.0.to_f64(),
+                    };
+                    app.move_edit = Some((layer.id, (base + dx_secs).max(0.0)));
+                }
+                if resp.drag_stopped() {
+                    if let Some((id, raw_in)) = app.move_edit.take() {
+                        if id == layer.id {
+                            let thr = 6.0 / track_w as f64 * duration;
+                            let snapped = kiriko_core::markers::snap_time(
+                                rational_at(raw_in.max(0.0)),
+                                &comp.markers,
+                                rational_at(thr),
+                            )
+                            .to_f64();
+                            let delta = snapped - layer.in_point.0.to_f64();
+                            if delta.abs() > 1e-9 {
+                                let (in_point, out_point, start_offset) = moved_span(
+                                    layer.in_point,
+                                    layer.out_point,
+                                    layer.start_offset,
+                                    delta,
+                                );
+                                pending = Some(kiriko_core::Op::SetLayerSpan {
+                                    comp: comp_id,
+                                    layer: layer.id,
+                                    in_point,
+                                    out_point,
+                                    start_offset,
+                                });
+                            }
                         }
                     }
                 }
@@ -6351,5 +6449,23 @@ mod dock_tests {
         assert!((end - 50.0).abs() < 1.0, "end speed {end} ≈ 50");
         let start = edited.speed_at(1e-6) * 100.0;
         assert!((start - 100.0).abs() < 1.0, "start speed {start} ≈ 100");
+    }
+
+    // Moving a layer shifts in/out AND start_offset by the same delta — a move,
+    // not a slip: duration and the in→start_offset alignment are preserved.
+    #[test]
+    fn moving_a_layer_shifts_the_whole_span_not_slips_it() {
+        use kiriko_core::time::CompTime;
+        let ct = |s: f64| CompTime(rational_at(s));
+        let (i, o, so) = moved_span(ct(2.0), ct(5.0), ct(1.0), 1.5);
+        assert!((i.0.to_f64() - 3.5).abs() < 1e-6, "in shifts by delta");
+        assert!(
+            (so.0.to_f64() - 2.5).abs() < 1e-6,
+            "start_offset shifts too"
+        );
+        // Duration preserved.
+        assert!(((o.0.to_f64() - i.0.to_f64()) - 3.0).abs() < 1e-6);
+        // in→start_offset alignment preserved (content moves with the bar).
+        assert!(((i.0.to_f64() - so.0.to_f64()) - 1.0).abs() < 1e-6);
     }
 }

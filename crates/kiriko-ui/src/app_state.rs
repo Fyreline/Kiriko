@@ -677,6 +677,10 @@ pub struct AppState {
     pub prop_edit: Option<(Uuid, kiriko_core::model::TransformProp, f64)>,
     /// In-flight bar-edge trim: (layer, trimming_out_edge, provisional seconds).
     pub trim_edit: Option<(Uuid, bool, f64)>,
+    /// In-flight whole-layer move (drag the bar body): (layer, provisional new
+    /// in-point in comp seconds, unsnapped). On release the whole span shifts —
+    /// in/out/start_offset together — so the content moves with the bar.
+    pub move_edit: Option<(Uuid, f64)>,
     /// Layer whose properties the graph editor shows (clicked in the Timeline).
     pub selected_layer: Option<Uuid>,
     /// Selected clip within a Sequence layer (clicked sub-bar), for per-clip
@@ -817,6 +821,7 @@ impl Default for AppState {
             audio_tx,
             prop_edit: None,
             trim_edit: None,
+            move_edit: None,
             selected_layer: None,
             selected_clip: None,
             graph_prop: None,
@@ -2254,6 +2259,7 @@ impl AppState {
         self.preview_draft
             || self.prop_edit.is_some()
             || self.trim_edit.is_some()
+            || self.move_edit.is_some()
             || self.graph_edit.is_some()
             || self.graph_speed_edit.is_some()
             || self.graph_retime_edit.is_some()
