@@ -213,6 +213,50 @@ impl Clip {
             ..self.clone()
         })
     }
+
+    /// Trim the clip's tail inward to end at layer time `new_end`
+    /// (docs/04-RETIMING.md §8.2, non-ripple): the retime is split at the new
+    /// edge and the outside discarded, so the kept portion plays exactly as
+    /// before. The clip keeps its identity and its start. None if `new_end` is
+    /// not strictly inside the clip (trimming *outward* extends per §7.3, which
+    /// needs the source's available length and is a separate op).
+    pub fn trim_end(&self, new_end: Rational) -> Option<Clip> {
+        let tau = new_end.checked_sub(self.place_start).ok()?;
+        if tau <= Rational::ZERO || tau >= self.place_duration {
+            return None;
+        }
+        let (left, _) = self.retime.split_at(tau)?;
+        let source_out = left.boundaries.last()?.s;
+        Some(Clip {
+            source_out,
+            place_duration: tau,
+            retime: left,
+            ..self.clone()
+        })
+    }
+
+    /// Trim the clip's head inward to start at layer time `new_start`
+    /// (docs/04-RETIMING.md §8.2, non-ripple): the retime is split at the new
+    /// edge, the outside discarded, and the kept portion's local time re-based
+    /// to zero — so it still plays exactly as before, just entered later. The
+    /// clip keeps its identity. None if `new_start` is not strictly inside the
+    /// clip (outward trims extend per §7.3, a separate op).
+    pub fn trim_start(&self, new_start: Rational) -> Option<Clip> {
+        let tau = new_start.checked_sub(self.place_start).ok()?;
+        if tau <= Rational::ZERO || tau >= self.place_duration {
+            return None;
+        }
+        let (_, right) = self.retime.split_at(tau)?;
+        let source_in = right.boundaries.first()?.s;
+        let place_duration = self.place_duration.checked_sub(tau).ok()?;
+        Some(Clip {
+            source_in,
+            place_start: new_start,
+            place_duration,
+            retime: right,
+            ..self.clone()
+        })
+    }
 }
 
 /// The clip active at layer-local time `lt`, or None if `lt` is in a gap
@@ -381,6 +425,41 @@ mod tests {
         }
         // Slipping before the source start is refused.
         assert!(c.slip(rat(-1, 1)).is_none());
+    }
+
+    #[test]
+    fn trimming_an_edge_inward_keeps_the_rest_in_place() {
+        let src = Uuid::now_v7();
+        // Clip at layer [2,6), source [0,4) at natural rate.
+        let c = clip(src, 2, 4);
+        // Trim the tail to end at 5 → layer [2,5), source [0,3).
+        let t = c.trim_end(rat(5, 1)).unwrap();
+        assert_eq!(t.id, c.id); // same clip identity
+        assert_eq!(t.place_start, rat(2, 1));
+        assert_eq!(t.place_duration, rat(3, 1));
+        assert_eq!(t.source_out, rat(3, 1));
+        for &lt in &[2.0, 3.5, 4.9] {
+            assert!(
+                (t.source_time(lt) - c.source_time(lt)).abs() < 1e-9,
+                "tail @ {lt}"
+            );
+        }
+        // Trim the head to start at 4 → layer [4,6), source [2,4), re-based.
+        let h = c.trim_start(rat(4, 1)).unwrap();
+        assert_eq!(h.id, c.id);
+        assert_eq!(h.place_start, rat(4, 1));
+        assert_eq!(h.place_duration, rat(2, 1));
+        assert_eq!(h.source_in, rat(2, 1));
+        for &lt in &[4.0, 5.0, 5.9] {
+            assert!(
+                (h.source_time(lt) - c.source_time(lt)).abs() < 1e-9,
+                "head @ {lt}"
+            );
+        }
+        // Outward trims (need §7.3 extend) and out-of-range edges are refused.
+        assert!(c.trim_end(rat(7, 1)).is_none());
+        assert!(c.trim_start(rat(1, 1)).is_none());
+        assert!(c.trim_end(rat(2, 1)).is_none()); // zero length
     }
 
     #[test]
