@@ -363,6 +363,43 @@ impl Retime {
         Some(r)
     }
 
+    /// Build a retime whose source time is piecewise-linear through value
+    /// keyframes `keys` (local time → source time): each consecutive pair
+    /// becomes a constant-speed Rate segment whose speed is Δsource / Δlocal.
+    /// This is the store the graph editor's value lens (AE Time Remap) makes —
+    /// the mirror of [`Self::from_speed_keyframes`], and exact because a
+    /// constant-speed segment's advance `d · v` is precisely `Δsource`, so
+    /// [`Self::recompute_boundaries`] reproduces every stored `s`. Needs ≥ 2
+    /// keys, the first at local time 0, times strictly increasing; returns None
+    /// otherwise (caller keeps its store).
+    pub fn from_value_keyframes(keys: &[(Rational, Rational)]) -> Option<Self> {
+        if keys.len() < 2 || keys[0].0 != Rational::ZERO {
+            return None;
+        }
+        if keys.windows(2).any(|w| w[1].0 <= w[0].0) {
+            return None;
+        }
+        let boundaries = keys.iter().map(|(t, s)| Boundary::new(*t, *s)).collect();
+        let mut segments = Vec::with_capacity(keys.len() - 1);
+        let mut any_reverse = false;
+        for w in keys.windows(2) {
+            let dt = w[1].0.checked_sub(w[0].0).ok()?;
+            let ds = w[1].1.checked_sub(w[0].1).ok()?;
+            let v = ds.checked_div(dt).ok()?;
+            any_reverse |= v.is_negative();
+            segments.push(RetimeSegment::Rate(RateSegment::new(v, v, Ease::Linear)));
+        }
+        let mut r = Self {
+            boundaries,
+            segments,
+            allow_reverse: any_reverse,
+            interpolation: Interpolation::default(),
+            extra: serde_json::Map::new(),
+        };
+        r.recompute_boundaries().ok()?;
+        Some(r)
+    }
+
     /// The earliest local time (seconds) at which this retime reaches
     /// `source_duration` seconds of source — i.e. the clip runs out of media
     /// and the boundary frame must be held (docs/04-RETIMING.md §7, the
@@ -416,6 +453,15 @@ impl Retime {
             }
         }
         Some(out)
+    }
+
+    /// The value keyframes (local time → source time) that describe this retime
+    /// in the value lens: simply each boundary's exact `(t, s)`. Always
+    /// available — every boundary carries its source position — which is what
+    /// lets the value lens keyframe *any* store, unlike [`Self::speed_keyframes`]
+    /// (which only speaks for all-linear Rate stores).
+    pub fn value_keyframes(&self) -> Vec<(Rational, Rational)> {
+        self.boundaries.iter().map(|b| (b.t, b.s)).collect()
     }
 
     /// The index of the segment covering local time `t`, or None if `t` is
@@ -1352,6 +1398,57 @@ mod tests {
             &[(rat(0, 1), rat(1, 1)), (rat(0, 1), rat(2, 1))]
         )
         .is_none());
+    }
+
+    #[test]
+    fn value_keyframes_build_and_round_trip() {
+        // Value lens: hold source 0 at t=0, be at source 1 by t=2 (½× so far),
+        // then jump to source 5 by t=4 (2× over that span).
+        let keys = [
+            (rat(0, 1), rat(0, 1)),
+            (rat(2, 1), rat(1, 1)),
+            (rat(4, 1), rat(5, 1)),
+        ];
+        let r = Retime::from_value_keyframes(&keys).unwrap();
+        // The boundaries reproduce the value keys exactly (no drift).
+        assert_eq!(r.value_keyframes(), keys.to_vec());
+        // Source time passes through every keyframe.
+        assert!((r.evaluate(0.0) - 0.0).abs() < 1e-9);
+        assert!((r.evaluate(2.0) - 1.0).abs() < 1e-9);
+        assert!((r.evaluate(4.0) - 5.0).abs() < 1e-9);
+        // Constant speed within a span: ½× on [0,2], 2× on [2,4].
+        assert!((r.speed_at(1.0) - 0.5).abs() < 1e-9);
+        assert!((r.speed_at(3.0) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn from_value_keyframes_allows_reverse_and_rejects_bad_input() {
+        // A value key that steps source backwards opens the reverse gate.
+        let back = Retime::from_value_keyframes(&[(rat(0, 1), rat(2, 1)), (rat(1, 1), rat(0, 1))])
+            .unwrap();
+        assert!(back.allow_reverse);
+        assert!((back.speed_at(0.5) - -2.0).abs() < 1e-9);
+        // Fewer than two keys, first key off zero, non-increasing times: all None.
+        assert!(Retime::from_value_keyframes(&[(rat(0, 1), rat(0, 1))]).is_none());
+        assert!(
+            Retime::from_value_keyframes(&[(rat(1, 1), rat(0, 1)), (rat(2, 1), rat(1, 1))])
+                .is_none()
+        );
+        assert!(
+            Retime::from_value_keyframes(&[(rat(0, 1), rat(0, 1)), (rat(0, 1), rat(1, 1))])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn value_keyframes_read_any_store() {
+        // Even a store the *speed* lens can't describe (an eased ramp) still
+        // yields value keys — every boundary carries an exact source position.
+        let eased = Retime::single_ramp(rat(4, 1), rat(0, 1), rat(1, 1), rat(2, 1), Ease::Smooth);
+        assert!(eased.speed_keyframes().is_none());
+        let vks = eased.value_keyframes();
+        assert_eq!(vks.len(), 2);
+        assert_eq!(vks[0], (rat(0, 1), rat(0, 1)));
     }
 
     #[test]

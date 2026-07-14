@@ -263,6 +263,28 @@ fn fmt_timecode_frames(secs: f64, fps: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}:{ff:02}")
 }
 
+/// Parse a source frame count from a timecode the user typed into the Retime
+/// value lens: `HH:MM:SS:FF`, any shorter colon form (`MM:SS:FF`, `SS:FF`), or a
+/// bare frame number. None when it does not parse — egui then keeps the old
+/// value. The frame field is read at `fps`, matching [`fmt_timecode_frames`].
+fn parse_timecode_frames(s: &str, fps: f64) -> Option<f64> {
+    let fps_i = fps.round().max(1.0) as u64;
+    let nums: Vec<u64> = s
+        .trim()
+        .split(':')
+        .map(|p| p.trim().parse::<u64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let (h, m, sec, ff) = match nums.as_slice() {
+        [ff] => (0, 0, 0, *ff),
+        [sec, ff] => (0, 0, *sec, *ff),
+        [m, sec, ff] => (0, *m, *sec, *ff),
+        [h, m, sec, ff] => (*h, *m, *sec, *ff),
+        _ => return None,
+    };
+    Some(((h * 3600 + m * 60 + sec) * fps_i + ff) as f64)
+}
+
 /// The (in, out, start_offset) after moving a layer by `delta` comp seconds: all
 /// three shift together, so the bar and its content move as one. Shifting the
 /// span without `start_offset` would *slip* the content instead of moving it.
@@ -2137,11 +2159,15 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                     // (K-021): Nearest is crisp; Blend crossfades neighbours for smoother
                     // slow motion. Only a retimed layer renders this row — every other
                     // layer has nothing here, so the Transform header sits right beneath.
-                    if let kiriko_core::model::LayerKind::Footage {
-                        retime: Some(rt), ..
-                    } = &layer.kind
-                    {
+                    if let kiriko_core::model::LayerKind::Footage { retime, .. } = &layer.kind {
                         use kiriko_core::retime::{FlowParams, Interpolation};
+                        // Present for every footage layer, not only retimed ones: enabling
+                        // Retime must not insert a row and shove the Transform group down
+                        // (the "jump" on the first Time keyframe). With no retime there is
+                        // nothing to interpolate, so the choices are inert and greyed.
+                        let cur = retime.as_ref().map(|r| r.interpolation.clone());
+                        let enabled = cur.is_some();
+                        let shown = cur.unwrap_or(Interpolation::Nearest);
                         ui.scope(|ui| {
                             ui.set_max_width(name_w - 10.0);
                             ui.indent(("txlabel", layer.id), |ui| {
@@ -2156,24 +2182,31 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
                                         (
                                             "Nearest",
                                             Interpolation::Nearest,
-                                            matches!(rt.interpolation, Interpolation::Nearest),
+                                            matches!(shown, Interpolation::Nearest),
                                         ),
                                         (
                                             "Blend",
                                             Interpolation::Blend,
-                                            matches!(rt.interpolation, Interpolation::Blend),
+                                            matches!(shown, Interpolation::Blend),
                                         ),
                                         (
                                             "Flow",
                                             Interpolation::Flow(FlowParams::default()),
-                                            matches!(rt.interpolation, Interpolation::Flow(_)),
+                                            matches!(shown, Interpolation::Flow(_)),
                                         ),
                                     ] {
-                                        if ui.selectable_label(active, label).clicked() && !active {
+                                        if ui
+                                            .add_enabled(
+                                                enabled,
+                                                egui::SelectableLabel::new(active, label),
+                                            )
+                                            .clicked()
+                                            && !active
+                                        {
                                             set = Some(val);
                                         }
                                     }
-                                    if let Some(interp) = set {
+                                    if let (Some(interp), Some(rt)) = (set, retime.as_ref()) {
                                         let mut r = rt.clone();
                                         r.interpolation = interp;
                                         pending = Some(kiriko_core::Op::SetLayerRetime {
@@ -5294,17 +5327,14 @@ fn combined_scale_row(
         );
     let (row_rect, mut c) = row_frame(ui, ctx, is_graphed);
 
-    // Stopwatch drives both axes together.
+    // Stopwatch drives both axes together (drawn, like every other row).
     let animated = sx.is_animated() || sy.is_animated();
-    let clock = if animated { "⏱" } else { "◦" };
-    if c.selectable_label(animated, egui::RichText::new(clock).small())
-        .on_hover_text(if animated {
-            "Remove animation"
-        } else {
-            "Animate both scale axes"
-        })
-        .clicked()
-    {
+    let hover = if animated {
+        "Remove animation"
+    } else {
+        "Animate both scale axes"
+    };
+    if stopwatch_button(&mut c, ctx.theme, animated, hover) {
         let (ax, ay) = if animated {
             (
                 Animation::Static(sx.value_at(ctx.lt)),
@@ -5414,6 +5444,28 @@ fn speed_with_key(
     kiriko_core::retime::Retime::from_speed_keyframes(Rational::ZERO, &keys)
 }
 
+/// Insert or replace a value keyframe (local time → source time) at the
+/// playhead `lt`, both snapped to the frame grid so keys land on frames, keeping
+/// the list sorted and its times unique. Used by the Retime value lens.
+fn upsert_value_key(
+    keys: &mut Vec<(kiriko_core::Rational, kiriko_core::Rational)>,
+    lt: f64,
+    src: f64,
+    dur: kiriko_core::Rational,
+    fps: f64,
+) {
+    use kiriko_core::Rational;
+    let g = fps.round().max(1.0) as i64;
+    let t = Rational::from_f64_on_grid(lt.clamp(0.0, dur.to_f64()), g).unwrap_or(Rational::ZERO);
+    let s = Rational::from_f64_on_grid(src.max(0.0), g).unwrap_or(Rational::ZERO);
+    if let Some(k) = keys.iter_mut().find(|k| k.0 == t) {
+        k.1 = s;
+    } else {
+        keys.push((t, s));
+        keys.sort_by_key(|k| k.0);
+    }
+}
+
 /// The footage speed as a full-width, keyframable property row (K-072): a
 /// stopwatch toggles keyframing; editing sets a constant speed or, once
 /// animated, a speed keyframe at the playhead; keys show on the track. Linear
@@ -5444,37 +5496,74 @@ fn speed_property_row(
     let is_graphed = app.selected_layer == Some(ctx.layer.id) && app.graph_retime;
     let (row_rect, mut c) = row_frame(ui, ctx, is_graphed);
 
-    let hover = if animated {
-        "Freeze speed (constant at the current value)"
+    // The Retime channel wears two lenses (K-076). The Velocity lens keyframes
+    // speed (percentages); the Time lens keyframes the source time on screen (a
+    // timecode) — AE's Time Remap. Which one is live follows the graph lens.
+    let speed_lens = app.graph_speed_view;
+    let fps = ctx.fps;
+    // Value-lens state: the source time at the playhead, and the value keys
+    // (every boundary) — "animated" here means the user has placed interior
+    // value keyframes, so more than the two endpoints exist.
+    let value_keys = retime.as_ref().map(|r| r.value_keyframes());
+    let value_animated = value_keys.as_ref().is_some_and(|k| k.len() > 2);
+    let src_now = retime
+        .as_ref()
+        .map(|r| r.evaluate(ctx.lt))
+        .unwrap_or(ctx.lt);
+
+    // Stopwatch — speed key or value key, per the live lens.
+    if speed_lens {
+        let hover = if animated {
+            "Freeze speed (constant at the current value)"
+        } else {
+            "Animate speed: keyframe at the playhead"
+        };
+        if stopwatch_button(&mut c, ctx.theme, animated, hover) {
+            let new_retime = if animated {
+                if (current - 100.0).abs() < 1e-6 {
+                    None
+                } else {
+                    Some(kiriko_core::retime::Retime::constant_speed(
+                        dur,
+                        Rational::ZERO,
+                        to_speed(current),
+                    ))
+                }
+            } else {
+                speed_with_key(retime, dur, ctx.lt, to_speed(current))
+            };
+            *pending = Some(kiriko_core::Op::SetLayerRetime {
+                comp: ctx.comp_id,
+                layer: ctx.layer.id,
+                retime: new_retime,
+            });
+        }
     } else {
-        "Animate speed: keyframe at the playhead"
-    };
-    if stopwatch_button(&mut c, ctx.theme, animated, hover) {
-        let new_retime = if animated {
-            if (current - 100.0).abs() < 1e-6 {
+        let hover = if value_animated {
+            "Remove time keyframes (pass the source straight through)"
+        } else {
+            "Keyframe time: source time at the playhead"
+        };
+        if stopwatch_button(&mut c, ctx.theme, value_animated, hover) {
+            let new_retime = if value_animated {
                 None
             } else {
-                Some(kiriko_core::retime::Retime::constant_speed(
-                    dur,
-                    Rational::ZERO,
-                    to_speed(current),
-                ))
-            }
-        } else {
-            speed_with_key(retime, dur, ctx.lt, to_speed(current))
-        };
-        *pending = Some(kiriko_core::Op::SetLayerRetime {
-            comp: ctx.comp_id,
-            layer: ctx.layer.id,
-            retime: new_retime,
-        });
+                let mut keys = value_keys
+                    .clone()
+                    .unwrap_or_else(|| vec![(Rational::ZERO, Rational::ZERO), (dur, dur)]);
+                upsert_value_key(&mut keys, ctx.lt, src_now, dur, fps);
+                kiriko_core::retime::Retime::from_value_keyframes(&keys)
+            };
+            *pending = Some(kiriko_core::Op::SetLayerRetime {
+                comp: ctx.comp_id,
+                layer: ctx.layer.id,
+                retime: new_retime,
+            });
+        }
     }
+
     // "Time" in the value lens, "Velocity" in the derivative lens (K-076).
-    let channel_name = if app.graph_speed_view {
-        "Velocity"
-    } else {
-        "Time"
-    };
+    let channel_name = if speed_lens { "Velocity" } else { "Time" };
     if c.add(
         egui::Label::new(
             egui::RichText::new(channel_name)
@@ -5490,58 +5579,102 @@ fn speed_property_row(
     .clicked()
     {
         app.selected_layer = Some(ctx.layer.id);
-        app.graph_retime = true; // graph the Retime speed channel (K-075)
+        app.graph_retime = true; // graph the Retime channel (K-075)
         app.graph_speed_view = app.vegas_default_lens; // open to the preferred lens
     }
 
-    // Temp-value pattern: a drag is one commit.
-    let id = egui::Id::new(("speedv", ctx.layer.id));
-    let mut v = c.data(|d| d.get_temp::<f64>(id)).unwrap_or(current);
-    let resp = c.add(
-        egui::DragValue::new(&mut v)
-            .speed(1.0)
-            .range(-800.0..=800.0)
-            .suffix(" %"),
-    );
-    if resp.dragged() || resp.has_focus() {
-        c.data_mut(|d| d.insert_temp(id, v));
-    }
-    if resp.drag_stopped() || resp.lost_focus() {
-        if (v - current).abs() > 1e-6 {
-            let new_retime = if animated {
-                speed_with_key(retime, dur, ctx.lt, to_speed(v))
-            } else if (v - 100.0).abs() < 1e-6 {
-                None
-            } else {
-                Some(kiriko_core::retime::Retime::constant_speed(
-                    dur,
-                    Rational::ZERO,
-                    to_speed(v),
-                ))
-            };
-            *pending = Some(kiriko_core::Op::SetLayerRetime {
-                comp: ctx.comp_id,
-                layer: ctx.layer.id,
-                retime: new_retime,
-            });
+    // Value widget — a speed percentage, or a source timecode.
+    if speed_lens {
+        // Temp-value pattern: a drag is one commit.
+        let id = egui::Id::new(("speedv", ctx.layer.id));
+        let mut v = c.data(|d| d.get_temp::<f64>(id)).unwrap_or(current);
+        let resp = c.add(
+            egui::DragValue::new(&mut v)
+                .speed(1.0)
+                .range(-800.0..=800.0)
+                .suffix(" %"),
+        );
+        if resp.dragged() || resp.has_focus() {
+            c.data_mut(|d| d.insert_temp(id, v));
         }
-        c.data_mut(|d| d.remove::<f64>(id));
+        if resp.drag_stopped() || resp.lost_focus() {
+            if (v - current).abs() > 1e-6 {
+                let new_retime = if animated {
+                    speed_with_key(retime, dur, ctx.lt, to_speed(v))
+                } else if (v - 100.0).abs() < 1e-6 {
+                    None
+                } else {
+                    Some(kiriko_core::retime::Retime::constant_speed(
+                        dur,
+                        Rational::ZERO,
+                        to_speed(v),
+                    ))
+                };
+                *pending = Some(kiriko_core::Op::SetLayerRetime {
+                    comp: ctx.comp_id,
+                    layer: ctx.layer.id,
+                    retime: new_retime,
+                });
+            }
+            c.data_mut(|d| d.remove::<f64>(id));
+        }
+    } else {
+        // Source time as an editable HH:MM:SS:FF timecode, scrubbed in frames.
+        let id = egui::Id::new(("timev", ctx.layer.id));
+        let mut frames = c.data(|d| d.get_temp::<f64>(id)).unwrap_or(src_now * fps);
+        let resp = c.add(
+            egui::DragValue::new(&mut frames)
+                .speed(1.0)
+                .range(0.0..=1.0e9)
+                .custom_formatter(move |n, _| fmt_timecode_frames(n / fps, fps))
+                .custom_parser(move |s| parse_timecode_frames(s, fps)),
+        );
+        if resp.dragged() || resp.has_focus() {
+            c.data_mut(|d| d.insert_temp(id, frames));
+        }
+        if resp.drag_stopped() || resp.lost_focus() {
+            let new_src = frames.max(0.0) / fps;
+            // Editing the time keyframes it (AE Time Remap), seeding endpoints
+            // from the current curve when none exist yet.
+            if (new_src - src_now).abs() > 0.5 / fps {
+                let mut keys = value_keys
+                    .clone()
+                    .unwrap_or_else(|| vec![(Rational::ZERO, Rational::ZERO), (dur, dur)]);
+                upsert_value_key(&mut keys, ctx.lt, new_src, dur, fps);
+                *pending = Some(kiriko_core::Op::SetLayerRetime {
+                    comp: ctx.comp_id,
+                    layer: ctx.layer.id,
+                    retime: kiriko_core::retime::Retime::from_value_keyframes(&keys),
+                });
+            }
+            c.data_mut(|d| d.remove::<f64>(id));
+        }
     }
 
-    // Track: speed keyframes as diamonds (meaningful once animated).
-    if animated {
-        if let Some(keys) = &keys {
-            let kf: Vec<kiriko_core::anim::Keyframe> = keys
-                .iter()
-                .map(|(t, _)| kiriko_core::anim::Keyframe {
-                    time: *t,
-                    value: 0.0,
-                    interp_in: kiriko_core::anim::SideInterp::Linear,
-                    interp_out: kiriko_core::anim::SideInterp::Linear,
-                })
-                .collect();
-            draw_key_diamonds(ui, ctx, row_rect, &kf);
-        }
+    // Track: keyframes as diamonds — speed keys, or value keys (boundaries).
+    let track_keys: Option<Vec<kiriko_core::Rational>> = if speed_lens {
+        animated
+            .then(|| keys.as_ref().map(|k| k.iter().map(|(t, _)| *t).collect()))
+            .flatten()
+    } else {
+        value_animated.then(|| {
+            value_keys
+                .as_ref()
+                .map(|k| k.iter().map(|(t, _)| *t).collect())
+                .unwrap_or_default()
+        })
+    };
+    if let Some(times) = track_keys {
+        let kf: Vec<kiriko_core::anim::Keyframe> = times
+            .iter()
+            .map(|t| kiriko_core::anim::Keyframe {
+                time: *t,
+                value: 0.0,
+                interp_in: kiriko_core::anim::SideInterp::Linear,
+                interp_out: kiriko_core::anim::SideInterp::Linear,
+            })
+            .collect();
+        draw_key_diamonds(ui, ctx, row_rect, &kf);
     }
 }
 
@@ -7764,6 +7897,47 @@ mod dock_tests {
         assert_eq!(fmt_timecode_frames(1.0, 25.0), "00:00:01:00");
         // Hours / minutes / seconds compose.
         assert_eq!(fmt_timecode_frames(3661.0, 24.0), "01:01:01:00");
+    }
+
+    // The value-lens timecode parser is the inverse of the formatter, and
+    // tolerates shorter colon forms and a bare frame count.
+    #[test]
+    fn timecode_parses_and_round_trips_with_the_formatter() {
+        // Full HH:MM:SS:FF → the same frame count the formatter came from.
+        assert_eq!(parse_timecode_frames("00:00:02:00", 30.0), Some(60.0));
+        assert_eq!(parse_timecode_frames("01:01:01:00", 24.0), Some(87864.0));
+        // Shorter colon forms and a bare frame count.
+        assert_eq!(parse_timecode_frames("02:14", 25.0), Some(64.0)); // SS:FF
+        assert_eq!(parse_timecode_frames("1:00:00", 30.0), Some(1800.0)); // MM:SS:FF
+        assert_eq!(parse_timecode_frames("72", 24.0), Some(72.0)); // frames
+                                                                   // Round-trips through the formatter for a spread of frame counts.
+        for &(frames, fps) in &[(0.0, 25.0), (1.0, 24.0), (64.0, 25.0), (87864.0, 24.0)] {
+            let s = fmt_timecode_frames(frames / fps, fps);
+            assert_eq!(parse_timecode_frames(&s, fps), Some(frames), "{s} @ {fps}");
+        }
+        // Rubbish yields None so the drag value keeps its previous reading.
+        assert_eq!(parse_timecode_frames("nope", 24.0), None);
+        assert_eq!(parse_timecode_frames("", 24.0), None);
+    }
+
+    // Enabling the Time lens keyframe seeds identity endpoints plus a key at the
+    // playhead, and the resulting store passes through every value key exactly.
+    #[test]
+    fn value_key_upsert_builds_a_passthrough_with_a_playhead_key() {
+        use kiriko_core::retime::Retime;
+        use kiriko_core::Rational;
+        let dur = Rational::new(4, 1).unwrap();
+        let mut keys = vec![(Rational::ZERO, Rational::ZERO), (dur, dur)];
+        // At 24 fps, a playhead at 1.0 s over an identity clip keys source 1.0 s.
+        upsert_value_key(&mut keys, 1.0, 1.0, dur, 24.0);
+        assert_eq!(keys.len(), 3);
+        let r = Retime::from_value_keyframes(&keys).unwrap();
+        assert!((r.evaluate(1.0) - 1.0).abs() < 1e-9);
+        // Re-keying the same frame replaces rather than duplicates it.
+        upsert_value_key(&mut keys, 1.0, 2.0, dur, 24.0);
+        assert_eq!(keys.len(), 3);
+        let r = Retime::from_value_keyframes(&keys).unwrap();
+        assert!((r.evaluate(1.0) - 2.0).abs() < 1e-9);
     }
 
     // K-075 2b: dragging a speed keyframe in the % lens (via speed_with_key)

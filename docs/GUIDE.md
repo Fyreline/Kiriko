@@ -318,10 +318,18 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   or changing a keyframe anywhere in the timeline — a stopwatch click, scrubbing a value in a
   property row, dragging a key — selects that layer and points the graph at that channel, so
   the curve you see is always the one you just touched.
-  A **retimed footage layer** also shows a **"Speed (Retime)"** entry here (K-075): its value
-  view reads the source frame showing at each point as `HH:MM:SS:FF` timecode, its speed view
-  reads playback speed per cent, and dragging a speed point in that lens authors a ramp — the
-  Vegas gesture. (A "Vegas" tick makes the channel open to the per-cent view by default.)
+  A **footage layer** also carries a **Retime channel** here, named for the lens you are in
+  (K-076): **Time** in the value view, **Velocity** in the speed view. In the **Time** lens it
+  behaves like every other property — a stopwatch turns keyframing on (adding a key that holds
+  the source frame showing at the playhead), and its value reads and edits as an
+  `HH:MM:SS:FF` timecode: "which moment of the footage is on screen here". This is After
+  Effects' *Time Remap*. In the **Velocity** lens the same channel reads playback speed per
+  cent, and dragging a point authors a ramp — the Vegas gesture. They are two views of one
+  store: a straight line of value keys *is* a constant speed, a curve *is* a changing speed.
+  The channel opens to the Time view by default; a "Vegas" tick makes it open to Velocity.
+  A retimed layer also gains a small **Frames** row (its frame-interpolation choice —
+  Nearest / Blend / Flow); that row is always present on footage layers, greyed until there
+  is a retime to interpolate, so turning Retime on never makes the rows below it jump.
 - **Property rows in the Timeline** (K-072) — twirl a layer open and each of its animatable
   properties (Position, Scale, Rotation, Opacity, and the 3D ones) gets its own row: on the
   left a stopwatch to turn animation on or off, the property's name, and its current value;
