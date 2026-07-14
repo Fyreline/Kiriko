@@ -318,6 +318,24 @@ pub fn disclosure(painter: &Painter, rect: Rect, open: bool, color: Color32) {
     ));
 }
 
+/// A stopwatch, drawn rather than a font glyph (egui's fonts carry no stopwatch
+/// emoji, so `⏱` simply vanishes): a ring with a top button, and a filled centre
+/// when the property is animated, so its animation state reads at a glance.
+pub fn stopwatch(painter: &Painter, center: Pos2, radius: f32, animated: bool, color: Color32) {
+    let stroke = Stroke::new(1.2_f32, color);
+    painter.circle_stroke(center, radius, stroke);
+    painter.line_segment(
+        [
+            center + Vec2::new(0.0, -radius),
+            center + Vec2::new(0.0, -radius - 2.0),
+        ],
+        stroke,
+    );
+    if animated {
+        painter.circle_filled(center, radius * 0.45, color);
+    }
+}
+
 /// The twirl triangle's three corners inside `rect`. Kept separate from the
 /// painting so a test can pin the glyph's size: an earlier 0.30 shrink (on top
 /// of the triangle's own inset) left a ~4 px sliver that was invisible in

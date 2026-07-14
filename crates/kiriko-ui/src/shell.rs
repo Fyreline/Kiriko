@@ -2465,7 +2465,7 @@ fn timeline_bottom_bar(
         zc.add_space(10.0);
         let retime = app.graph_retime;
         let (value_label, speed_label) = if retime {
-            ("Source", "Speed %")
+            ("Time", "Velocity") // K-076: the Retime channel's lenses
         } else {
             ("Value", "Speed")
         };
@@ -5017,23 +5017,36 @@ fn draw_key_diamonds(
 
 /// The stopwatch toggle. Returns the new Animation if clicked (animate at the
 /// playhead / freeze to the current value), else None.
+/// A drawn, clickable stopwatch — a filled dot when animated, a ring when not.
+/// Replaces the old `⏱`/`◦` glyph (egui's fonts can't render the emoji, so it
+/// vanished), and clips like any child-ui widget. Returns true on click.
+fn stopwatch_button(ui: &mut egui::Ui, theme: &Theme, animated: bool, hover: &str) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+    let color = if resp.hovered() {
+        theme.text_primary
+    } else if animated {
+        theme.accent
+    } else {
+        theme.text_muted
+    };
+    crate::icons::stopwatch(ui.painter(), rect.center(), 4.5, animated, color);
+    resp.on_hover_text(hover).clicked()
+}
+
 fn stopwatch(
     ui: &mut egui::Ui,
+    theme: &Theme,
     slot: &kiriko_core::anim::Property,
     lt: f64,
 ) -> Option<kiriko_core::anim::Animation> {
     use kiriko_core::anim::{Animation, Keyframe, SideInterp};
     let animated = slot.is_animated();
-    let clock = if animated { "⏱" } else { "◦" };
-    if ui
-        .selectable_label(animated, egui::RichText::new(clock).small())
-        .on_hover_text(if animated {
-            "Remove animation (freeze current value)"
-        } else {
-            "Animate: keyframe at the playhead"
-        })
-        .clicked()
-    {
+    let hover = if animated {
+        "Remove animation (freeze current value)"
+    } else {
+        "Animate: keyframe at the playhead"
+    };
+    if stopwatch_button(ui, theme, animated, hover) {
         Some(if animated {
             Animation::Static(slot.value_at(lt))
         } else {
@@ -5150,7 +5163,7 @@ fn prop_row(
         && app.graph_prop == Some(prop);
     let (row_rect, mut c) = row_frame(ui, ctx, is_graphed);
 
-    if let Some(animation) = stopwatch(&mut c, slot, ctx.lt) {
+    if let Some(animation) = stopwatch(&mut c, ctx.theme, slot, ctx.lt) {
         *pending = Some(kiriko_core::Op::SetTransformProperty {
             comp: ctx.comp_id,
             layer: ctx.layer.id,
@@ -5431,15 +5444,12 @@ fn speed_property_row(
     let is_graphed = app.selected_layer == Some(ctx.layer.id) && app.graph_retime;
     let (row_rect, mut c) = row_frame(ui, ctx, is_graphed);
 
-    let clock = if animated { "⏱" } else { "◦" };
-    if c.selectable_label(animated, egui::RichText::new(clock).small())
-        .on_hover_text(if animated {
-            "Freeze speed (constant at the current value)"
-        } else {
-            "Animate speed: keyframe at the playhead"
-        })
-        .clicked()
-    {
+    let hover = if animated {
+        "Freeze speed (constant at the current value)"
+    } else {
+        "Animate speed: keyframe at the playhead"
+    };
+    if stopwatch_button(&mut c, ctx.theme, animated, hover) {
         let new_retime = if animated {
             if (current - 100.0).abs() < 1e-6 {
                 None
@@ -5459,12 +5469,22 @@ fn speed_property_row(
             retime: new_retime,
         });
     }
+    // "Time" in the value lens, "Velocity" in the derivative lens (K-076).
+    let channel_name = if app.graph_speed_view {
+        "Velocity"
+    } else {
+        "Time"
+    };
     if c.add(
-        egui::Label::new(egui::RichText::new("Speed %").small().color(if is_graphed {
-            ctx.theme.accent
-        } else {
-            ctx.theme.text_muted
-        }))
+        egui::Label::new(
+            egui::RichText::new(channel_name)
+                .small()
+                .color(if is_graphed {
+                    ctx.theme.accent
+                } else {
+                    ctx.theme.text_muted
+                }),
+        )
         .sense(egui::Sense::click()),
     )
     .clicked()
