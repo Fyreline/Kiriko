@@ -2281,7 +2281,7 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     // (Sharing the lanes' zoomed time axis is the next increment.)
     if app.timeline_graph_mode {
         let plot_rect = graph_lane_rect(track_left, track_w, rows_top, ui.max_rect().bottom());
-        graph_lane_plot(ui, theme, app, comp, plot_rect);
+        graph_lane_plot(ui, theme, app, comp, px_per_sec, view_start, plot_rect);
     } else {
         // No plot on screen: drop any in-flight band and keyframe selection
         // (a selection must never outlive the curve it was made on).
@@ -3256,6 +3256,11 @@ fn graph_lane_plot(
     theme: &Theme,
     app: &mut AppState,
     comp: &kiriko_core::model::Composition,
+    // The shared timeline time axis (07-UI-SPEC §4): pixels per second and the
+    // scrolled left-edge time, so the graph pans and zooms in step with the
+    // lanes (K-079). Same values the lane bars use.
+    px_per_sec: f64,
+    view_start: f64,
     plot_rect: egui::Rect,
 ) {
     use kiriko_core::model::TransformProp;
@@ -3301,6 +3306,8 @@ fn graph_lane_plot(
                     layer,
                     TransformProp::PositionX,
                     true,
+                    px_per_sec,
+                    view_start,
                     plot_rect,
                 );
             }
@@ -3312,7 +3319,9 @@ fn graph_lane_plot(
     // a flat line you can double-click to add the first keyframe to.
     let current = app.graph_prop.unwrap_or(TransformProp::PositionX);
     app.graph_prop = Some(current);
-    graph_plot(ui, theme, app, comp, layer, current, false, plot_rect);
+    graph_plot(
+        ui, theme, app, comp, layer, current, false, px_per_sec, view_start, plot_rect,
+    );
 }
 
 /// The Retime channel graphed (K-075): the value lens plots the source position
@@ -3791,6 +3800,10 @@ fn graph_plot(
     // the layer's Retime rather than a transform property. Otherwise `current`
     // names the transform property being graphed.
     is_retime: bool,
+    // The shared timeline time axis (K-079): pixels per second and the scrolled
+    // left-edge time, so the graph's x maps exactly like the lane bars.
+    px_per_sec: f64,
+    view_start: f64,
     rect: egui::Rect,
 ) {
     use kiriko_core::anim::{Animation, Keyframe, SideInterp};
@@ -3955,9 +3968,14 @@ fn graph_plot(
     }
     let pad = ((vmax - vmin).abs().max(1.0)) * 0.15;
     let (vmin, vmax) = (vmin - pad, vmax + pad);
-    let x_of = |t: f64| rect.left() + ((t / duration) as f32) * rect.width();
+    // x follows the shared timeline axis (K-079): the same pixels-per-second and
+    // scrolled left edge as the lane bars, so panning/zooming the timeline moves
+    // the curve in step. Keys outside the view clip to the lane area.
+    let x_of = |t: f64| rect.left() + ((t - view_start) * px_per_sec) as f32;
     let y_of = |v: f64| rect.bottom() - (((v - vmin) / (vmax - vmin)) as f32) * rect.height();
-    let t_of = |x: f32| ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * duration;
+    let t_of = |x: f32| {
+        (view_start + (x - rect.left()) as f64 / px_per_sec.max(1e-6)).clamp(0.0, duration)
+    };
     let v_of = |y: f32| {
         vmin + ((rect.bottom() - y) / rect.height()).clamp(0.0, 1.0) as f64 * (vmax - vmin)
     };
@@ -4045,9 +4063,14 @@ fn graph_plot(
             kiriko_core::anim::evaluate(&shown, t).unwrap_or(static_val)
         }
     };
+    // Sample across the *visible* time window (K-079), so a zoomed-in view keeps
+    // full curve resolution instead of stretching a whole-duration polyline.
+    let vis_lo = view_start.clamp(0.0, duration);
+    let vis_hi = (view_start + rect.width() as f64 / px_per_sec.max(1e-6)).clamp(0.0, duration);
+    let vis_span = (vis_hi - vis_lo).max(1e-6);
     let values: Vec<(f64, f64)> = (0..=samples)
         .map(|i| {
-            let t = duration * i as f64 / samples as f64;
+            let t = vis_lo + vis_span * i as f64 / samples as f64;
             (t, sample_at(t))
         })
         .collect();
