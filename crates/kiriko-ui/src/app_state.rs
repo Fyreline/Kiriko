@@ -2618,7 +2618,7 @@ impl AppState {
     /// beat times back ([`Self::poll_beats`] turns them into markers). No-op —
     /// with an error note — for a silent comp.
     #[cfg(feature = "media")]
-    pub fn detect_beats(&mut self, comp_id: Uuid) {
+    pub fn detect_beats(&mut self, comp_id: Uuid, sensitivity: f32) {
         use kiriko_core::model::LayerKind;
         let doc = self.store.snapshot();
         let Some(comp) = doc.comp(comp_id) else {
@@ -2687,7 +2687,7 @@ impl AppState {
                 })
                 .collect();
             let samples = kiriko_audio::mix::mix_stereo(&placements, total_frames);
-            let analysis = kiriko_audio::beat::analyse_stereo(&samples, rate, 1.5);
+            let analysis = kiriko_audio::beat::analyse_stereo(&samples, rate, sensitivity);
             // Grid-assist: nudge near-grid onsets onto the tempo grid (≤45ms),
             // which removes the small analysis latency without moving outliers.
             let times: Vec<f64> = analysis.onsets.iter().map(|o| o.time).collect();

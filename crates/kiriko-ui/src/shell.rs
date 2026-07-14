@@ -4461,7 +4461,13 @@ impl Shell {
                 MenuAction::DetectBeats => {
                     #[cfg(feature = "media")]
                     if let Some(id) = self.app.preview_comp.or(self.app.selected_comp) {
-                        self.app.detect_beats(id);
+                        self.app.detect_beats(id, 1.5);
+                    }
+                }
+                MenuAction::DetectBeatsMore => {
+                    #[cfg(feature = "media")]
+                    if let Some(id) = self.app.preview_comp.or(self.app.selected_comp) {
+                        self.app.detect_beats(id, 1.1);
                     }
                 }
                 MenuAction::AddMaskRectangle => self.add_mask_to_selected(ShapeKind::Rectangle),
@@ -5272,12 +5278,20 @@ impl Shell {
                         ui.close_menu();
                     }
                     #[cfg(feature = "media")]
-                    if ui.button("Detect beats").clicked() {
-                        if let Some(id) = self.app.preview_comp.or(self.app.selected_comp) {
-                            self.app.detect_beats(id);
+                    ui.menu_button("Detect beats", |ui| {
+                        if ui.button("Standard").clicked() {
+                            if let Some(id) = self.app.preview_comp.or(self.app.selected_comp) {
+                                self.app.detect_beats(id, 1.5);
+                            }
+                            ui.close_menu();
                         }
-                        ui.close_menu();
-                    }
+                        if ui.button("More markers").clicked() {
+                            if let Some(id) = self.app.preview_comp.or(self.app.selected_comp) {
+                                self.app.detect_beats(id, 1.1);
+                            }
+                            ui.close_menu();
+                        }
+                    });
                     if ui.button("Clear beat markers").clicked() {
                         self.app.clear_beat_markers();
                         ui.close_menu();
