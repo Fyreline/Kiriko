@@ -2263,6 +2263,28 @@ fn hint_in_rect(ui: &egui::Ui, theme: &Theme, rect: egui::Rect, msg: &str) {
     );
 }
 
+/// The glyph a keyframe draws with, coding its interpolation at a glance:
+/// a square holds, a diamond is linear, a circle is a bezier (eased) key.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyShape {
+    Square,
+    Diamond,
+    Circle,
+}
+
+fn key_shape(k: &kiriko_core::anim::Keyframe) -> KeyShape {
+    use kiriko_core::anim::SideInterp;
+    if matches!(k.interp_in, SideInterp::Hold) || matches!(k.interp_out, SideInterp::Hold) {
+        KeyShape::Square
+    } else if matches!(k.interp_in, SideInterp::Bezier { .. })
+        || matches!(k.interp_out, SideInterp::Bezier { .. })
+    {
+        KeyShape::Circle
+    } else {
+        KeyShape::Diamond
+    }
+}
+
 /// Draw one keyframed property's value/speed curve inside `rect`, with a
 /// compact Value/Speed + Ease/Linear header and draggable keys.
 fn graph_plot(
@@ -2435,11 +2457,31 @@ fn graph_plot(
         } else {
             theme.text_secondary
         };
-        ui.painter().rect_filled(
-            egui::Rect::from_center_size(pos, egui::vec2(7.0, 7.0)),
-            1.0,
-            colour,
-        );
+        match key_shape(key) {
+            KeyShape::Square => {
+                ui.painter().rect_filled(
+                    egui::Rect::from_center_size(pos, egui::vec2(7.0, 7.0)),
+                    1.0,
+                    colour,
+                );
+            }
+            KeyShape::Circle => {
+                ui.painter().circle_filled(pos, 4.0, colour);
+            }
+            KeyShape::Diamond => {
+                let d = 4.5;
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![
+                        egui::pos2(pos.x, pos.y - d),
+                        egui::pos2(pos.x + d, pos.y),
+                        egui::pos2(pos.x, pos.y + d),
+                        egui::pos2(pos.x - d, pos.y),
+                    ],
+                    colour,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
         if resp.dragged() {
             if let Some(p) = resp.interact_pointer_pos() {
                 app.graph_edit = Some((idx, t_of(p.x), v_of(p.y)));
@@ -2457,11 +2499,38 @@ fn graph_plot(
                 }
             }
         }
-        if resp.secondary_clicked() {
-            let mut new_keys = keys.clone();
-            new_keys.remove(idx);
-            pending = Some(new_keys);
-        }
+        // Right-click a key: set its interpolation, or delete it.
+        resp.context_menu(|ui| {
+            let mut sides: Option<SideInterp> = None;
+            let mut delete = false;
+            if ui.button("Easy ease").clicked() {
+                sides = Some(kiriko_core::anim::EASY_EASE);
+                ui.close_menu();
+            }
+            if ui.button("Linear").clicked() {
+                sides = Some(SideInterp::Linear);
+                ui.close_menu();
+            }
+            if ui.button("Hold").clicked() {
+                sides = Some(SideInterp::Hold);
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Delete key").clicked() {
+                delete = true;
+                ui.close_menu();
+            }
+            if let Some(si) = sides {
+                let mut new_keys = keys.clone();
+                new_keys[idx].interp_in = si;
+                new_keys[idx].interp_out = si;
+                pending = Some(new_keys);
+            } else if delete {
+                let mut new_keys = keys.clone();
+                new_keys.remove(idx);
+                pending = Some(new_keys);
+            }
+        });
     }
     let bg = ui.interact(
         rect,
@@ -5271,6 +5340,47 @@ mod dock_tests {
         assert!(!tree.tiles.is_visible(project));
         tree.tiles.set_visible(project, true); // dock back
         assert!(tree.tiles.is_visible(project));
+    }
+
+    // Each keyframe's glyph codes its interpolation (graph-editor ergonomics).
+    #[test]
+    fn key_shape_codes_interpolation() {
+        use kiriko_core::anim::{Keyframe, SideInterp};
+        let key = |i: SideInterp, o: SideInterp| Keyframe {
+            time: rational_at(0.0),
+            value: 0.0,
+            interp_in: i,
+            interp_out: o,
+        };
+        assert_eq!(
+            key_shape(&key(SideInterp::Linear, SideInterp::Linear)),
+            KeyShape::Diamond
+        );
+        assert_eq!(
+            key_shape(&key(SideInterp::Hold, SideInterp::Linear)),
+            KeyShape::Square
+        );
+        assert_eq!(
+            key_shape(&key(
+                SideInterp::Linear,
+                SideInterp::Bezier {
+                    speed: 0.0,
+                    influence: 0.33
+                }
+            )),
+            KeyShape::Circle
+        );
+        // Hold wins over bezier (a held key never eases out visually).
+        assert_eq!(
+            key_shape(&key(
+                SideInterp::Hold,
+                SideInterp::Bezier {
+                    speed: 0.0,
+                    influence: 0.33
+                }
+            )),
+            KeyShape::Square
+        );
     }
 
     // The linked scale control keeps the x:y ratio (K-072).

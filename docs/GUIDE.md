@@ -221,8 +221,10 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   timer instead. This retires the old stopgap where comp playback guessed the time from a
   wall clock.
 - The **graph editor** (tabbed with the Timeline) — click a layer, and its animated
-  properties draw as live curves: drag the square keyframes (value and time together, one
-  undo per drag), double-click the background to add a key, right-click to remove one.
+  properties draw as live curves: drag the keyframes (value and time together, one
+  undo per drag), double-click the background to add a key, right-click a key for a menu
+  (Easy ease / Linear / Hold, or Delete). Each key's shape tells you its interpolation at a
+  glance — a diamond is linear, a circle is eased (bezier), a square is a hold.
   The curve you see is sampled from the same evaluator that renders the comp, so what the
   graph shows is exactly what plays.
 - **Property rows in the Timeline** (K-072) — twirl a layer open and each of its animatable
