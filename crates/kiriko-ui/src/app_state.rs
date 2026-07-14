@@ -591,6 +591,10 @@ pub struct PendingRecovery {
     pub ops: Vec<Op>,
 }
 
+/// Beat-analysis result handed back from the worker: (comp, bpm, onsets).
+#[cfg(feature = "media")]
+type BeatMsg = (Uuid, f64, Vec<(f64, f32)>);
+
 pub struct AppState {
     pub store: DocumentStore,
     pub path: Option<PathBuf>,
@@ -625,11 +629,15 @@ pub struct AppState {
     comp_audio_rx: std::sync::mpsc::Receiver<(Uuid, kiriko_media::AudioBuffer)>,
     #[cfg(feature = "media")]
     comp_audio_tx: std::sync::mpsc::Sender<(Uuid, kiriko_media::AudioBuffer)>,
-    /// Detected beats (comp id, (time_s, confidence)…) from the analysis thread.
+    /// Detected beats (comp id, bpm, (time_s, confidence)…) from the analysis
+    /// thread.
     #[cfg(feature = "media")]
-    beats_rx: std::sync::mpsc::Receiver<(Uuid, Vec<(f64, f32)>)>,
+    beats_rx: std::sync::mpsc::Receiver<BeatMsg>,
     #[cfg(feature = "media")]
-    beats_tx: std::sync::mpsc::Sender<(Uuid, Vec<(f64, f32)>)>,
+    beats_tx: std::sync::mpsc::Sender<BeatMsg>,
+    /// (comp id, estimated BPM) from the last beat detection, shown by the ruler.
+    #[cfg(feature = "media")]
+    pub detected_bpm: Option<(Uuid, f64)>,
     /// (comp id, (min,max) peaks) for the timeline waveform, computed when the
     /// comp's audio is mixed. Drawn under the ruler.
     #[cfg(feature = "media")]
@@ -752,6 +760,8 @@ impl Default for AppState {
             beats_tx,
             #[cfg(feature = "media")]
             comp_waveform: None,
+            #[cfg(feature = "media")]
+            detected_bpm: None,
             #[cfg(feature = "media")]
             audio_rx,
             #[cfg(feature = "media")]
@@ -2644,7 +2654,7 @@ impl AppState {
                 .iter()
                 .map(|o| (o.time, o.confidence))
                 .collect();
-            let _ = tx.send((comp_id, beats));
+            let _ = tx.send((comp_id, analysis.bpm, beats));
         });
     }
 
@@ -2656,9 +2666,10 @@ impl AppState {
         while let Ok(msg) = self.beats_rx.try_recv() {
             newest = Some(msg);
         }
-        let Some((comp_id, beats)) = newest else {
+        let Some((comp_id, bpm, beats)) = newest else {
             return;
         };
+        self.detected_bpm = Some((comp_id, bpm));
         let doc = self.store.snapshot();
         let Some(comp) = doc.comp(comp_id) else {
             return;

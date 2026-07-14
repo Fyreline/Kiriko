@@ -892,6 +892,19 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
             );
         }
     }
+    // Detected tempo readout, right-aligned in the ruler.
+    #[cfg(feature = "media")]
+    if let Some((bc, bpm)) = app.detected_bpm {
+        if bc == comp_id && bpm > 0.0 {
+            ui.painter().text(
+                egui::pos2(track_left + track_w - 2.0, ruler_rect.top() + 2.0),
+                egui::Align2::RIGHT_TOP,
+                format!("♪ {bpm:.0} BPM"),
+                egui::FontId::monospace(9.0),
+                theme.accent,
+            );
+        }
+    }
     // Markers (docs 03 §11): beats are faint clay ticks fading by confidence;
     // user/chapter markers are full-height and solid.
     for m in &comp.markers {
