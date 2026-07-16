@@ -2,3 +2,4 @@
 autosaves/
 *.kir-cache/
 target/
+.claude/
