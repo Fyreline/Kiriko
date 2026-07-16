@@ -565,9 +565,107 @@ pub struct CompDialog {
 }
 
 /// Cache-bar memo key: (document snapshot ptr, cache epoch, quality tag,
-/// comp id) — the bar is stale iff any of these moved.
+/// comp id, disk-set size) — the bar is stale iff any of these moved.
 #[cfg(feature = "media")]
-type CacheBarKey = (usize, u64, u32, Uuid);
+type CacheBarKey = (usize, u64, u32, Uuid, usize);
+
+/// A frame's cache-bar tier (docs/06 §5.6): green plays now, blue promotes.
+#[cfg(feature = "media")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CacheTier {
+    None,
+    /// In RAM at current quality — plays in real time now (green).
+    Ram,
+    /// On disk only — promotable, not yet playable (blue).
+    Disk,
+}
+
+/// The disk tier's IO side (docs/06 §5.4): one background thread owns the
+/// [`lumit_cache::disk::DiskCache`] so the UI thread never touches the
+/// filesystem. Writes are fire-and-forget (write-behind); loads come back
+/// through a channel and are folded into the RAM tier each frame. The shared
+/// `known` set mirrors which hashes exist on disk, for the cache bar's blue
+/// tier and the fill scheduler's promote-before-render choice.
+#[cfg(feature = "media")]
+pub mod diskio {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::mpsc::{Receiver, Sender};
+    use std::sync::{Arc, Mutex};
+
+    /// Default disk budget (docs/06 §5.4; user-set cap arrives with settings).
+    pub const DEFAULT_CAP_BYTES: u64 = 50 * 1024 * 1024 * 1024;
+
+    pub enum Cmd {
+        /// Point the cache at a project's sidecar (None = unsaved: disabled).
+        SetRoot(Option<PathBuf>),
+        /// Park a rendered frame (write-behind).
+        Store(u128, u32, u32, Vec<u8>),
+        /// Bring a frame back for the RAM tier.
+        Load(u128),
+    }
+
+    pub struct DiskIo {
+        pub tx: Sender<Cmd>,
+        pub loaded: Receiver<(u128, lumit_cache::disk::DiskFrame)>,
+        /// Hashes present on disk, mirrored by the worker.
+        pub known: Arc<Mutex<HashSet<u128>>>,
+    }
+
+    /// Spawn the worker. It exits when the sender side drops.
+    pub fn spawn() -> DiskIo {
+        let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
+        let (loaded_tx, loaded) = std::sync::mpsc::channel();
+        let known: Arc<Mutex<HashSet<u128>>> = Arc::default();
+        let known_worker = known.clone();
+        std::thread::Builder::new()
+            .name("nebula-disk".into())
+            .spawn(move || {
+                let mut cache: Option<lumit_cache::disk::DiskCache> = None;
+                while let Ok(cmd) = rx.recv() {
+                    match cmd {
+                        Cmd::SetRoot(root) => {
+                            cache = root
+                                .map(|r| lumit_cache::disk::DiskCache::open(r, DEFAULT_CAP_BYTES));
+                            let hashes =
+                                cache.as_ref().map(|c| c.known_hashes()).unwrap_or_default();
+                            if let Ok(mut k) = known_worker.lock() {
+                                k.clear();
+                                k.extend(hashes);
+                            }
+                        }
+                        Cmd::Store(hash, w, h, rgba) => {
+                            if let Some(c) = &mut cache {
+                                c.store(hash, w, h, &rgba);
+                                if c.contains(hash) {
+                                    if let Ok(mut k) = known_worker.lock() {
+                                        k.insert(hash);
+                                    }
+                                }
+                            }
+                        }
+                        Cmd::Load(hash) => {
+                            let frame = cache.as_mut().and_then(|c| c.load(hash));
+                            match frame {
+                                Some(f) => {
+                                    let _ = loaded_tx.send((hash, f));
+                                }
+                                None => {
+                                    // Missing or corrupt-discarded: unmirror it
+                                    // so the fill falls back to rendering.
+                                    if let Ok(mut k) = known_worker.lock() {
+                                        k.remove(&hash);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .ok();
+        DiskIo { tx, loaded, known }
+    }
+}
 
 /// One display-ready comp frame in Kura's RAM tier (sRGB bytes as shown and
 /// as exported — the same pixels, K-031).
@@ -854,9 +952,18 @@ pub struct AppState {
     /// The (comp, frame) currently rendering for the background cache fill.
     #[cfg(feature = "media")]
     pub fill_in_flight: Option<(Uuid, usize)>,
+    /// The disk tier's IO worker (docs/06 §5.4), started lazily once the
+    /// project has a path (unsaved projects have no sidecar to cache into).
+    pub disk_io: Option<diskio::DiskIo>,
+    /// The sidecar root the worker currently points at (memo, so the root is
+    /// re-sent only when the project path actually changes).
+    disk_root: Option<std::path::PathBuf>,
+    /// Keys with a disk load in flight — suppresses duplicate load requests
+    /// until the frame lands in RAM (drained each frame).
+    disk_load_pending: std::collections::HashSet<u128>,
     /// Cache-bar memo: recomputed only when the memo key changes.
     #[cfg(feature = "media")]
-    cache_bar_memo: Option<(CacheBarKey, std::sync::Arc<Vec<bool>>)>,
+    cache_bar_memo: Option<(CacheBarKey, std::sync::Arc<Vec<CacheTier>>)>,
     last_autosave: Instant,
     comp_counter: usize,
     /// Comps open as Timeline tabs, in tab order (07-UI-SPEC §4: one Timeline
@@ -961,6 +1068,9 @@ impl Default for AppState {
             cached_present: None,
             #[cfg(feature = "media")]
             fill_in_flight: None,
+            disk_io: None,
+            disk_root: None,
+            disk_load_pending: std::collections::HashSet::new(),
             #[cfg(feature = "media")]
             cache_bar_memo: None,
             last_autosave: Instant::now(),
@@ -2425,31 +2535,121 @@ impl AppState {
     /// state, quality); comps beyond 2 400 frames skip the bar for now (the
     /// evaluator's incremental bar replaces this scan — S-budget debt).
     #[cfg(feature = "media")]
-    pub fn cache_bar(&mut self, comp: &Composition) -> Option<std::sync::Arc<Vec<bool>>> {
+    pub fn cache_bar(&mut self, comp: &Composition) -> Option<std::sync::Arc<Vec<CacheTier>>> {
         let total = self.comp_frame_count(comp);
         if total == 0 || total > 2400 {
             return None;
         }
+        // A snapshot of the on-disk set (one lock, then no contention in the
+        // per-frame loop); its size joins the memo key so disk stores/evicts
+        // refresh the bar.
+        let disk: std::collections::HashSet<u128> = self
+            .disk_io
+            .as_ref()
+            .and_then(|io| io.known.lock().ok().map(|k| k.clone()))
+            .unwrap_or_default();
         let key = (
             std::sync::Arc::as_ptr(&self.store.snapshot()) as usize,
             self.cache_epoch,
             self.quality_tag(),
             comp.id,
+            disk.len(),
         );
         if let Some((k, bars)) = &self.cache_bar_memo {
             if *k == key {
                 return Some(bars.clone());
             }
         }
-        let bars: Vec<bool> = (0..total)
-            .map(|f| {
-                self.frame_key_for(comp.id, f)
-                    .is_some_and(|k| self.comp_frame_cache.contains_key(&k))
+        let bars: Vec<CacheTier> = (0..total)
+            .map(|f| match self.frame_key_for(comp.id, f) {
+                Some(k) if self.comp_frame_cache.contains_key(&k) => CacheTier::Ram,
+                Some(k) if disk.contains(&k) => CacheTier::Disk,
+                _ => CacheTier::None,
             })
             .collect();
         let bars = std::sync::Arc::new(bars);
         self.cache_bar_memo = Some((key, bars.clone()));
         Some(bars)
+    }
+
+    /// Keep the disk tier pointed at the saved project's sidecar, starting
+    /// the IO worker on first use. Cheap to call every frame.
+    #[cfg(feature = "media")]
+    pub fn disk_sync_root(&mut self) {
+        let root = self
+            .path
+            .as_deref()
+            .and_then(lumit_cache::disk::sidecar_root);
+        if root == self.disk_root {
+            return;
+        }
+        if self.disk_io.is_none() {
+            self.disk_io = Some(diskio::spawn());
+        }
+        if let Some(io) = &self.disk_io {
+            let _ = io.tx.send(diskio::Cmd::SetRoot(root.clone()));
+        }
+        self.disk_load_pending.clear();
+        self.disk_root = root;
+    }
+
+    /// Park a rendered frame on disk (write-behind; no-op while unsaved).
+    #[cfg(feature = "media")]
+    pub fn disk_store_behind(&mut self, key: u128, width: u32, height: u32, rgba: Vec<u8>) {
+        if let Some(io) = &self.disk_io {
+            let _ = io.tx.send(diskio::Cmd::Store(key, width, height, rgba));
+        }
+    }
+
+    /// Whether the disk tier holds this frame (per the worker's mirror).
+    #[cfg(feature = "media")]
+    pub fn disk_has(&self, key: u128) -> bool {
+        self.disk_io
+            .as_ref()
+            .and_then(|io| io.known.lock().ok().map(|k| k.contains(&key)))
+            .unwrap_or(false)
+    }
+
+    /// Ask the worker to promote a frame disk → RAM (idempotent per key
+    /// until the load lands or misses).
+    #[cfg(feature = "media")]
+    pub fn disk_request_load(&mut self, key: u128) {
+        if self.disk_load_pending.contains(&key) {
+            return;
+        }
+        if let Some(io) = &self.disk_io {
+            if io.tx.send(diskio::Cmd::Load(key)).is_ok() {
+                self.disk_load_pending.insert(key);
+            }
+        }
+    }
+
+    /// Fold completed disk loads into the RAM tier. Returns true when any
+    /// frame landed (the caller repaints / re-presents).
+    #[cfg(feature = "media")]
+    pub fn drain_disk_loads(&mut self) -> bool {
+        let mut any = false;
+        // Collect first: inserting borrows self mutably.
+        let mut landed = Vec::new();
+        if let Some(io) = &self.disk_io {
+            while let Ok((key, f)) = io.loaded.try_recv() {
+                landed.push((key, f));
+            }
+        }
+        for (key, f) in landed {
+            self.disk_load_pending.remove(&key);
+            self.comp_frame_cache.insert(
+                key,
+                CachedCompFrame {
+                    width: f.width,
+                    height: f.height,
+                    rgba: f.rgba,
+                },
+            );
+            self.cache_epoch += 1;
+            any = true;
+        }
+        any
     }
 
     #[cfg(feature = "media")]

@@ -1312,25 +1312,32 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
         );
         ui.painter().rect_filled(band, 0.0, theme.success);
     }
-    // Kura cache bar: mint runs along the ruler's base where frames are
-    // banked (never a warning colour — an empty bar is normal, not a fault).
+    // Nebula cache bar (docs/06 §5.6): mint runs where frames are in RAM and
+    // play right now; blue where they are parked on disk, promotable. Never a
+    // warning colour — an empty bar is normal, not a fault.
     #[cfg(feature = "media")]
     if let Some(bars) = app.cache_bar(comp) {
+        use crate::app_state::CacheTier;
         let fps = comp.frame_rate.fps().max(1.0);
-        let mut run_start: Option<usize> = None;
-        for f in 0..=bars.len() {
-            let cached = f < bars.len() && bars[f];
-            match (cached, run_start) {
-                (true, None) => run_start = Some(f),
-                (false, Some(s)) => {
-                    let band = egui::Rect::from_min_max(
-                        egui::pos2(x_of(s as f64 / fps), ruler_rect.bottom() - 2.0),
-                        egui::pos2(x_of(f as f64 / fps), ruler_rect.bottom()),
-                    );
-                    ui.painter().rect_filled(band, 0.0, theme.success);
-                    run_start = None;
+        for (tier, colour) in [
+            (CacheTier::Ram, theme.success),
+            (CacheTier::Disk, theme.cache_disk),
+        ] {
+            let mut run_start: Option<usize> = None;
+            for f in 0..=bars.len() {
+                let on = f < bars.len() && bars[f] == tier;
+                match (on, run_start) {
+                    (true, None) => run_start = Some(f),
+                    (false, Some(s)) => {
+                        let band = egui::Rect::from_min_max(
+                            egui::pos2(x_of(s as f64 / fps), ruler_rect.bottom() - 2.0),
+                            egui::pos2(x_of(f as f64 / fps), ruler_rect.bottom()),
+                        );
+                        ui.painter().rect_filled(band, 0.0, colour);
+                        run_start = None;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -8139,6 +8146,12 @@ impl Shell {
                 // Selection made before probe finished: retry until Ready.
                 self.app.refresh_preview();
             }
+            // The disk tier follows the project's save path, and any frames
+            // it promoted land in RAM here (docs/06 §5.4).
+            self.app.disk_sync_root();
+            if self.app.drain_disk_loads() {
+                ctx.request_repaint();
+            }
             // Kura warm path: a cached frame presents as a plain upload.
             if let Some(key) = self.app.cached_present.take() {
                 if let Some(gpu) = &mut self.gpu {
@@ -8157,7 +8170,20 @@ impl Shell {
             {
                 if let Some(comp_id) = self.app.preview_comp {
                     if let Some(frame) = self.app.next_fill_frame(comp_id) {
-                        self.app.request_fill_frame(comp_id, frame);
+                        // Disk-first (docs/06 §5.4: promote, never re-render
+                        // what is already parked): a frame the disk tier holds
+                        // is loaded back instead of rendered; the render path
+                        // only runs on frames no tier has.
+                        let promoted = match self.app.frame_key_for(comp_id, frame) {
+                            Some(key) if self.app.disk_has(key) => {
+                                self.app.disk_request_load(key);
+                                true
+                            }
+                            _ => false,
+                        };
+                        if !promoted {
+                            self.app.request_fill_frame(comp_id, frame);
+                        }
                         ctx.request_repaint_after(std::time::Duration::from_millis(30));
                     }
                 }
@@ -8208,6 +8234,12 @@ impl Shell {
                                         &draws,
                                     ),
                                 ) {
+                                    self.app.disk_store_behind(
+                                        key,
+                                        comp.width,
+                                        comp.height,
+                                        rgba.clone(),
+                                    );
                                     self.app.comp_frame_cache.insert(
                                         key,
                                         crate::app_state::CachedCompFrame {
@@ -8241,6 +8273,12 @@ impl Shell {
                                                 background,
                                                 &draws,
                                             ) {
+                                                self.app.disk_store_behind(
+                                                    key,
+                                                    comp.width,
+                                                    comp.height,
+                                                    rgba.clone(),
+                                                );
                                                 self.app.comp_frame_cache.insert(
                                                     key,
                                                     crate::app_state::CachedCompFrame {

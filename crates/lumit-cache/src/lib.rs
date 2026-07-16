@@ -1,10 +1,13 @@
-//! The cache crate: byte-budgeted stores per docs/06-RENDER-PIPELINE.md §5
-//! (K-016). Phase 1 seed: the RAM tier as a byte-budget LRU. VRAM and disk
-//! tiers, content-hash keys and the governor join as the evaluator grows.
+//! The cache crate — **Nebula** (K-083): byte-budgeted stores per
+//! docs/06-RENDER-PIPELINE.md §5 (K-016). The RAM tier is a byte-budget LRU;
+//! the disk tier ([`disk`]) parks frames in the project's sidecar folder.
+//! The VRAM tier, index.db and the governor join as the evaluator grows.
 //!
 //! In plain terms: a cupboard with a strict size limit — putting something in
 //! when it's full throws out whatever was used longest ago. "Budget by bytes,
 //! not by count" is the point: one 4K frame costs what sixty thumbnails cost.
+
+pub mod disk;
 
 use std::collections::HashMap;
 use std::hash::Hash;

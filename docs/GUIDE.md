@@ -231,8 +231,17 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   frames get remembered so they're never computed twice; when the cupboard is full,
   whatever was used longest ago gets thrown out first. The limit is in bytes, not item
   counts — one 4K frame costs what sixty thumbnails cost, and budgeting any other way is
-  how apps balloon. This is the seed of the three-tier cache the whole engine design
-  revolves around.
+  how apps balloon.
+  As of the disk tier (`disk.rs`), frames also get **parked on disk**: once a project is
+  saved, a `yourproject.lum-cache` folder appears beside it and rendered frames are quietly
+  written there (compressed) by a background thread — so closing and reopening a project
+  doesn't start the cache from zero, and frames squeezed out of RAM can come back without
+  re-rendering. Each frame is one small file named by its content fingerprint; anything
+  unreadable is silently deleted and re-rendered, so the folder is **always safe to delete**
+  — it can make things faster, never wrong. The idle background fill now checks the disk
+  before rendering: promoting a parked frame beats recomputing it. The timeline's cache bar
+  grew a second colour for this: **mint** = in memory, plays right now; **blue** = parked on
+  disk, ready to promote.
 - `crates/lumit-ui/src/export.rs` — **writing video files.** Every frame of a comp is
   rendered through the *exact same* colour engine and compositor the Viewer uses, then
   compressed to an .mp4. Using one shared path isn't laziness — it's the design's central
