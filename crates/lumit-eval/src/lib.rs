@@ -1179,6 +1179,34 @@ mod tests {
         assert_ne!(k(&layer(true), 1.0), k(&layer(true), 1.5));
     }
 
+    /// K-094 covers Flow motion blur too: its temporal window is {0, 1}, so the
+    /// existing neighbour-key block already hashes the +1 source frame it reads
+    /// (the frame the flow field is measured against). A motion-blur layer's
+    /// key therefore differs from the same layer bypassed, and moves with time
+    /// as the next frame changes — the cache can't hold one motion-blurred
+    /// frame across a span. A regression pinning that the {0, 1} forward window
+    /// is covered with no motion-blur-specific plumbing.
+    #[test]
+    fn motion_blur_keys_its_next_frame() {
+        let doc = Document::new();
+        let item = Uuid::now_v7();
+        let layer = |enabled: bool| {
+            let mut l = text_layer("", 0.0, 10.0, 0.0);
+            let mut mb = lumit_core::fx::instantiate("motion_blur").unwrap();
+            mb.enabled = enabled;
+            l.effects.push(mb);
+            l.kind = LayerKind::Footage { item, retime: None };
+            comp_with(vec![l])
+        };
+        let k = |c: &Composition, t: f64| {
+            comp_frame_key(&doc, c, t, Quality::default(), &StubStamper).unwrap()
+        };
+        // Live hashes the next-frame block; bypassed does not.
+        assert_ne!(k(&layer(true), 1.0), k(&layer(false), 1.0));
+        // The +1 neighbour moves with time, so the key evolves.
+        assert_ne!(k(&layer(true), 1.0), k(&layer(true), 1.5));
+    }
+
     /// K-095: a flow conform rate synthesises from different source frames at
     /// the same time, so changing it (including to/from Native) changes the
     /// key — the cache can't serve a frame flowed at the wrong rate.

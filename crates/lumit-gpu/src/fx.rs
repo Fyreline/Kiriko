@@ -370,6 +370,31 @@ struct EchoParams {
     _pad: [f32; 2],
 }
 
+/// One resolved flow motion blur (docs/08 §3.2). The per-pixel motion is a
+/// dense flow field passed as its own texture (see [`upload_flow_field`] and
+/// [`FxEngine::motion_blur`]); this op carries only the scalars the kernel
+/// turns a vector into a streak with. `samples` must equal the resolved
+/// `Resolved::MotionBlur::samples` so the GPU integrates the CPU oracle's
+/// exact tap count.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionBlurOp {
+    /// Shutter ÷ 360: streak length as a fraction of the inter-frame motion.
+    pub shutter_frac: f32,
+    /// Evenly spaced bilinear taps along the streak.
+    pub samples: i32,
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MotionBlurParams {
+    shutter_frac: f32,
+    samples: i32,
+    mix_amt: f32,
+    _pad0: f32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct AdjustParams {
@@ -396,11 +421,15 @@ pub struct FxEngine {
     glitch: wgpu::ComputePipeline,
     echo_accumulate: wgpu::ComputePipeline,
     echo_mix: wgpu::ComputePipeline,
+    motion_blur: wgpu::ComputePipeline,
     adjust: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     /// The adjustment blend's own layout: three sampled inputs (below,
     /// processed, coverage) where every effect kernel takes two.
     adjust_layout: wgpu::BindGroupLayout,
+    /// Flow motion blur's own layout: the shared two inputs (src, orig) plus
+    /// the flow-field texture — the one extra sampled input this kernel needs.
+    mb_layout: wgpu::BindGroupLayout,
 }
 
 impl FxEngine {
@@ -478,6 +507,46 @@ impl FxEngine {
                 bind_group_layouts: &[&adjust_layout],
                 push_constant_ranges: &[],
             });
+        // Motion blur's layout: src (0), orig-for-mix (1), the flow field (2),
+        // the storage output (3) and the uniform (4) — the shared two-input
+        // shape plus the one extra sampled texture (modelled on adjust_layout).
+        let mb_layout = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fx-mb-layout"),
+                entries: &[
+                    texture_entry(0),
+                    texture_entry(1),
+                    texture_entry(2),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: WORKING_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let mb_pl = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("fx-mb-pl"),
+                bind_group_layouts: &[&mb_layout],
+                push_constant_ranges: &[],
+            });
         let module = |wgsl: &str, name: &str| {
             ctx.device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -509,6 +578,7 @@ impl FxEngine {
         let glow_mod = module(include_str!("fx_glow.wgsl"), "fx-glow");
         let glitch_mod = module(include_str!("fx_glitch.wgsl"), "fx-glitch");
         let echo_mod = module(include_str!("fx_echo.wgsl"), "fx-echo");
+        let motion_blur_mod = module(include_str!("fx_motionblur.wgsl"), "fx-motion-blur");
         let adjust_mod = module(include_str!("fx_adjust.wgsl"), "fx-adjust");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
         let dir_blur = pipeline(&dir_blur_mod, "fx-dir-blur", "dir_blur");
@@ -526,6 +596,16 @@ impl FxEngine {
         let glitch = pipeline(&glitch_mod, "fx-glitch", "glitch");
         let echo_accumulate = pipeline(&echo_mod, "fx-echo-accumulate", "echo_accumulate");
         let echo_mix = pipeline(&echo_mod, "fx-echo-mix", "echo_mix");
+        let motion_blur = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("fx-motion-blur"),
+                layout: Some(&mb_pl),
+                module: &motion_blur_mod,
+                entry_point: Some("motion_blur"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let adjust = ctx
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -553,9 +633,11 @@ impl FxEngine {
             glitch,
             echo_accumulate,
             echo_mix,
+            motion_blur,
             adjust,
             layout,
             adjust_layout,
+            mb_layout,
         }
     }
 
@@ -623,6 +705,85 @@ impl FxEngine {
             h,
             bytemuck::bytes_of(&params(op.mix, 0)),
         );
+        out
+    }
+
+    /// Apply one flow motion blur (docs/08 §3.2) to a linear working texture,
+    /// returning a new texture of the same size. One pass: per output pixel,
+    /// read its motion vector from `flow` (a two-channel field the same size
+    /// as `src`, in raster pixels) and integrate `op.samples` box-weighted
+    /// bilinear taps along the centred streak `± motion × shutter_frac`, then
+    /// blend against the input by the host Mix. `flow`'s vectors are consumed
+    /// exactly as `lumit_core::fx::cpu::motion_blur` reads its `u`/`v` slices,
+    /// so the two agree (§1.6). Its own bind group (the flow field is the one
+    /// extra input over the shared two-input shape).
+    pub fn motion_blur(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        flow: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &MotionBlurOp,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+        let out = work_texture(ctx, w, h, "fx-mb-out");
+        let ubuf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-mb-params"),
+                contents: bytemuck::bytes_of(&MotionBlurParams {
+                    shutter_frac: op.shutter_frac,
+                    samples: op.samples.max(1),
+                    mix_amt: op.mix,
+                    _pad0: 0.0,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let view = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx-mb-bind"),
+            layout: &self.mb_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view(src)),
+                },
+                // orig-for-mix: a single pass, so the unprocessed original is
+                // the source itself.
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view(src)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&view(flow)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&view(&out)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: ubuf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fx-mb-enc"),
+            });
+        {
+            let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx-mb-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.motion_blur);
+            cpass.set_bind_group(0, &bind, &[]);
+            cpass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+        }
+        ctx.queue.submit([enc.finish()]);
         out
     }
 
@@ -1314,6 +1475,56 @@ pub fn upload_linear_f32(ctx: &GpuContext, rgba: &[f32], w: u32, h: u32) -> wgpu
             aspect: wgpu::TextureAspect::All,
         },
         bytemuck::cast_slice(&halfs),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 8),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    tex
+}
+
+/// Upload a dense flow field (per-pixel `(u, v)` motion, raster pixels) as a
+/// two-channel `rg32float` texture for [`FxEngine::motion_blur`]. `u` and `v`
+/// are row-major, one entry per pixel (`w × h`). rg32float, not the working
+/// fp16 format, so the kernel reads the exact f32 vectors the CPU oracle
+/// integrates — the only fp16 rounding then is the colour taps, matching the
+/// other tap-based kernels. Interleaved [u, v] per texel; `textureLoad` in the
+/// kernel reads `.xy`.
+pub fn upload_flow_field(ctx: &GpuContext, u: &[f32], v: &[f32], w: u32, h: u32) -> wgpu::Texture {
+    let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fx-flow-field"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rg32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let n = (w * h) as usize;
+    let mut interleaved = vec![0f32; n * 2];
+    for i in 0..n.min(u.len()).min(v.len()) {
+        interleaved[i * 2] = u[i];
+        interleaved[i * 2 + 1] = v[i];
+    }
+    ctx.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&interleaved),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(w * 8),
@@ -2498,6 +2709,109 @@ mod tests {
             readback_linear_f32(&ctx, &out, w, h).unwrap(),
             current,
             "no taps at Mix 1 must be a bit-exact passthrough"
+        );
+    }
+
+    /// The §1.6 oracle for Flow motion blur (docs/08 §3.2): the GPU smear
+    /// matches `lumit_core::fx::cpu::motion_blur` given the same flow field,
+    /// on a constant-motion field and a varying one. Both accumulate the taps
+    /// in f32 and read the same fp16 source and the same exact (rg32float)
+    /// flow vectors, so — exactly like the Directional/Radial blur oracles it
+    /// shares its tap-integral shape with — it holds to the cheap-class ≤ 2
+    /// fp16 ULP bound despite the multi-tap sum (measured worst: 1 ULP). The
+    /// GPU is bit-stable (§2.4); a zero flow and a zero shutter are both
+    /// bit-exact passthroughs.
+    #[test]
+    fn wgsl_motion_blur_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        let src = upload_linear_f32(&ctx, &img, w, h);
+        let n = (w * h) as usize;
+
+        // A constant horizontal motion, and a smoothly varying field (per-pixel
+        // direction and magnitude) — the two shapes the kernel must handle.
+        let constant: (Vec<f32>, Vec<f32>) = (vec![5.0; n], vec![0.0; n]);
+        let mut vary_u = vec![0f32; n];
+        let mut vary_v = vec![0f32; n];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as usize;
+                vary_u[i] = (y as f32 - h as f32 / 2.0) * 0.25;
+                vary_v[i] = (x as f32 - w as f32 / 2.0) * 0.2;
+            }
+        }
+        let varying = (vary_u, vary_v);
+
+        let cases = [
+            (&constant, 0.5f32, 16i32, 1.0f32, "constant"),
+            (&varying, 1.0, 12, 0.7, "varying"),
+            (&constant, 0.25, 8, 1.0, "short"),
+        ];
+        for (field, shutter_frac, samples, mix, name) in cases {
+            let (u, v) = field;
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::motion_blur(&mut cpu, w, h, u, v, shutter_frac, samples, mix);
+            let flow_t = upload_flow_field(&ctx, u, v, w, h);
+            let op = MotionBlurOp {
+                shutter_frac,
+                samples,
+                mix,
+            };
+            let out = fx.motion_blur(&ctx, &src, &flow_t, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("motion blur {name}: worst {worst} ulp");
+            assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+            let out2 = fx.motion_blur(&ctx, &src, &flow_t, w, h, &op);
+            assert_eq!(
+                gpu,
+                readback_linear_f32(&ctx, &out2, w, h).unwrap(),
+                "GPU motion blur must be bit-stable"
+            );
+        }
+
+        // A zero flow, and a real motion with a closed shutter, are both
+        // bit-exact passthroughs (every tap collapses onto the pixel itself).
+        let zero = upload_flow_field(&ctx, &vec![0.0; n], &vec![0.0; n], w, h);
+        let out = fx.motion_blur(
+            &ctx,
+            &src,
+            &zero,
+            w,
+            h,
+            &MotionBlurOp {
+                shutter_frac: 0.5,
+                samples: 16,
+                mix: 1.0,
+            },
+        );
+        assert_eq!(
+            readback_linear_f32(&ctx, &out, w, h).unwrap(),
+            img,
+            "zero flow must be a bit-exact passthrough"
+        );
+        let moving = upload_flow_field(&ctx, &constant.0, &constant.1, w, h);
+        let out = fx.motion_blur(
+            &ctx,
+            &src,
+            &moving,
+            w,
+            h,
+            &MotionBlurOp {
+                shutter_frac: 0.0,
+                samples: 16,
+                mix: 1.0,
+            },
+        );
+        assert_eq!(
+            readback_linear_f32(&ctx, &out, w, h).unwrap(),
+            img,
+            "a closed shutter must be a bit-exact passthrough"
         );
     }
 }

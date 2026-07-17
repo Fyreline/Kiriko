@@ -152,6 +152,22 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   offers three ways to stack the trail (Add for bright streaks, Behind for ghosting, Max for a
   lighten-only look); wider/looser trails, and the other effects that want neighbouring frames
   (motion blur that follows real motion, the datamosh look), build on this same machinery.
+- **Motion blur that follows real motion** — the second temporal effect, and the one that
+  turns game capture (which has no natural blur — every frame is pin-sharp) into footage that
+  streaks the way a real camera would. It builds on two things already in the box: Echo's
+  "fetch a neighbouring frame" plumbing, and the optical-flow engine that powers slow-motion.
+  The trick is to look at the current frame and the *next* one, work out how far every pixel
+  moved between them (that's the flow — a little arrow for each pixel saying where it went),
+  and then smear each pixel along its own arrow. Fast-moving areas get long streaks; still
+  areas stay crisp — exactly what real motion blur does, and what plugins like RSMB sell. The
+  flow is worked out during decoding, where both frames are sitting in memory anyway (the same
+  place slow-motion computes it), and passed to the blur as a little motion-map image; the
+  preview and the export do it the identical way, so what you see is what you get. Two knobs:
+  **Shutter angle** (how long the "shutter" stays open — 180° is the film-standard half-frame
+  smear; higher blurs more, up to a full 720°) and **Samples** (how many steps to take along
+  each streak — more is smoother but slower). A still frame, or a shutter of zero, leaves the
+  picture untouched. For now it follows the footage's own motion only (not, yet, motion you
+  add with keyframes) and works on footage layers, the same starting scope Echo has.
 - **Blur gains a Radial mode** — the third and final mode of the §3.8 trio, alongside
   Gaussian and Directional. Drop a Centre point anywhere on the frame (as two percentages,
   Centre X and Centre Y, of the frame's width and height) and pick a Type: **Spin** streaks

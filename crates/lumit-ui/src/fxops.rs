@@ -17,7 +17,11 @@ type Tex = egui_wgpu::wgpu::Texture;
 /// unchanged when `ops` is empty). `w`/`h` are the texture's raster size.
 /// `neighbours` are the layer's decoded neighbour frames keyed by offset
 /// (empty unless the stack has a temporal effect); a temporal op like Echo
-/// reads them, single-frame ops ignore them.
+/// reads them, single-frame ops ignore them. `flow_field` is the layer's
+/// dense motion field (per-pixel `(u, v)` at this raster size), present only
+/// when the stack has a flow-consuming effect (Flow motion blur); a missing
+/// field makes motion blur a passthrough (degrade, never fault).
+#[allow(clippy::too_many_arguments)]
 pub fn run_ops(
     fx: &FxEngine,
     ctx: &GpuContext,
@@ -26,6 +30,7 @@ pub fn run_ops(
     h: u32,
     ops: &[Resolved],
     neighbours: &[(i32, Tex)],
+    flow_field: Option<&Tex>,
 ) -> Tex {
     let mut tex = tex;
     for op in ops {
@@ -351,6 +356,30 @@ pub fn run_ops(
                         mix: *mix,
                     },
                 );
+            }
+            Resolved::MotionBlur {
+                shutter_frac,
+                samples,
+                mix,
+            } => {
+                // Flow motion blur reads the layer's dense motion field, which
+                // the decode worker computed from the current + next source
+                // frames. With no field (a plain layer, or a decode that
+                // dropped the neighbour) it is a passthrough — never a fault.
+                if let Some(flow) = flow_field {
+                    tex = fx.motion_blur(
+                        ctx,
+                        &tex,
+                        flow,
+                        w,
+                        h,
+                        &lumit_gpu::fx::MotionBlurOp {
+                            shutter_frac: *shutter_frac,
+                            samples: *samples,
+                            mix: *mix,
+                        },
+                    );
+                }
             }
         }
     }

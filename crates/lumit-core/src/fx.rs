@@ -1114,6 +1114,76 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Motion blur (flow) / RSMB-class (docs/08 §3.2): synthesised motion blur
+    // from real optical flow. Game capture has no natural blur; this estimates
+    // the per-pixel motion between the current source frame and the next
+    // (§3.1's flow engine, run in the decode worker where both frames live),
+    // then smears each pixel along its own motion vector so fast-moving areas
+    // streak along their actual motion. The second temporal effect: its window
+    // is {0, 1} (current + one frame ahead), and the render fetches the +1
+    // neighbour through the same machinery Echo added — but where Echo reads
+    // the neighbour *pixels*, motion blur reads a *flow field* the decode
+    // worker computes from them and hands the kernel as a texture.
+    //
+    // Status (v1, pinned here): the §3.2 parameter set is trimmed to
+    // Shutter angle, Samples and the host Mix. Blur length in pixels =
+    // motion vector × (shutter ÷ 360), integrated as a centred box streak of
+    // Samples evenly spaced bilinear taps (the same line-integral shape as
+    // Directional blur, but per-pixel-directed by the flow). Vector source is
+    // Flow only (Auto's transform-derivative path and the engine-motion-blur
+    // interaction guard follow); Amount (post-shutter vector scale) and the
+    // Quality/adaptive-tap-count control are deferred — Samples is a fixed
+    // per-frame tap count so the CPU and GPU integrate identically. Zero
+    // motion or a zero shutter is a bit-exact passthrough (pinned by test).
+    // Edges clamp (the flow sampler's own rule), so a full-frame smear never
+    // darkens the border. Cost heavy, full-frame ROI; footage layers only,
+    // exactly like Echo (adjustment-layer temporal effects follow).
+    EffectSchema {
+        match_name: "motion_blur",
+        label: "Motion blur",
+        version: 1,
+        category: FxCategory::Temporal,
+        traits: EffectTraits {
+            cost: CostClass::Heavy,
+            roi: Roi::FullFrame,
+            // Current frame + one ahead: the flow engine brackets the motion
+            // between them. The +1 neighbour is fetched by the same decode
+            // planner Echo's negative offsets use.
+            temporal: &[0, 1],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "shutter_angle",
+                label: "Shutter angle",
+                // Degrees (§3.2: 0–720, default 180): the fraction of the
+                // frame interval the shutter is open, so the streak length is
+                // shutter ÷ 360 of the inter-frame motion. 180° = half the
+                // motion, the film-standard look.
+                kind: ParamKind::Float {
+                    default: 180.0,
+                    slider: (0.0, 720.0),
+                    hard: (Some(0.0), Some(720.0)),
+                },
+            },
+            ParamSchema {
+                id: "samples",
+                label: "Samples",
+                // Taps along the streak (§3.2). The spec's integer, carried
+                // as a Float row (the schema has no integer kind — Echo's
+                // Echoes does the same); the resolver rounds and clamps. More
+                // taps smooth a long streak; fewer are cheaper.
+                kind: ParamKind::Float {
+                    default: 16.0,
+                    slider: (8.0, 32.0),
+                    hard: (Some(2.0), Some(64.0)),
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
 ];
 
 /// Look a schema up by its match name.
@@ -1157,6 +1227,24 @@ pub fn stack_is_temporal(effects: &[EffectInstance], fx_on: bool) -> bool {
                 schema(&e.effect.match_name)
                     .is_some_and(|s| s.traits.temporal.iter().any(|&o| o != 0))
             })
+}
+
+/// True when any live effect needs a dense **flow field** (per-pixel motion
+/// vectors between the current source frame and the next), computed in the
+/// decode worker and handed to the kernel as a texture — the gate mirroring
+/// [`stack_is_temporal`] that the render/decode paths check before doing any
+/// flow work. Only Flow motion blur (docs/08 §3.2) wants one in v1; the
+/// deferred Datamosh look (§3.12) will join this set when it lands. Such an
+/// effect is also temporal (its window reaches the +1 frame), so the
+/// neighbour machinery already fetches the source frame the flow is measured
+/// against; this flag is what tells the worker to turn those two frames into
+/// motion vectors.
+pub fn stack_wants_flow_field(effects: &[EffectInstance], fx_on: bool) -> bool {
+    fx_on
+        && effects
+            .iter()
+            .filter(|e| e.enabled && e.effect.namespace == EffectNamespace::Builtin)
+            .any(|e| e.effect.match_name == "motion_blur")
 }
 
 /// A fresh random seed value — the per-instance Seed default (docs/08
@@ -1404,6 +1492,22 @@ pub enum Resolved {
     Echo {
         weights: [f32; 8],
         mode: u32,
+        /// 0..1.
+        mix: f32,
+    },
+    /// Flow motion blur (docs/08 §3.2). The per-pixel motion vectors are not
+    /// carried here — they are a whole flow field, computed in the decode
+    /// worker and passed to the kernel as a separate texture (the same way
+    /// Echo's neighbour *frames* travel beside the resolved op, not inside
+    /// it). This variant carries only the scalars the kernel needs to turn a
+    /// vector into a streak.
+    MotionBlur {
+        /// Shutter ÷ 360: the streak length as a fraction of the inter-frame
+        /// motion (0 = no blur; 0.5 at the 180° default).
+        shutter_frac: f32,
+        /// Evenly spaced bilinear taps along the streak (already rounded and
+        /// clamped from the Samples parameter).
+        samples: i32,
         /// 0..1.
         mix: f32,
     },
@@ -2198,6 +2302,22 @@ pub fn resolve_stack(
                 }
                 Some(Resolved::Echo { weights, mode, mix })
             }
+            "motion_blur" => {
+                // Streak length = motion × (shutter ÷ 360); the flow field
+                // (the motion itself) is threaded to the kernel separately.
+                // Samples is the spec's integer carried as a Float row —
+                // rounded and clamped to the same 2..64 the kernel loops.
+                let shutter_frac =
+                    (e.float_at("shutter_angle", lt).unwrap_or(180.0) as f32 / 360.0).max(0.0);
+                let samples =
+                    (e.float_at("samples", lt).unwrap_or(16.0).round() as i32).clamp(2, 64);
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::MotionBlur {
+                    shutter_frac,
+                    samples,
+                    mix,
+                })
+            }
             "transform" => {
                 // px@comp parameters scale by the preview factor (§2.3) so
                 // Half preview frames exactly like Full, only softer.
@@ -2378,6 +2498,11 @@ pub mod cpu {
             // path is [`echo`] (with neighbours) on the GPU; here it is a
             // pass-through (the CPU-fallback render can't echo).
             Resolved::Echo { .. } => {}
+            // Motion blur needs the layer's flow field, which this
+            // single-buffer dispatcher does not carry either. The real path is
+            // [`motion_blur`] (with the flow field) on the GPU; here it is a
+            // pass-through, exactly like Echo.
+            Resolved::MotionBlur { .. } => {}
         }
     }
 
@@ -2597,6 +2722,57 @@ pub mod cpu {
             }
         }
         out
+    }
+
+    /// The §1.6 oracle for Flow motion blur (docs/08 §3.2): the CPU twin of
+    /// `fx_motionblur.wgsl`, op-for-op. `rgba` is linear premultiplied RGBA,
+    /// mutated in place; `u`/`v` are the per-pixel forward flow (pixels of
+    /// this raster, one entry per pixel) the decode worker measured between
+    /// the current source frame and the next. Each pixel's streak vector is
+    /// its own motion scaled by `shutter_frac` (shutter ÷ 360); the streak is
+    /// a centred box integral of `samples` evenly spaced bilinear taps — the
+    /// same line-integral shape as [`blur_directional`], but per-pixel
+    /// directed by the flow rather than one global angle. Fixed tap order and
+    /// count for determinism (§2.4). Edges clamp (the shared [`bilinear`]
+    /// rule), so a full-frame smear never darkens the border. A zero streak —
+    /// `shutter_frac == 0.0` or a still pixel — collapses every tap onto the
+    /// pixel itself, so with `mix == 1.0` the result is the bit-exact input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn motion_blur(
+        rgba: &mut [f32],
+        w: u32,
+        h: u32,
+        u: &[f32],
+        v: &[f32],
+        shutter_frac: f32,
+        samples: i32,
+        mix: f32,
+    ) {
+        let original = rgba.to_vec();
+        let n = samples.max(1);
+        let nf = n as f32;
+        for y in 0..h {
+            for x in 0..w {
+                let idx = (y * w + x) as usize;
+                let i = idx * 4;
+                let pos = (x as f32 + 0.5, y as f32 + 0.5);
+                // The full streak vector: this pixel's inter-frame motion,
+                // shortened by the shutter fraction. Taps span it centred.
+                let sv = (u[idx] * shutter_frac, v[idx] * shutter_frac);
+                let mut acc = [0.0f32; 4];
+                for k in 0..n {
+                    let t = (k as f32 + 0.5) / nf - 0.5;
+                    let s = bilinear(&original, w, h, pos.0 + t * sv.0, pos.1 + t * sv.1);
+                    for c in 0..4 {
+                        acc[c] += s[c];
+                    }
+                }
+                for c in 0..4 {
+                    let vv = acc[c] / nf;
+                    rgba[i + c] = original[i + c] * (1.0 - mix) + vv * mix;
+                }
+            }
+        }
     }
 
     /// Rec. 709 luma weights, applied in linear light.
@@ -3218,6 +3394,127 @@ mod tests {
         // The window always contains 0 and is sorted/deduped — pinned so a
         // temporal effect's offsets union cleanly with the current frame.
         assert!(stack_temporal_window(&[blur], true).contains(&0));
+    }
+
+    #[test]
+    fn motion_blur_window_reaches_the_next_frame_and_wants_flow() {
+        // Motion blur's window is {0, 1}: the current frame and one ahead,
+        // the pair the flow engine measures motion between.
+        let mb = instantiate("motion_blur").unwrap();
+        let one = std::slice::from_ref(&mb);
+        assert_eq!(stack_temporal_window(one, true), vec![0, 1]);
+        assert!(stack_is_temporal(one, true));
+        // The flow-field gate is set by motion blur and nothing else current.
+        assert!(stack_wants_flow_field(one, true));
+        let blur = instantiate("blur").unwrap();
+        let echo = instantiate("echo").unwrap();
+        assert!(!stack_wants_flow_field(&[blur.clone(), echo], true));
+        // Bypassed by the layer fx switch, or disabled, it wants nothing.
+        assert!(!stack_wants_flow_field(one, false));
+        let mut off = mb.clone();
+        off.enabled = false;
+        assert!(!stack_wants_flow_field(std::slice::from_ref(&off), true));
+    }
+
+    #[test]
+    fn resolve_motion_blur_converts_shutter_and_rounds_samples() {
+        let e = instantiate("motion_blur").unwrap();
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+        // Defaults: 180° → shutter_frac 0.5, 16 samples, full mix.
+        assert_eq!(
+            r,
+            vec![Resolved::MotionBlur {
+                shutter_frac: 0.5,
+                samples: 16,
+                mix: 1.0,
+            }]
+        );
+        // A custom stack: 90° halves the streak; Samples rounds and clamps.
+        let mut e = instantiate("motion_blur").unwrap();
+        for p in e.params.iter_mut() {
+            match p.id.as_str() {
+                "shutter_angle" => p.value = EffectValue::Float(Property::fixed(90.0)),
+                "samples" => p.value = EffectValue::Float(Property::fixed(8.4)),
+                "mix" => p.value = EffectValue::Float(Property::fixed(50.0)),
+                _ => {}
+            }
+        }
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+        assert_eq!(
+            r,
+            vec![Resolved::MotionBlur {
+                shutter_frac: 0.25,
+                samples: 8,
+                mix: 0.5,
+            }]
+        );
+    }
+
+    #[test]
+    fn cpu_motion_blur_still_and_zero_shutter_are_passthrough() {
+        // A 9x9 with one bright premultiplied pixel in the middle.
+        let (w, h) = (9u32, 9u32);
+        let mut img = vec![0.0f32; (w * h * 4) as usize];
+        let mid = ((4 * w + 4) * 4) as usize;
+        img[mid..mid + 4].copy_from_slice(&[4.0, 2.0, 1.0, 1.0]);
+        let n = (w * h) as usize;
+
+        // Zero flow everywhere: every tap lands on the pixel itself, so with
+        // Mix 1 the output is the bit-exact input whatever the shutter.
+        let (zu, zv) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let mut still = img.clone();
+        cpu::motion_blur(&mut still, w, h, &zu, &zv, 0.5, 16, 1.0);
+        assert_eq!(still, img, "still pixels do not blur");
+
+        // A real motion but a closed shutter (frac 0) is also identity.
+        let (mu, mv) = (vec![3.0f32; n], vec![0.0f32; n]);
+        let mut shut = img.clone();
+        cpu::motion_blur(&mut shut, w, h, &mu, &mv, 0.0, 16, 1.0);
+        assert_eq!(shut, img, "a closed shutter does not blur");
+
+        // Mix 0 returns the input exactly, whatever the motion.
+        let mut mixed = img.clone();
+        cpu::motion_blur(&mut mixed, w, h, &mu, &mv, 0.5, 16, 0.0);
+        assert_eq!(mixed, img, "mix 0 is a passthrough");
+    }
+
+    #[test]
+    fn cpu_motion_blur_smears_along_the_flow() {
+        // A vertical edge (left half bright, right half dark) smeared by a
+        // constant horizontal flow should soften the edge along x while
+        // leaving a pixel deep inside a flat region unchanged (a box streak
+        // over constant colour is that colour) — the defining behaviour.
+        let (w, h) = (16u32, 4u32);
+        let mut img = vec![0.0f32; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let v = if x < w / 2 { 1.0 } else { 0.0 };
+                img[i..i + 4].copy_from_slice(&[v, v, v, 1.0]);
+            }
+        }
+        let n = (w * h) as usize;
+        let (u, vv) = (vec![8.0f32; n], vec![0.0f32; n]); // 8px horizontal
+        let mut out = img.clone();
+        cpu::motion_blur(&mut out, w, h, &u, &vv, 0.5, 16, 1.0); // streak 4px
+
+        // Indices on row 0 (a closure keeps clippy's erasing-op lint happy and
+        // reads clearly as column, row).
+        let idx = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+        // A pixel far inside the bright flat region is untouched (1.0).
+        let flat = idx(2, 0);
+        assert!((out[flat] - 1.0).abs() < 1e-4, "flat interior is preserved");
+        // A pixel far inside the dark flat region stays dark.
+        let dark = idx(13, 0);
+        assert!(out[dark].abs() < 1e-4, "dark interior stays dark");
+        // The pixel just right of the edge picks up light from the bright
+        // side it was smeared across — a genuine, directional softening.
+        let edge = idx(8, 0);
+        assert!(
+            out[edge] > 0.05 && out[edge] < 0.95,
+            "the edge softens along the flow: {}",
+            out[edge]
+        );
     }
 
     #[test]

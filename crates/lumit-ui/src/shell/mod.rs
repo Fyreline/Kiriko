@@ -1934,6 +1934,7 @@ mod geometry_tests {
             natural_w: 1920,
             natural_h: 1080,
             temporal: Vec::new(),
+            flow_field: None,
         };
         let mut map: HashMap<Uuid, &CompLayerPixels> = HashMap::new();
         map.insert(layer.id, &lp);
@@ -2124,6 +2125,7 @@ mod geometry_tests {
             natural_w: 1920,
             natural_h: 1080,
             temporal: Vec::new(),
+            flow_field: None,
         };
         let mut map: HashMap<Uuid, &CompLayerPixels> = HashMap::new();
         map.insert(layer.id, &lp);

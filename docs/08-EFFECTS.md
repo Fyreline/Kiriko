@@ -262,6 +262,29 @@ Interaction rule: layers already blurred by the engine's own transform motion bl
 ([06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md)) MUST NOT be double-blurred — Auto mode
 detects engine motion blur upstream and contributes only source-motion blur on top.
 
+**Status (v1 core, shipped).** The second temporal effect (after Echo), and the first
+consumer of the §3.1 flow field. Its temporal window is `{0, 1}`: the flow engine measures
+the per-pixel motion between the current source frame and the next, and the smear runs each
+pixel along that vector. The field is computed **in the decode worker**, where both frames
+already live as decoded RGBA (mirroring how the Flow retiming policy computes flow there),
+and handed to the kernel as a two-channel `rg32float` texture threaded exactly as Echo's
+neighbour frames are (decode → draw → realise/export → the pass). Preview and export compute
+it the same way — the same `to_gray` → `lumit_flow` forward-flow call on the same source
+frames — so they match (K-031); the exact f32 flow texture keeps the CPU/GPU oracle at the
+cheap-class ≤ 2 fp16 ULP bound, the only rounding being the colour taps. The v1 parameter set
+is trimmed to **Shutter angle** (0–720°, default 180 — streak length is shutter ÷ 360 of the
+inter-frame motion, so 180° is half of it, the film-standard look), **Samples** (a fixed
+per-frame tap count, slider 8–32, so the CPU and GPU integrate identically) and the host
+**Mix**. Blur length in pixels = motion vector × (shutter ÷ 360); the streak is a centred
+box integral of `Samples` evenly spaced bilinear taps, edges clamped so a full-frame smear
+never darkens the border. Pinned simplifications, each stable when the rest of §3.2 lands:
+**Vector source is Flow only** (Auto's transform-derivative path and the engine-motion-blur
+double-blur guard follow), **Amount** (the post-shutter vector scale) and the Quality /
+adaptive-per-pixel tap count are deferred (Samples is the one fixed count), and it blurs
+**footage layers only** — adjustment-layer and Sequence-clip temporal effects are deferred
+exactly as they are for Echo. Zero motion or a zero shutter is a bit-exact passthrough
+(pinned by test).
+
 ### 3.3 Glow — exposure-aware bloom (Deep Glow-class)
 
 **Why scene-linear matters.** Stock-AE-style glow looks grey because it thresholds and
