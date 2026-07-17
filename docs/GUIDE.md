@@ -112,6 +112,16 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
+- **Effects, the data side (Phase 3 begins here).** Every layer now carries an ordered
+  **effect stack** in the project model: each entry says *which* effect (a stable name +
+  a version, so cached frames from older maths retire themselves), whether it's bypassed,
+  and its parameters — which are real animatable properties like Position or Opacity, so
+  keyframes and the graph editor will work on a Glow radius exactly as they do on a scale.
+  A layer-level **fx switch** mutes the whole stack. Edits go through ops (one op replaces
+  the stack — add, remove, reorder and parameter changes are all undoable in one step), and
+  the cache knows a live effect changes pixels while a bypassed one doesn't. The renderers
+  don't *run* effects yet — that's the next slice: the effect registry, the GPU passes and
+  the Effect Controls panel.
 - `crates/lumit-core/src/ops.rs` — **Every possible edit, as data.** An edit is an `Op`
   (AddLayer, SetLayerSpan…). Applying an op returns its exact inverse — that pair is what
   makes undo *provably* correct instead of hopefully correct.

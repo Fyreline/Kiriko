@@ -237,6 +237,7 @@ mod tests {
             start_offset: secs(0),
             transform: TransformGroup::default(),
             matte: None,
+            effects: Vec::new(),
             blend: BlendMode::Normal,
             masks,
             switches: Switches::default(),

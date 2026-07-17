@@ -68,6 +68,20 @@ pub enum Op {
         layer: Uuid,
         masks: Vec<crate::mask::Mask>,
     },
+    /// Replace a layer's whole effect stack (docs/03 §8; coarse + exactly
+    /// invertible like SetLayerMasks — add/remove/reorder/param edits all
+    /// commit the new list).
+    SetLayerEffects {
+        comp: Uuid,
+        layer: Uuid,
+        effects: Vec<crate::model::EffectInstance>,
+    },
+    /// The fx switch: bypass a layer's whole effect stack (docs/08 §1.5).
+    SetLayerFx {
+        comp: Uuid,
+        layer: Uuid,
+        fx: bool,
+    },
     SetLayerThreeD {
         comp: Uuid,
         layer: Uuid,
@@ -292,6 +306,38 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
                 comp: *comp,
                 layer: *layer,
                 masks: previous,
+            })
+        }
+        Op::SetLayerEffects {
+            comp,
+            layer,
+            effects,
+        } => {
+            let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
+            let l = c
+                .layers
+                .iter_mut()
+                .find(|l| l.id == *layer)
+                .ok_or(OpError::UnknownLayer)?;
+            let previous = std::mem::replace(&mut l.effects, effects.clone());
+            Ok(Op::SetLayerEffects {
+                comp: *comp,
+                layer: *layer,
+                effects: previous,
+            })
+        }
+        Op::SetLayerFx { comp, layer, fx } => {
+            let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
+            let l = c
+                .layers
+                .iter_mut()
+                .find(|l| l.id == *layer)
+                .ok_or(OpError::UnknownLayer)?;
+            let previous = std::mem::replace(&mut l.switches.fx, *fx);
+            Ok(Op::SetLayerFx {
+                comp: *comp,
+                layer: *layer,
+                fx: previous,
             })
         }
         Op::SetSequenceClips { comp, layer, clips } => {

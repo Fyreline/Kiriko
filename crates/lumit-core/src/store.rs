@@ -151,6 +151,7 @@ mod tests {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         }
@@ -374,6 +375,7 @@ mod tests {
                     matte: None,
                     blend: Default::default(),
                     masks: Vec::new(),
+                    effects: Vec::new(),
                     switches: Switches::default(),
                     extra: serde_json::Map::new(),
                 }),
@@ -501,6 +503,7 @@ mod tests {
                     matte: None,
                     blend: Default::default(),
                     masks: Vec::new(),
+                    effects: Vec::new(),
                     switches: Switches::default(),
                     extra: serde_json::Map::new(),
                 }),
@@ -584,6 +587,61 @@ mod tests {
         assert!(clp(&store));
         store.undo().unwrap();
         assert!(!clp(&store));
+
+        // The effect stack + fx switch round-trip the same way.
+        let stack = vec![crate::model::EffectInstance {
+            id: Uuid::now_v7(),
+            effect: crate::model::EffectKey {
+                namespace: crate::model::EffectNamespace::Builtin,
+                match_name: "glow".into(),
+                version: 1,
+                extra: serde_json::Map::new(),
+            },
+            enabled: true,
+            params: Vec::new(),
+            extra: serde_json::Map::new(),
+        }];
+        store
+            .commit(Op::SetLayerEffects {
+                comp: comp_id,
+                layer: layer_id,
+                effects: stack.clone(),
+            })
+            .unwrap();
+        let has_fx = |s: &DocumentStore| {
+            !s.snapshot()
+                .comp(comp_id)
+                .unwrap()
+                .layers
+                .iter()
+                .find(|l| l.id == layer_id)
+                .unwrap()
+                .effects
+                .is_empty()
+        };
+        assert!(has_fx(&store));
+        store.undo().unwrap();
+        assert!(!has_fx(&store));
+        store
+            .commit(Op::SetLayerFx {
+                comp: comp_id,
+                layer: layer_id,
+                fx: false,
+            })
+            .unwrap();
+        store.undo().unwrap();
+        assert!(
+            store
+                .snapshot()
+                .comp(comp_id)
+                .unwrap()
+                .layers
+                .iter()
+                .find(|l| l.id == layer_id)
+                .unwrap()
+                .switches
+                .fx
+        );
 
         // Visibility round-trips the same way (visible defaults true).
         let vis = |s: &DocumentStore| {

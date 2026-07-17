@@ -202,6 +202,92 @@ pub enum MatteChannel {
     Luma,
 }
 
+/// Where an effect implementation comes from (docs/03-DATA-MODEL.md §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectNamespace {
+    /// Ships in the box (docs/08-EFFECTS.md tier lists).
+    Builtin,
+    /// An OpenFX plugin (docs/12-PLUGINS.md).
+    Ofx,
+    /// A native KFX plugin (docs/12-PLUGINS.md).
+    Kfx,
+    /// Unknown to this build (AE import or missing plugin): renders as
+    /// identity with a badge, round-trips untouched.
+    Placeholder,
+}
+
+/// Which effect an instance is: namespace + stable match name + version.
+/// The version participates in the frame key (K-016), so changing an
+/// effect's maths invalidates stale cached frames rather than mixing
+/// generations (docs/08-EFFECTS.md §1.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectKey {
+    pub namespace: EffectNamespace,
+    pub match_name: String,
+    pub version: u32,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One effect parameter's value (docs/08-EFFECTS.md §1.2 types, v1 subset).
+/// Floats, angles and percentages are all `Float`; points animate per axis;
+/// colours animate per channel (scene-linear RGBA). Bool/Choice/Seed are
+/// static in v1 — the tier-1 staples don't keyframe them, and hold-keyframed
+/// discrete params are a recorded follow-up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EffectValue {
+    Float(Property),
+    Point(Property, Property),
+    Colour([Property; 4]),
+    Bool(bool),
+    Choice(u32),
+    Seed(u32),
+}
+
+/// One named parameter on an effect instance. `id` is the stable snake_case
+/// identifier (expressions address it; the UI shows the declared label).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectParam {
+    pub id: String,
+    pub value: EffectValue,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One image operation in a layer's effect stack (docs/03-DATA-MODEL.md §8).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectInstance {
+    pub id: Uuid,
+    pub effect: EffectKey,
+    /// Individually bypassed effects render as identity (not animatable —
+    /// docs/08 §1.5; the effect's own Mix parameter is the animatable dial).
+    pub enabled: bool,
+    /// Ordered as declared by the effect's schema.
+    pub params: Vec<EffectParam>,
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl EffectInstance {
+    /// The parameter named `id`, if the instance carries it.
+    pub fn param(&self, id: &str) -> Option<&EffectValue> {
+        self.params.iter().find(|p| p.id == id).map(|p| &p.value)
+    }
+
+    /// A float parameter's evaluated value at layer time `lt` (the common
+    /// case), or None when absent or not a Float.
+    pub fn float_at(&self, id: &str, lt: f64) -> Option<f64> {
+        match self.param(id)? {
+            EffectValue::Float(p) => Some(p.value_at(lt)),
+            _ => None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Switches {
     pub visible: bool,
@@ -216,6 +302,10 @@ pub struct Switches {
     /// conditions force an intermediate anyway; see [`collapse_state`].
     #[serde(default)]
     pub collapse: bool,
+    /// The fx switch (docs/08 §1.5): off bypasses the layer's whole effect
+    /// stack. Defaults on, so old projects load with effects live.
+    #[serde(default = "default_true")]
+    pub fx: bool,
 }
 
 impl Default for Switches {
@@ -226,6 +316,7 @@ impl Default for Switches {
             locked: false,
             three_d: false,
             collapse: false,
+            fx: true,
         }
     }
 }
@@ -408,6 +499,10 @@ pub struct Layer {
     /// (docs/06-RENDER-PIPELINE.md render order).
     #[serde(default)]
     pub masks: Vec<crate::mask::Mask>,
+    /// The ordered effect stack (docs/03 §8; applied top-to-bottom after
+    /// masks, before transform — docs/06 render order).
+    #[serde(default)]
+    pub effects: Vec<EffectInstance>,
     pub switches: Switches,
     /// Unknown fields from newer Lumit versions, preserved on load/save
     /// (docs/10-FILE-FORMAT.md §1.1 — mandatory forward compatibility).
@@ -588,6 +683,7 @@ mod tests {
             matte: None,
             blend: BlendMode::Normal,
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches {
                 visible,
                 ..Switches::default()

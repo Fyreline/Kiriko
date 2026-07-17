@@ -173,6 +173,48 @@ fn feed_layer(
         h.update(b"collapsed");
     }
 
+    // The effect stack (docs/08): each live effect's identity, version and
+    // evaluated parameters are content — the version bump is what retires
+    // cached frames when an effect's maths change (K-016). Hashed only when
+    // a live stack exists, so every pre-effects key stays valid. A bypassed
+    // effect (or an fx-switched-off layer) contributes nothing, exactly as
+    // it renders nothing.
+    if layer.switches.fx && layer.effects.iter().any(|e| e.enabled) {
+        h.update(b"effects/");
+        for e in layer.effects.iter().filter(|e| e.enabled) {
+            h.update(&[match e.effect.namespace {
+                lumit_core::model::EffectNamespace::Builtin => 0,
+                lumit_core::model::EffectNamespace::Ofx => 1,
+                lumit_core::model::EffectNamespace::Kfx => 2,
+                lumit_core::model::EffectNamespace::Placeholder => 3,
+            }]);
+            h.update(e.effect.match_name.as_bytes());
+            h.update(&e.effect.version.to_le_bytes());
+            for p in &e.params {
+                h.update(p.id.as_bytes());
+                use lumit_core::model::EffectValue;
+                match &p.value {
+                    EffectValue::Float(v) => feed_f64(h, v.value_at(lt)),
+                    EffectValue::Point(x, y) => {
+                        feed_f64(h, x.value_at(lt));
+                        feed_f64(h, y.value_at(lt));
+                    }
+                    EffectValue::Colour(c) => {
+                        for ch in c {
+                            feed_f64(h, ch.value_at(lt));
+                        }
+                    }
+                    EffectValue::Bool(b) => {
+                        h.update(&[u8::from(*b)]);
+                    }
+                    EffectValue::Choice(v) | EffectValue::Seed(v) => {
+                        h.update(&v.to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+
     // Masks: static paths are plain data (animated paths will evaluate here).
     if layer.masks.is_empty() {
         h.update(b"nomask");
@@ -396,6 +438,7 @@ mod tests {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         }
@@ -566,6 +609,87 @@ mod tests {
         let mut plain_flagged = plain.clone();
         plain_flagged.layers[0].switches.collapse = true;
         assert_eq!(key(&doc, &plain, 1.0), key(&doc, &plain_flagged, 1.0));
+    }
+
+    /// The effect stack is content (docs/08): adding a live effect changes
+    /// the key, its evaluated params move it per frame, bypass and the fx
+    /// switch remove it — and a stack-free layer keys exactly as before.
+    #[test]
+    fn effect_stacks_feed_the_key_only_while_live() {
+        use lumit_core::anim::{Animation, Keyframe, SideInterp};
+        use lumit_core::model::{
+            EffectInstance, EffectKey, EffectNamespace, EffectParam, EffectValue,
+        };
+        let doc = Document::new();
+        let plain = comp_with(vec![text_layer("fx", 0.0, 10.0, 0.0)]);
+        let base = key(&doc, &plain, 1.0);
+
+        let glow = |radius: lumit_core::anim::Property| EffectInstance {
+            id: Uuid::now_v7(),
+            effect: EffectKey {
+                namespace: EffectNamespace::Builtin,
+                match_name: "glow".into(),
+                version: 1,
+                extra: serde_json::Map::new(),
+            },
+            enabled: true,
+            params: vec![EffectParam {
+                id: "radius".into(),
+                value: EffectValue::Float(radius),
+                extra: serde_json::Map::new(),
+            }],
+            extra: serde_json::Map::new(),
+        };
+        let mut with_fx = plain.clone();
+        with_fx.layers[0]
+            .effects
+            .push(glow(lumit_core::anim::Property::fixed(24.0)));
+        let fx_key = key(&doc, &with_fx, 1.0);
+        assert_ne!(base, fx_key);
+
+        // Evaluated params, not keyframe data: an animated radius moves the
+        // key across frames, and matches the constant where values agree.
+        let mut animated = plain.clone();
+        let keys = vec![
+            Keyframe {
+                time: Rational::new(0, 1).unwrap(),
+                value: 24.0,
+                interp_in: SideInterp::Linear,
+                interp_out: SideInterp::Linear,
+            },
+            Keyframe {
+                time: Rational::new(2, 1).unwrap(),
+                value: 24.0,
+                interp_in: SideInterp::Linear,
+                interp_out: SideInterp::Linear,
+            },
+            Keyframe {
+                time: Rational::new(4, 1).unwrap(),
+                value: 80.0,
+                interp_in: SideInterp::Linear,
+                interp_out: SideInterp::Linear,
+            },
+        ];
+        animated.layers[0]
+            .effects
+            .push(glow(lumit_core::anim::Property {
+                animation: Animation::Keyframed(keys),
+                extra: serde_json::Map::new(),
+            }));
+        assert_eq!(key(&doc, &animated, 1.0), fx_key); // radius 24 either way
+        assert_ne!(key(&doc, &animated, 3.0), fx_key); // mid-ramp differs
+
+        // Bypass and the fx switch both return the pre-effects key exactly.
+        let mut bypassed = with_fx.clone();
+        bypassed.layers[0].effects[0].enabled = false;
+        assert_eq!(base, key(&doc, &bypassed, 1.0));
+        let mut fx_off = with_fx.clone();
+        fx_off.layers[0].switches.fx = false;
+        assert_eq!(base, key(&doc, &fx_off, 1.0));
+        // A version bump retires the old key (K-016).
+        let mut v2 = with_fx.clone();
+        v2.layers[0].effects[0].effect.version = 2;
+        assert_ne!(fx_key, key(&doc, &v2, 1.0));
     }
 
     /// Precomps recurse: an edit inside the nested comp changes the parent's

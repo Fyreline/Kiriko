@@ -9428,6 +9428,7 @@ mod geometry_tests {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -9493,6 +9494,7 @@ mod geometry_tests {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -9611,6 +9613,7 @@ mod geometry_tests {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };

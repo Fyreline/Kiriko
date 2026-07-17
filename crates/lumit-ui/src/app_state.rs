@@ -1396,6 +1396,7 @@ impl AppState {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -1447,6 +1448,7 @@ impl AppState {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -1523,6 +1525,7 @@ impl AppState {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -1568,6 +1571,7 @@ impl AppState {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -1607,6 +1611,7 @@ impl AppState {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -1684,6 +1689,7 @@ impl AppState {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -2046,6 +2052,7 @@ impl AppState {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
@@ -2293,6 +2300,7 @@ impl AppState {
             matte: None,
             blend: Default::default(),
             masks: Vec::new(),
+            effects: Vec::new(),
             switches: Switches::default(),
             extra: serde_json::Map::new(),
         };
