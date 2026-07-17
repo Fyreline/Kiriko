@@ -441,6 +441,11 @@ Shows the **effect stack** of the selected layer (tab per recently viewed layer,
 - Apply by: double-click (applies to selected layers), drag onto a layer row in the
   Timeline, or drag onto the Viewer (applies to the topmost hit layer, which highlights
   before release).
+  - **v1 (K-101)**: the drag-onto-Timeline-row path ships first, scoped to footage and
+    adjustment layers (the effect stack's two ordinary homes) — dragging an entry there shows
+    an accent hover outline over the row and appends the effect on release, one ordinary undo
+    step. Double-click apply, drag onto the Viewer, and every other layer kind (which still
+    gains effects through its own row's "Add effect" menu) remain later steps.
 - **Favourites**: star any effect or preset; a Favourites group pins to the top of the tree.
 - Hovering an entry SHOULD show a one-line description; presets show a thumbnail where the
   preset carries one.

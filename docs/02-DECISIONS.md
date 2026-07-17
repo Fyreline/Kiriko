@@ -791,3 +791,18 @@ Colour, Export, Keymap, Autosave, Plugins) fills in on this same surface as thos
 controls; a GPU-acceleration toggle was deliberately deferred rather than shipped half-wired
 (the flow engine lives in the decode worker and needs its own control message). The window is
 the `docs/07 §15` "Interface/Preferences" surface, not a second one.
+
+**K-101 · DECIDED · Effects browser drag-to-apply lands on Timeline layer rows in v1, scoped
+to footage and adjustment layers.** Implements the docs/07 §7 apply path "drag onto a layer
+row in the Timeline": each built-in-effect entry in the Effects & Presets browser
+(`effects_panel`) is a drag source carrying an `EffectDragPayload(&'static str)` — the
+effect's stable `match_name` — kept distinct from the Project panel's `uuid::Uuid` item
+payload so a drop target can tell them apart by type alone. In the Timeline, a layer row
+accepts the drop only when `accepts_effect_drop` says its kind is Footage or Adjustment — the
+effect stack's two ordinary homes; every other kind (Sequence, Precomp, Solid, Text, Camera)
+still gains effects only through its own row's existing "Add effect" menu, unchanged. A
+hovered drop paints an accent outline over the row's lane area; a release instantiates the
+effect (`fx::instantiate`) and appends it to the layer's `effects` through the same
+`Op::SetLayerEffects` the "Add effect" row commits, so applying by drag is one ordinary undo
+step, then the preview refreshes the way other Timeline commits do. Double-click apply, drag
+onto the Viewer, and presets/favourites — the rest of §7's inventory — remain later steps.
