@@ -112,7 +112,22 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
-- **Blur grows a Directional mode.** The Blur effect now has a Mode switch: *Gaussian*
+- **The Transform effect** (K-090, replacing the dropped smooth-zoom idea) is the layer
+  transform group — Anchor, Position, Scale, Rotation, Opacity, same names and units —
+  packaged as a stack effect. Why would you want a second transform? *Adjustment
+  layers.* An adjustment layer's effects apply to the composite of everything below
+  it, so a Transform effect on one is the montage punch-in or whip-pan gesture over
+  the whole frame at once, without touching any individual layer's own transform.
+  Under the hood it works backwards: for each output pixel the kernel asks "which
+  input point would the forward transform have moved *here*?" (the inverse affine),
+  takes one bilinear sample there, and shows transparent for anything that maps
+  outside the frame. The matrix arrives pre-computed from the CPU (GPU trigonometry
+  is allowed to be sloppy; ours must match the reference bit-for-bit), and at default
+  parameters the effect is a *bit-exact* passthrough — a test pins that promise. A
+  zero scale collapses the image to fully transparent rather than dividing by zero —
+  engine code never faults. Its Anchor and Position are measured in comp pixels, so
+  the resolver now carries the preview-resolution factor as well as the diagonal:
+  half-resolution preview frames exactly like full, only softer (design rule §2.3).
   (the soft circular blur it has always been) or *Directional* — a streak along an
   angle, the speed-line look. Under the hood directional blur is a *line integral*:
   for each pixel, the kernel walks a short line through it (Length long, pointing

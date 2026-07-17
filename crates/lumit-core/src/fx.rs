@@ -473,6 +473,110 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Transform (docs/08 §3.5, K-090): the layer transform group as a stack
+    // entry — same parameter names, units and animatability. Its point is
+    // adjustment layers: applied there, it transforms the composite of
+    // everything below, which is the montage punch-in/whip gesture without
+    // touching per-layer transforms. Identity parameters pass the input
+    // through bit-exactly (pinned by test). The §3.5 Skew pair is post-v1.
+    EffectSchema {
+        match_name: "transform",
+        label: "Transform",
+        version: 1,
+        category: FxCategory::Utility,
+        traits: EffectTraits {
+            cost: CostClass::Trivial,
+            // §3.5: exact under pure translation, full-frame otherwise —
+            // the static declaration carries the general case.
+            roi: Roi::FullFrame,
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "anchor_x",
+                label: "Anchor x",
+                // Pixels at full comp resolution (px@comp, §2.3), exactly
+                // like the layer transform's Anchor; unbounded (K-090).
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-1000.0, 1000.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "anchor_y",
+                label: "Anchor y",
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-1000.0, 1000.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "position_x",
+                label: "Position x",
+                // px@comp; the anchor point lands here. Defaults equal the
+                // anchor's, so a fresh instance is the identity.
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-1000.0, 1000.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "position_y",
+                label: "Position y",
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-1000.0, 1000.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "scale_x",
+                label: "Scale x %",
+                // Per cent, 100 = natural size; negative flips (like the
+                // layer transform), so both hard sides stay open.
+                kind: ParamKind::Float {
+                    default: 100.0,
+                    slider: (0.0, 400.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "scale_y",
+                label: "Scale y %",
+                kind: ParamKind::Float {
+                    default: 100.0,
+                    slider: (0.0, 400.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "rotation",
+                label: "Rotation °",
+                // Degrees, unbounded — whip transitions spin whole turns.
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-180.0, 180.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "opacity",
+                label: "Opacity %",
+                kind: ParamKind::Float {
+                    default: 100.0,
+                    slider: (0.0, 100.0),
+                    hard: (Some(0.0), Some(100.0)),
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
 ];
 
 /// Look a schema up by its match name.
@@ -584,6 +688,72 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
+    Transform {
+        /// Anchor point, raster pixels (converted from px@comp, §2.3).
+        anchor: [f32; 2],
+        /// Where the anchor lands, raster pixels.
+        position: [f32; 2],
+        /// Per-axis factor; 1 is natural size, negative flips.
+        scale: [f32; 2],
+        /// Degrees about the anchor (0° = none; y-down raster, so positive
+        /// turns clockwise on screen, matching the layer transform).
+        rotation_deg: f32,
+        /// 0..1, multiplied into the premultiplied output.
+        opacity: f32,
+        /// 0..1.
+        mix: f32,
+    },
+}
+
+/// The inverse affine of a Transform effect (docs/08 §3.5): the forward map
+/// is `p_out = position + R(rotation) · S(scale) · (p_in − anchor)` — the
+/// layer transform's own shape — so each output pixel centre `p` samples the
+/// input at `q = m·p + o` with `m = S⁻¹·R⁻¹` (row-major 2×2) and
+/// `o = anchor − m·position`. Host-computed so the WGSL kernel never runs
+/// its own trigonometry (its `cos`/`sin` are not correctly rounded) and the
+/// CPU reference consumes bit-identical numbers. `None` when a scale axis is
+/// degenerate (|s| < 1e-6): the image has collapsed to nothing and renders
+/// fully transparent — never a division blow-up (docs/14 no-panic rule).
+pub fn transform_inverse(
+    anchor: [f32; 2],
+    position: [f32; 2],
+    scale: [f32; 2],
+    rotation_deg: f32,
+) -> Option<([f32; 4], [f32; 2])> {
+    if scale[0].abs() < 1e-6 || scale[1].abs() < 1e-6 {
+        return None;
+    }
+    let rad = (rotation_deg as f64).to_radians();
+    let (sin, cos) = (rad.sin() as f32, rad.cos() as f32);
+    let m = [
+        cos / scale[0],
+        sin / scale[0],
+        -sin / scale[1],
+        cos / scale[1],
+    ];
+    let o = [
+        anchor[0] - (m[0] * position[0] + m[1] * position[1]),
+        anchor[1] - (m[2] * position[0] + m[3] * position[1]),
+    ];
+    Some((m, o))
+}
+
+/// [`transform_inverse`] folded with the degenerate case, as the GPU op
+/// ingredients `(m, offset, effective opacity)`: a zero-scale transform
+/// maps to an identity matrix with opacity 0 — fully transparent. The CPU
+/// reference and both render paths all build from this one function, so
+/// every path consumes bit-identical numbers.
+pub fn transform_op(
+    anchor: [f32; 2],
+    position: [f32; 2],
+    scale: [f32; 2],
+    rotation_deg: f32,
+    opacity: f32,
+) -> ([f32; 4], [f32; 2], f32) {
+    match transform_inverse(anchor, position, scale, rotation_deg) {
+        Some((m, o)) => (m, o, opacity),
+        None => ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0], 0.0),
+    }
 }
 
 /// The Flash trigger envelope (docs/08 §3.7, manual form). A static Trigger
@@ -628,9 +798,17 @@ pub fn rgb_split_offset(amount_px: f32, angle_deg: f32) -> (f32, f32) {
 }
 
 /// Resolve a layer's live stack at layer time `lt` for a raster whose
-/// diagonal is `diag_px` pixels. Placeholders, unknown names and bypassed
-/// effects resolve to nothing (they render as identity, docs/03 §8).
-pub fn resolve_stack(effects: &[EffectInstance], lt: f64, diag_px: f32) -> Vec<Resolved> {
+/// diagonal is `diag_px` pixels; `px_scale` is raster pixels per comp pixel
+/// (the §2.3 preview-resolution factor — 1.0 at full resolution), which
+/// converts px@comp parameters exactly as `diag_px` converts % diag ones.
+/// Placeholders, unknown names and bypassed effects resolve to nothing
+/// (they render as identity, docs/03 §8).
+pub fn resolve_stack(
+    effects: &[EffectInstance],
+    lt: f64,
+    diag_px: f32,
+    px_scale: f32,
+) -> Vec<Resolved> {
     effects
         .iter()
         .filter(|e| e.enabled && e.effect.namespace == EffectNamespace::Builtin)
@@ -732,6 +910,23 @@ pub fn resolve_stack(effects: &[EffectInstance], lt: f64, diag_px: f32) -> Vec<R
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
                 Some(Resolved::Saturation { saturation, mix })
             }
+            "transform" => {
+                // px@comp parameters scale by the preview factor (§2.3) so
+                // Half preview frames exactly like Full, only softer.
+                let px = |id: &str| e.float_at(id, lt).unwrap_or(0.0) as f32 * px_scale;
+                let pct = |id: &str| e.float_at(id, lt).unwrap_or(100.0) as f32 / 100.0;
+                let opacity =
+                    (e.float_at("opacity", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::Transform {
+                    anchor: [px("anchor_x"), px("anchor_y")],
+                    position: [px("position_x"), px("position_y")],
+                    scale: [pct("scale_x"), pct("scale_y")],
+                    rotation_deg: e.float_at("rotation", lt).unwrap_or(0.0) as f32,
+                    opacity,
+                    mix,
+                })
+            }
             _ => None,
         })
         .collect()
@@ -784,6 +979,65 @@ pub mod cpu {
                 mix,
             } => colour_balance(rgba, *lift, *gamma, *gain, *mix),
             Resolved::Saturation { saturation, mix } => saturate(rgba, *saturation, *mix),
+            Resolved::Transform {
+                anchor,
+                position,
+                scale,
+                rotation_deg,
+                opacity,
+                mix,
+            } => transform(
+                rgba,
+                w,
+                h,
+                *anchor,
+                *position,
+                *scale,
+                *rotation_deg,
+                *opacity,
+                *mix,
+            ),
+        }
+    }
+
+    /// Transform (docs/08 §3.5, K-090): resample the input through the
+    /// inverse of `position + R·S·(p − anchor)` — one bilinear tap per
+    /// output pixel, transparent outside the frame, premultiplied
+    /// throughout, with opacity multiplied into all four channels.
+    /// Identity parameters reproduce the input bit-exactly: the inverse
+    /// affine is exactly `q = p`, a bilinear tap at a pixel centre is
+    /// exactly that pixel, and opacity/mix 1 multiply by exact 1.0 — the
+    /// WGSL twin follows the identical arithmetic. A degenerate scale
+    /// (|s| < 1e-6) renders fully transparent, never a division blow-up.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transform(
+        rgba: &mut [f32],
+        w: u32,
+        h: u32,
+        anchor: [f32; 2],
+        position: [f32; 2],
+        scale: [f32; 2],
+        rotation_deg: f32,
+        opacity: f32,
+        mix: f32,
+    ) {
+        let original = rgba.to_vec();
+        // A collapsed (zero-scale) image is invisible: opacity 0, and the
+        // sample point no longer matters (super::transform_op's rule).
+        let (m, o, opacity) = super::transform_op(anchor, position, scale, rotation_deg, opacity);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let qx = m[0] * px + m[1] * py + o[0];
+                let qy = m[2] * px + m[3] * py + o[1];
+                let s = bilinear_edge(&original, w, h, qx, qy, 0);
+                for c in 0..4 {
+                    let v = s[c] * opacity;
+                    rgba[i + c] = original[i + c] * (1.0 - mix) + v * mix;
+                }
+            }
         }
     }
 
@@ -1186,7 +1440,7 @@ mod tests {
     fn resolve_stack_evaluates_converts_and_skips_dead_effects() {
         let mut e = instantiate("blur").unwrap();
         // 1.5% of a 1000px diagonal = 15px.
-        let r = resolve_stack(&[e.clone()], 0.0, 1000.0);
+        let r = resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0);
         assert_eq!(
             r,
             vec![Resolved::Blur {
@@ -1196,11 +1450,11 @@ mod tests {
             }]
         );
         e.enabled = false;
-        assert!(resolve_stack(&[e.clone()], 0.0, 1000.0).is_empty());
+        assert!(resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0).is_empty());
         e.enabled = true;
         e.effect.namespace = EffectNamespace::Placeholder;
         assert!(
-            resolve_stack(&[e], 0.0, 1000.0).is_empty(),
+            resolve_stack(&[e], 0.0, 1000.0, 1.0).is_empty(),
             "placeholders render as identity"
         );
     }
@@ -1252,7 +1506,7 @@ mod tests {
             Some(EffectValue::Bool(true))
         ));
         // 0.4% of a 1000px diagonal = 4px; amount 60% = 0.6.
-        let r = resolve_stack(&[e], 0.0, 1000.0);
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0);
         assert_eq!(
             r,
             vec![Resolved::Sharpen {
@@ -1361,7 +1615,7 @@ mod tests {
         assert_eq!(e.float_at("angle", 0.0), Some(0.0));
         assert!(matches!(e.param("radial"), Some(EffectValue::Bool(false))));
         // 0.4% of a 1000px diagonal = 4px.
-        let r = resolve_stack(&[e], 0.0, 1000.0);
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0);
         assert_eq!(
             r,
             vec![Resolved::RgbSplit {
@@ -1469,7 +1723,7 @@ mod tests {
         assert_eq!(e.colour_at("colour", 0.0), Some([1.0, 1.0, 1.0, 1.0]));
         // Trigger 0: resolves to a zero-strength (identity) flash — the
         // §1.2 trigger-driven exemption.
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
         assert_eq!(
             r,
             vec![Resolved::Flash {
@@ -1510,7 +1764,7 @@ mod tests {
         assert_eq!(e.colour_at("lift", 0.0), Some([0.0, 0.0, 0.0, 1.0]));
         assert_eq!(e.colour_at("gamma", 0.0), Some([1.0; 4]));
         assert_eq!(e.colour_at("gain", 0.0), Some([1.0; 4]));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
         assert_eq!(
             r,
             vec![Resolved::ColourBalance {
@@ -1526,7 +1780,7 @@ mod tests {
     fn saturation_instantiates_and_resolves_neutral() {
         let e = instantiate("saturation").unwrap();
         assert_eq!(e.float_at("saturation", 0.0), Some(100.0));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
         assert_eq!(
             r,
             vec![Resolved::Saturation {
@@ -1638,7 +1892,7 @@ mod tests {
         let mut e = instantiate("blur").unwrap();
         assert!(matches!(e.param("mode"), Some(EffectValue::Choice(0))));
         assert_eq!(e.float_at("length", 0.0), Some(10.0));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
         assert_eq!(
             r,
             vec![Resolved::Blur {
@@ -1654,7 +1908,7 @@ mod tests {
                 p.value = EffectValue::Choice(1);
             }
         }
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
         assert_eq!(
             r,
             vec![Resolved::DirBlur {
@@ -1669,7 +1923,7 @@ mod tests {
         // parameter and still resolves as Gaussian.
         e.params
             .retain(|p| !matches!(p.id.as_str(), "mode" | "length" | "angle"));
-        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0);
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
         assert!(matches!(r[..], [Resolved::Blur { .. }]));
     }
 
@@ -1713,5 +1967,154 @@ mod tests {
             "streak spreads in y"
         );
         assert!(v[at(7, 4)] < 1e-6, "x row stays clean");
+    }
+
+    #[test]
+    fn transform_instantiates_and_resolves_with_the_preview_factor() {
+        let e = instantiate("transform").unwrap();
+        assert_eq!(e.float_at("anchor_x", 0.0), Some(0.0));
+        assert_eq!(e.float_at("position_x", 0.0), Some(0.0));
+        assert_eq!(e.float_at("scale_x", 0.0), Some(100.0));
+        assert_eq!(e.float_at("rotation", 0.0), Some(0.0));
+        assert_eq!(e.float_at("opacity", 0.0), Some(100.0));
+        // Defaults resolve to the exact identity op.
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0);
+        assert_eq!(
+            r,
+            vec![Resolved::Transform {
+                anchor: [0.0; 2],
+                position: [0.0; 2],
+                scale: [1.0; 2],
+                rotation_deg: 0.0,
+                opacity: 1.0,
+                mix: 1.0
+            }]
+        );
+
+        // px@comp parameters scale by the §2.3 preview factor; percentages
+        // and degrees do not.
+        let mut e = e;
+        for p in &mut e.params {
+            match p.id.as_str() {
+                "anchor_x" => p.value = EffectValue::Float(Property::fixed(40.0)),
+                "position_x" => p.value = EffectValue::Float(Property::fixed(100.0)),
+                "scale_x" => p.value = EffectValue::Float(Property::fixed(200.0)),
+                "rotation" => p.value = EffectValue::Float(Property::fixed(90.0)),
+                _ => {}
+            }
+        }
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 500.0, 0.5);
+        assert_eq!(
+            r,
+            vec![Resolved::Transform {
+                anchor: [20.0, 0.0],
+                position: [50.0, 0.0],
+                scale: [2.0, 1.0],
+                rotation_deg: 90.0,
+                opacity: 1.0,
+                mix: 1.0
+            }]
+        );
+    }
+
+    #[test]
+    fn transform_inverse_is_exact_at_identity_and_none_at_zero_scale() {
+        let (m, o) = transform_inverse([0.0; 2], [0.0; 2], [1.0; 2], 0.0).unwrap();
+        assert_eq!(m, [1.0, 0.0, -0.0, 1.0]);
+        assert_eq!(o, [0.0, 0.0]);
+        assert!(transform_inverse([0.0; 2], [0.0; 2], [0.0, 1.0], 0.0).is_none());
+        assert!(transform_inverse([0.0; 2], [0.0; 2], [1.0, 0.0], 0.0).is_none());
+    }
+
+    /// A varied premultiplied test card for the transform: gradient, an HDR
+    /// spike, a half-alpha region and an opaque border pixel.
+    fn transform_card(w: u32, h: u32) -> Vec<f32> {
+        let mut img = vec![0.0f32; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let g = (x + y) as f32 / (w + h) as f32;
+                let a = if y < h / 2 { 1.0 } else { 0.5 };
+                img[i] = g * a;
+                img[i + 1] = (1.0 - g) * a;
+                img[i + 2] = 0.25 * a;
+                img[i + 3] = a;
+            }
+        }
+        let spike = ((3 * w + 4) * 4) as usize;
+        img[spike..spike + 4].copy_from_slice(&[6.0, 3.0, 1.5, 1.0]);
+        img
+    }
+
+    #[test]
+    fn cpu_transform_identity_is_bit_exact() {
+        let (w, h) = (13u32, 9u32);
+        let img = transform_card(w, h);
+        // Identity parameters: the docs/08 §3.5 bit-exact passthrough pin.
+        let mut id = img.clone();
+        cpu::transform(&mut id, w, h, [0.0; 2], [0.0; 2], [1.0; 2], 0.0, 1.0, 1.0);
+        assert_eq!(id, img);
+        // Mix 0 is the exact identity whatever the parameters.
+        let mut m0 = img.clone();
+        cpu::transform(
+            &mut m0,
+            w,
+            h,
+            [3.0; 2],
+            [9.0, 1.0],
+            [2.0, 0.5],
+            33.0,
+            0.4,
+            0.0,
+        );
+        assert_eq!(m0, img);
+    }
+
+    #[test]
+    fn cpu_transform_moves_scales_rotates_and_fades() {
+        // A white impulse on a transparent frame.
+        let (w, h) = (17u32, 9u32);
+        let mut img = vec![0.0f32; (w * h * 4) as usize];
+        let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+        let mid = at(8, 4);
+        img[mid..mid + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+
+        // Position +2 in x (anchor 0): the impulse lands two pixels right,
+        // exactly (integer offsets keep bilinear taps on pixel centres).
+        let mut t = img.clone();
+        cpu::transform(&mut t, w, h, [0.0; 2], [2.0, 0.0], [1.0; 2], 0.0, 1.0, 1.0);
+        assert_eq!(t[at(10, 4)], 1.0, "impulse moved +2x");
+        assert_eq!(t[mid], 0.0, "and left its old home");
+
+        // The area revealed beyond the source edge is transparent, not a
+        // smeared border: shifting +2 leaves columns 0-1 fully empty.
+        for y in 0..h {
+            for x in 0..2 {
+                assert_eq!(t[at(x, y) + 3], 0.0, "({x},{y}) revealed as clear");
+            }
+        }
+
+        // Rotation 90° about the frame centre: y-down raster, so the pixel
+        // two to the right of centre lands two below it (clockwise).
+        let centre = [8.5, 4.5];
+        let mut r = img.clone();
+        img[at(10, 4)..at(10, 4) + 4].copy_from_slice(&[0.0, 1.0, 0.0, 1.0]);
+        r.copy_from_slice(&img);
+        cpu::transform(&mut r, w, h, centre, centre, [1.0; 2], 90.0, 1.0, 1.0);
+        assert_eq!(r[mid], 1.0, "the centre pixel stays put");
+        assert!(r[at(8, 6) + 1] > 0.999, "+2x lands at +2y");
+
+        // Scale 0 is degenerate: the image collapses to nothing and renders
+        // fully transparent — never a division fault (docs/14).
+        let mut z = img.clone();
+        cpu::transform(&mut z, w, h, centre, centre, [0.0, 0.0], 0.0, 1.0, 1.0);
+        assert!(z.iter().all(|v| *v == 0.0), "zero scale collapses to clear");
+
+        // Opacity halves all four channels (premultiplied).
+        let mut o = img.clone();
+        cpu::transform(&mut o, w, h, [0.0; 2], [0.0; 2], [1.0; 2], 0.0, 0.5, 1.0);
+        for c in 0..4 {
+            assert_eq!(o[mid + c], 0.5, "channel {c} at half");
+        }
     }
 }

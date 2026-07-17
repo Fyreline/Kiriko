@@ -590,7 +590,9 @@ impl Renderer<'_> {
         if !layer.switches.fx || layer.effects.is_empty() {
             return tex;
         }
-        let resolved = lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag);
+        // Export renders at full resolution: px@comp parameters are already
+        // raster pixels (§2.3 factor 1).
+        let resolved = lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0);
         let (w, h) = (tex.width(), tex.height());
         let mut tex = tex;
         for op in &resolved {
@@ -720,6 +722,34 @@ impl Renderer<'_> {
                         h,
                         &lumit_gpu::fx::SaturationOp {
                             saturation: *saturation,
+                            mix: *mix,
+                        },
+                    );
+                }
+                lumit_core::fx::Resolved::Transform {
+                    anchor,
+                    position,
+                    scale,
+                    rotation_deg,
+                    opacity,
+                    mix,
+                } => {
+                    let (m, off, opacity) = lumit_core::fx::transform_op(
+                        *anchor,
+                        *position,
+                        *scale,
+                        *rotation_deg,
+                        *opacity,
+                    );
+                    tex = self.fx.transform(
+                        self.gpu,
+                        &tex,
+                        w,
+                        h,
+                        &lumit_gpu::fx::TransformOp {
+                            m,
+                            off,
+                            opacity,
                             mix: *mix,
                         },
                     );

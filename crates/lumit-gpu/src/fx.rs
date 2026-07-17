@@ -174,6 +174,32 @@ struct SaturationParams {
     _pad: [f32; 2],
 }
 
+/// One resolved transform (docs/08 §3.5, K-090): the inverse affine arrives
+/// host-computed (`lumit_core::fx::transform_op`) so the kernel never runs
+/// its own trigonometry and the CPU reference consumes bit-identical
+/// numbers. A degenerate (zero-scale) transform arrives as opacity 0 with
+/// an identity matrix — fully transparent, exactly like the reference.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransformOp {
+    /// Row-major inverse linear 2×2: (m00, m01, m10, m11).
+    pub m: [f32; 4],
+    /// Inverse translation: sample q = m·p + off.
+    pub off: [f32; 2],
+    /// 0..1, multiplied into premultiplied RGBA.
+    pub opacity: f32,
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct TransformParams {
+    m: [f32; 4],
+    off: [f32; 2],
+    opacity: f32,
+    mix_amt: f32,
+}
+
 /// The effect-pass engine: compiled kernels plus their layouts, one per
 /// device (owned alongside the Compositor by whoever renders).
 pub struct FxEngine {
@@ -185,6 +211,7 @@ pub struct FxEngine {
     flash: wgpu::ComputePipeline,
     colour_balance: wgpu::ComputePipeline,
     saturation: wgpu::ComputePipeline,
+    transform: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -251,6 +278,7 @@ impl FxEngine {
         let flash_mod = module(include_str!("fx_flash.wgsl"), "fx-flash");
         let balance_mod = module(include_str!("fx_colourbalance.wgsl"), "fx-colour-balance");
         let saturation_mod = module(include_str!("fx_saturation.wgsl"), "fx-saturation");
+        let transform_mod = module(include_str!("fx_transform.wgsl"), "fx-transform");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
         let dir_blur = pipeline(&dir_blur_mod, "fx-dir-blur", "dir_blur");
         let sharpen_unpremultiply = pipeline(&sharpen_mod, "fx-sharpen-un", "unpremultiply");
@@ -259,6 +287,7 @@ impl FxEngine {
         let flash = pipeline(&flash_mod, "fx-flash", "flash");
         let colour_balance = pipeline(&balance_mod, "fx-colour-balance", "colour_balance");
         let saturation = pipeline(&saturation_mod, "fx-saturation", "saturate_fx");
+        let transform = pipeline(&transform_mod, "fx-transform", "transform");
         Self {
             blur,
             dir_blur,
@@ -268,6 +297,7 @@ impl FxEngine {
             flash,
             colour_balance,
             saturation,
+            transform,
             layout,
         }
     }
@@ -545,6 +575,38 @@ impl FxEngine {
                 saturation: op.saturation,
                 mix_amt: op.mix,
                 _pad: [0.0; 2],
+            }),
+        );
+        out
+    }
+
+    /// Apply one transform (docs/08 §3.5, K-090) to a linear working
+    /// texture, returning a new texture of the same size. One pass: each
+    /// output pixel takes a single bilinear tap through the host-computed
+    /// inverse affine, transparent outside the frame, opacity folded in.
+    /// Identity parameters reproduce the input bit-exactly.
+    pub fn transform(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &TransformOp,
+    ) -> wgpu::Texture {
+        let out = work_texture(ctx, w, h, "fx-transform-out");
+        self.dispatch(
+            ctx,
+            &self.transform,
+            src,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&TransformParams {
+                m: op.m,
+                off: op.off,
+                opacity: op.opacity,
+                mix_amt: op.mix,
             }),
         );
         out
@@ -1135,6 +1197,60 @@ mod tests {
             let out2 = fx.saturation(&ctx, &tex, w, h, &op);
             let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
             assert_eq!(gpu, gpu2, "GPU saturation must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for the transform effect: a trivial one-tap resample,
+    /// so the CPU and GPU must agree to ≤ 2 fp16 ULP, the GPU is bit-stable
+    /// (§2.4), and — the docs/08 §3.5 pin — identity parameters reproduce
+    /// the input bit-exactly.
+    #[test]
+    fn wgsl_transform_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        let centre = [w as f32 * 0.5, h as f32 * 0.5];
+        for (name, anchor, position, scale, rotation, opacity, mix) in [
+            ("identity", [0.0; 2], [0.0; 2], [1.0; 2], 0.0, 1.0, 1.0),
+            ("shift", [0.0; 2], [2.5, -1.5], [1.0; 2], 0.0, 1.0, 1.0),
+            ("punch-in", centre, centre, [1.4, 1.4], 12.0, 1.0, 1.0),
+            ("flip-fade", centre, centre, [-1.0, 1.0], 0.0, 0.5, 0.8),
+            ("collapsed", centre, centre, [0.0, 1.0], 0.0, 1.0, 0.6),
+        ] {
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::transform(
+                &mut cpu, w, h, anchor, position, scale, rotation, opacity, mix,
+            );
+
+            let (m, off, opacity) =
+                lumit_core::fx::transform_op(anchor, position, scale, rotation, opacity);
+            let tex = upload_linear_f32(&ctx, &img, w, h);
+            let op = TransformOp {
+                m,
+                off,
+                opacity,
+                mix,
+            };
+            let out = fx.transform(&ctx, &tex, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("transform {name}: worst {worst} ulp");
+            assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+            if name == "identity" {
+                assert_eq!(
+                    gpu, img,
+                    "identity transform must be the bit-exact passthrough"
+                );
+            }
+
+            let out2 = fx.transform(&ctx, &tex, w, h, &op);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU transform must be bit-stable");
         }
     }
 
