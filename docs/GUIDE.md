@@ -349,6 +349,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   animation are one skill. The same stack renders in preview and in export through
   the same GPU passes, and cached frames re-render themselves when a parameter
   moves (the cache key already understood effects).
+- **Dragging an effect on works too (K-101).** You don't have to open the "Add
+  effect" menu: drag an entry straight out of the Effects & Presets browser and drop
+  it on a footage or adjustment layer's row in the Timeline — the row outlines while
+  you hover, and letting go appends the effect exactly as if you'd picked it from
+  that layer's own menu, one undo step either way.
 - **Effects, the pixel side.** The first real effect exists end to end: **Blur**
   (gaussian). Its life is the template every effect will follow (design rule §1.1's four
   parts): a catalogue entry in `lumit-core/src/fx.rs` declaring parameters and behaviour

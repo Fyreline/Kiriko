@@ -805,3 +805,18 @@ leaks) and bumps `AppState::cache_epoch` so the cache bar and any live views not
 tiers are now empty. This is the first row of the docs/07 §15 "Performance" inventory's VRAM
 budget to ship; CUDA on/off, decoder pool size, worker thread cap and background cache fill
 remain open.
+
+**K-101 · DECIDED · Effects browser drag-to-apply lands on Timeline layer rows in v1, scoped
+to footage and adjustment layers.** Implements the docs/07 §7 apply path "drag onto a layer
+row in the Timeline": each built-in-effect entry in the Effects & Presets browser
+(`effects_panel`) is a drag source carrying an `EffectDragPayload(&'static str)` — the
+effect's stable `match_name` — kept distinct from the Project panel's `uuid::Uuid` item
+payload so a drop target can tell them apart by type alone. In the Timeline, a layer row
+accepts the drop only when `accepts_effect_drop` says its kind is Footage or Adjustment — the
+effect stack's two ordinary homes; every other kind (Sequence, Precomp, Solid, Text, Camera)
+still gains effects only through its own row's existing "Add effect" menu, unchanged. A
+hovered drop paints an accent outline over the row's lane area; a release instantiates the
+effect (`fx::instantiate`) and appends it to the layer's `effects` through the same
+`Op::SetLayerEffects` the "Add effect" row commits, so applying by drag is one ordinary undo
+step, then the preview refreshes the way other Timeline commits do. Double-click apply, drag
+onto the Viewer, and presets/favourites — the rest of §7's inventory — remain later steps.
