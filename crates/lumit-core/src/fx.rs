@@ -200,6 +200,54 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Chromatic aberration (docs/08 §3.6): R and B sample offset positions,
+    // G stays put, alpha follows the green channel so mattes never fringe.
+    // Operates premultiplied. The §3.6 Centre/Falloff/channel-blur extras
+    // land later; radial mode grows the offset from the frame centre.
+    EffectSchema {
+        match_name: "rgb_split",
+        label: "RGB split",
+        version: 1,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::PaddedPctDiag(25.0),
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "amount",
+                label: "Amount",
+                // % of the comp diagonal (§2.3); the impact-frame staple is
+                // a keyframed spike on this.
+                kind: ParamKind::Float {
+                    default: 0.4,
+                    slider: (0.0, 10.0),
+                    hard: (0.0, 25.0),
+                },
+            },
+            ParamSchema {
+                id: "angle",
+                label: "Angle",
+                // Degrees, linear mode: the direction R shifts (B mirrors).
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-180.0, 180.0),
+                    hard: (-3600.0, 3600.0),
+                },
+            },
+            ParamSchema {
+                id: "radial",
+                label: "Radial",
+                // Off: one shared shift. On: offsets grow from the centre,
+                // like lens fringing.
+                kind: ParamKind::Bool { default: false },
+            },
+            MIX_PARAM,
+        ],
+    },
 ];
 
 /// Look a schema up by its match name.
@@ -263,6 +311,26 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
+    RgbSplit {
+        /// Peak channel offset in raster pixels.
+        amount_px: f32,
+        /// Linear-mode shift direction, degrees (0° = +x, y-down raster).
+        angle_deg: f32,
+        /// True: offsets grow from the frame centre instead.
+        radial: bool,
+        /// 0..1.
+        mix: f32,
+    },
+}
+
+/// The linear-mode channel offset vector for an RGB split: `amount_px`
+/// along `angle_deg`. Shared by the CPU reference and the GPU op
+/// construction so both paths carry the same host-computed sines (WGSL's
+/// `cos`/`sin` are not correctly rounded, so the kernel never computes its
+/// own).
+pub fn rgb_split_offset(amount_px: f32, angle_deg: f32) -> (f32, f32) {
+    let rad = angle_deg.to_radians();
+    (amount_px * rad.cos(), amount_px * rad.sin())
 }
 
 /// Resolve a layer's live stack at layer time `lt` for a raster whose
@@ -304,6 +372,21 @@ pub fn resolve_stack(effects: &[EffectInstance], lt: f64, diag_px: f32) -> Vec<R
                     mix,
                 })
             }
+            "rgb_split" => {
+                let amount_pct = e.float_at("amount", lt)? as f32;
+                let angle_deg = e.float_at("angle", lt).unwrap_or(0.0) as f32;
+                let radial = match e.param("radial") {
+                    Some(EffectValue::Bool(b)) => *b,
+                    _ => false,
+                };
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::RgbSplit {
+                    amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
+                    angle_deg,
+                    radial,
+                    mix,
+                })
+            }
             _ => None,
         })
         .collect()
@@ -332,6 +415,12 @@ pub mod cpu {
             } => sharpen(
                 rgba, w, h, *amount, *radius_px, *threshold, *luma_only, *mix,
             ),
+            Resolved::RgbSplit {
+                amount_px,
+                angle_deg,
+                radial,
+                mix,
+            } => rgb_split(rgba, w, h, *amount_px, *angle_deg, *radial, *mix),
         }
     }
 
@@ -360,6 +449,75 @@ pub mod cpu {
             d + t
         } else {
             0.0
+        }
+    }
+
+    /// Clamp-addressed bilinear sample at continuous pixel-centre
+    /// coordinates (the texel at index x covers [x, x+1), centre x+0.5).
+    /// Written with the exact arithmetic order the WGSL kernels use.
+    fn bilinear(rgba: &[f32], w: u32, h: u32, sx: f32, sy: f32) -> [f32; 4] {
+        let fx = sx - 0.5;
+        let fy = sy - 0.5;
+        let x0 = fx.floor();
+        let y0 = fy.floor();
+        let tx = fx - x0;
+        let ty = fy - y0;
+        let (wi, hi) = (w as i64, h as i64);
+        let at = |x: i64, y: i64| {
+            let s = ((y.clamp(0, hi - 1) * wi + x.clamp(0, wi - 1)) * 4) as usize;
+            [rgba[s], rgba[s + 1], rgba[s + 2], rgba[s + 3]]
+        };
+        let (x0, y0) = (x0 as i64, y0 as i64);
+        let c00 = at(x0, y0);
+        let c10 = at(x0 + 1, y0);
+        let c01 = at(x0, y0 + 1);
+        let c11 = at(x0 + 1, y0 + 1);
+        let mut out = [0.0f32; 4];
+        for c in 0..4 {
+            let top = c00[c] * (1.0 - tx) + c10[c] * tx;
+            let bottom = c01[c] * (1.0 - tx) + c11[c] * tx;
+            out[c] = top * (1.0 - ty) + bottom * ty;
+        }
+        out
+    }
+
+    /// Chromatic aberration (docs/08 §3.6): R samples behind the offset, B
+    /// ahead of it, G and alpha stay put (alpha follows the green channel so
+    /// mattes never fringe). Linear mode shifts every pixel by the same
+    /// vector; radial mode scales the pixel's own offset from the frame
+    /// centre so aberration grows toward the corners (`amount_px` is reached
+    /// at the corner distance). Premultiplied throughout; samples outside
+    /// the frame clamp to the edge.
+    pub fn rgb_split(
+        rgba: &mut [f32],
+        w: u32,
+        h: u32,
+        amount_px: f32,
+        angle_deg: f32,
+        radial: bool,
+        mix: f32,
+    ) {
+        let original = rgba.to_vec();
+        let (dx, dy) = super::rgb_split_offset(amount_px, angle_deg);
+        let (fw, fh) = (w as f32, h as f32);
+        let diag = (fw * fw + fh * fh).sqrt();
+        let k = amount_px / (0.5 * diag);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let pos = (x as f32 + 0.5, y as f32 + 0.5);
+                let (ox, oy) = if radial {
+                    ((pos.0 - fw * 0.5) * k, (pos.1 - fh * 0.5) * k)
+                } else {
+                    (dx, dy)
+                };
+                let r = bilinear(&original, w, h, pos.0 - ox, pos.1 - oy)[0];
+                let b = bilinear(&original, w, h, pos.0 + ox, pos.1 + oy)[2];
+                let split = [r, original[i + 1], b, original[i + 3]];
+                for c in 0..4 {
+                    rgba[i + c] = original[i + c] * (1.0 - mix) + split[c] * mix;
+                }
+            }
         }
     }
 
@@ -684,5 +842,66 @@ mod tests {
         };
         assert!(dev(&luma_pass) < 1e-4, "luma-only ignores chroma edges");
         assert!(dev(&chan_pass) > 0.05, "per-channel mode sharpens them");
+    }
+
+    #[test]
+    fn rgb_split_instantiates_and_resolves() {
+        let e = instantiate("rgb_split").unwrap();
+        assert_eq!(e.float_at("amount", 0.0), Some(0.4));
+        assert_eq!(e.float_at("angle", 0.0), Some(0.0));
+        assert!(matches!(e.param("radial"), Some(EffectValue::Bool(false))));
+        // 0.4% of a 1000px diagonal = 4px.
+        let r = resolve_stack(&[e], 0.0, 1000.0);
+        assert_eq!(
+            r,
+            vec![Resolved::RgbSplit {
+                amount_px: 4.0,
+                angle_deg: 0.0,
+                radial: false,
+                mix: 1.0
+            }]
+        );
+    }
+
+    #[test]
+    fn cpu_rgb_split_shifts_channels_and_keeps_alpha() {
+        // A white impulse in the middle of a black opaque frame.
+        let (w, h) = (17u32, 9u32);
+        let mut img = vec![0.0f32; (w * h * 4) as usize];
+        for px in img.chunks_exact_mut(4) {
+            px[3] = 1.0;
+        }
+        let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+        let mid = at(8, 4);
+        img[mid..mid + 3].copy_from_slice(&[1.0, 1.0, 1.0]);
+
+        // Amount 0 and mix 0 are both the exact identity.
+        let mut a0 = img.clone();
+        cpu::rgb_split(&mut a0, w, h, 0.0, 0.0, false, 1.0);
+        assert_eq!(a0, img);
+        let mut m0 = img.clone();
+        cpu::rgb_split(&mut m0, w, h, 3.0, 45.0, false, 0.0);
+        assert_eq!(m0, img);
+
+        // Angle 0°, 2px: red lands 2px right of the impulse, blue 2px left,
+        // green and alpha exactly where they were.
+        let mut s = img.clone();
+        cpu::rgb_split(&mut s, w, h, 2.0, 0.0, false, 1.0);
+        assert_eq!(s[at(10, 4)], 1.0, "red shifted +x");
+        assert_eq!(s[at(8, 4)], 0.0, "red left the impulse");
+        assert_eq!(s[at(6, 4) + 2], 1.0, "blue shifted -x");
+        assert_eq!(s[at(8, 4) + 1], 1.0, "green stays");
+        assert!(
+            s.iter().skip(3).step_by(4).all(|a| *a == 1.0),
+            "alpha follows green: untouched"
+        );
+
+        // Radial: the exact centre pixel is unmoved even at a huge amount.
+        let mut c = img.clone();
+        // Centre the impulse for the radial test (odd dimensions: the middle
+        // pixel's centre is the frame centre).
+        cpu::rgb_split(&mut c, w, h, 20.0, 0.0, true, 1.0);
+        assert_eq!(c[mid], 1.0, "frame-centre red is unmoved");
+        assert_eq!(c[mid + 2], 1.0, "frame-centre blue is unmoved");
     }
 }

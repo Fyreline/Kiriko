@@ -633,6 +633,27 @@ impl Renderer<'_> {
                         },
                     );
                 }
+                lumit_core::fx::Resolved::RgbSplit {
+                    amount_px,
+                    angle_deg,
+                    radial,
+                    mix,
+                } => {
+                    let (dx, dy) = lumit_core::fx::rgb_split_offset(*amount_px, *angle_deg);
+                    tex = self.fx.rgb_split(
+                        self.gpu,
+                        &tex,
+                        w,
+                        h,
+                        &lumit_gpu::fx::RgbSplitOp {
+                            dx,
+                            dy,
+                            amount_px: *amount_px,
+                            radial: *radial,
+                            mix: *mix,
+                        },
+                    );
+                }
             }
         }
         tex

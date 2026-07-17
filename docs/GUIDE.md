@@ -112,6 +112,15 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
+- **RGB split.** The impact-frame staple: the red and blue channels slide apart while
+  green stays put, like a lens fringing under stress. Keyframe a spike on Amount at a
+  hit and you have the genre's signature punch. Two modes: *linear* shifts everything
+  one way (set by Angle), *radial* grows the shift from the centre outward, like real
+  lens aberration. Two details matter in the code: alpha stays glued to the green
+  channel (if it moved with red or blue, every matte edge would grow a coloured rim —
+  design rule §3.6), and the sines behind the shift direction are computed once on the
+  CPU and handed to the GPU, because GPU trigonometry is allowed to be slightly
+  imprecise and the CPU-vs-GPU agreement test demands better.
 - **Sharpen.** The second effect in the catalogue, following Blur's four-part template.
   It's an *unsharp mask* — the counter-intuitive classic: blur a copy of the image,
   subtract it from the original (what's left is the fine detail), then add that detail

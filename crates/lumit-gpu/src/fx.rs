@@ -56,12 +56,39 @@ struct SharpenParams {
     mix_amt: f32,
 }
 
+/// One resolved RGB split (docs/08 §3.6). The linear-mode offset vector is
+/// host-computed (`lumit_core::fx::rgb_split_offset`) so the kernel never
+/// runs its own trigonometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RgbSplitOp {
+    /// Linear-mode channel offset, raster pixels.
+    pub dx: f32,
+    pub dy: f32,
+    /// Radial-mode peak offset (reached at the corner distance), raster px.
+    pub amount_px: f32,
+    pub radial: bool,
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RgbSplitParams {
+    dx: f32,
+    dy: f32,
+    amount: f32,
+    radial: u32,
+    mix_amt: f32,
+    _pad: [f32; 3],
+}
+
 /// The effect-pass engine: compiled kernels plus their layouts, one per
 /// device (owned alongside the Compositor by whoever renders).
 pub struct FxEngine {
     blur: wgpu::ComputePipeline,
     sharpen_unpremultiply: wgpu::ComputePipeline,
     sharpen_combine: wgpu::ComputePipeline,
+    rgb_split: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -123,13 +150,16 @@ impl FxEngine {
         };
         let blur_mod = module(include_str!("fx_blur.wgsl"), "fx-blur");
         let sharpen_mod = module(include_str!("fx_sharpen.wgsl"), "fx-sharpen");
+        let rgb_split_mod = module(include_str!("fx_rgbsplit.wgsl"), "fx-rgb-split");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
         let sharpen_unpremultiply = pipeline(&sharpen_mod, "fx-sharpen-un", "unpremultiply");
         let sharpen_combine = pipeline(&sharpen_mod, "fx-sharpen", "sharpen_combine");
+        let rgb_split = pipeline(&rgb_split_mod, "fx-rgb-split", "rgb_split");
         Self {
             blur,
             sharpen_unpremultiply,
             sharpen_combine,
+            rgb_split,
             layout,
         }
     }
@@ -250,6 +280,38 @@ impl FxEngine {
             w,
             h,
             bytemuck::bytes_of(&params),
+        );
+        out
+    }
+
+    /// Apply one RGB split (docs/08 §3.6) to a linear working texture,
+    /// returning a new texture of the same size. Single pointwise pass with
+    /// offset bilinear taps.
+    pub fn rgb_split(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &RgbSplitOp,
+    ) -> wgpu::Texture {
+        let out = work_texture(ctx, w, h, "fx-rgb-split-out");
+        self.dispatch(
+            ctx,
+            &self.rgb_split,
+            src,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&RgbSplitParams {
+                dx: op.dx,
+                dy: op.dy,
+                amount: op.amount_px,
+                radial: u32::from(op.radial),
+                mix_amt: op.mix,
+                _pad: [0.0; 3],
+            }),
         );
         out
     }
@@ -498,6 +560,24 @@ mod tests {
             .fold(0.0f32, f32::max)
     }
 
+    /// Worst distance between two images in fp16 ULPs — the §1.6 metric for
+    /// `trivial`/`cheap` effects. Bits are remapped so consecutive integers
+    /// are consecutive representable halves (±0 coincide).
+    fn worst_f16_ulp(a: &[f32], b: &[f32]) -> i32 {
+        fn key(v: f32) -> i32 {
+            let bits = i32::from(f16_bits(v));
+            if bits & 0x8000 != 0 {
+                -(bits & 0x7fff)
+            } else {
+                bits
+            }
+        }
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (key(*x) - key(*y)).abs())
+            .fold(0, i32::max)
+    }
+
     /// The §1.6 oracle: the WGSL blur agrees with the CPU reference on a
     /// corpus of gradient + alpha edge + HDR spike, per edge policy — and is
     /// bit-stable against itself (§2.4 determinism).
@@ -612,6 +692,52 @@ mod tests {
             let out2 = fx.sharpen(&ctx, &tex, w, h, &op);
             let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
             assert_eq!(gpu, gpu2, "GPU sharpen must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for RGB split: a cheap pointwise effect, so the CPU
+    /// and GPU must agree to ≤ 2 fp16 ULP, and the GPU is bit-stable (§2.4).
+    #[test]
+    fn wgsl_rgb_split_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        for (amount, angle, radial, mix) in [
+            (3.0f32, 0.0f32, false, 1.0f32),
+            (2.5, 33.0, false, 0.6),
+            (4.0, 0.0, true, 1.0),
+            (0.0, 90.0, false, 1.0),
+        ] {
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::rgb_split(&mut cpu, w, h, amount, angle, radial, mix);
+
+            let (dx, dy) = lumit_core::fx::rgb_split_offset(amount, angle);
+            let tex = upload_linear_f32(&ctx, &img, w, h);
+            let op = RgbSplitOp {
+                dx,
+                dy,
+                amount_px: amount,
+                radial,
+                mix,
+            };
+            let out = fx.rgb_split(&ctx, &tex, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("rgb split a={amount} ang={angle} radial={radial}: worst {worst} ulp");
+            assert!(
+                worst <= 2,
+                "amount {amount} angle {angle} radial {radial} mix {mix}: \
+                 worst {worst} fp16 ULP"
+            );
+
+            let out2 = fx.rgb_split(&ctx, &tex, w, h, &op);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU rgb split must be bit-stable");
         }
     }
 }
