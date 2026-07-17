@@ -112,6 +112,52 @@ Two mechanisms make this safe, and you'll see them by name in the code:
 - `crates/lumit-core/src/model.rs` — **What a project is.** Structs for the document,
   comps, layers, footage items. Each has an `extra` field that preserves anything a future
   Lumit version adds — so old and new versions can share project files.
+- **Glitch** — the corrupted-video look, as two sub-effects sharing one Intensity dial (a
+  third, Datamosh, waits on machinery — the flow field, §3.1 — no effect has yet; it's
+  written down as a clearly deferred follow-up, not quietly dropped). **Block displacement**
+  carves the frame into a grid (Block size) and, per block, reads its picture from a
+  slightly different spot — a random-looking but fully repeatable jump, plus an optional
+  colour-channel split and a "slice repeat" look where a thin strip of the block tiles
+  instead of showing a plain shifted read. **Scanlines** darkens alternating bands of rows
+  (Line period, Darkness), optionally rolling them over time and alternating which half of
+  each band darkens every other cycle for an interlaced-video feel. One dial, Intensity,
+  turns *all* of that up or down together, and at 0 the effect is a guaranteed no-op — checked
+  by a test — no matter which sections are switched on or what Mix is set to. The interesting
+  engineering wrinkle: which block "moves" and by how much has to be decided freshly for
+  every pixel, on the GPU, from nothing but (seed, that block's row/column, a coarse
+  time-step) — there's no way to precompute a lookup table for it up front, because a busy
+  frame can have thousands of blocks. That means the effect needs its own hash function
+  running *inside* the graphics-card program, not just on the CPU side like Shake's wobble
+  does. Shake's existing hash is built on 64-bit numbers, which graphics-card programs
+  (written in a language called WGSL) cannot represent — so Glitch gets a sibling hash built
+  entirely from 32-bit numbers instead, same design, both the CPU and the GPU version running
+  the identical recipe so they always agree. Every "which block, how much, which look" answer
+  comes from that one shared hash fed different small numbers, which is also why the same
+  project glitches exactly the same way on every machine, every time. It reuses the same
+  frame-cache lesson Shake taught the codebase: because Glitch is seeded, the cache
+  automatically knows a frozen frame still needs the *current* moment's local time to look
+  right, with no Glitch-specific code needed for that part at all.
+- **Blur gains a Radial mode** — the third and final mode of the §3.8 trio, alongside
+  Gaussian and Directional. Drop a Centre point anywhere on the frame (as two percentages,
+  Centre X and Centre Y, of the frame's width and height) and pick a Type: **Spin** streaks
+  every pixel along the arc it would trace if the frame span rotating about that point;
+  **Zoom** streaks it along the straight line from the centre through it instead, like a
+  camera punching in. Either way the streak grows the farther a pixel sits from Centre —
+  right at Centre nothing moves at all, and the effect gets stronger toward the edges,
+  reaching its full length (set by Amount, in the same "% of frame diagonal" units Radius
+  and Length already use) at the frame's farthest corner. The clever bit is *how* those two
+  streak directions get computed: rather than actually rotating anything (which needs
+  trigonometry, and GPU trigonometry is allowed to be slightly imprecise — the same reason
+  Transform's matrix arrives pre-computed from the CPU), both Spin and Zoom turn out to be
+  nothing more than stretching the vector from Centre to the pixel by a plain number — along
+  that vector for Zoom, sideways from it for Spin. No division, no sine or cosine anywhere,
+  and — as a free bonus — every stretch is exactly zero at Centre itself, so there is no
+  special case to write for "what happens exactly at the middle". Sideways-instead-of-rotated
+  is a deliberate simplification (a straight sideways nudge closely matches a true curved arc
+  for the modest sweep this effect targets) and is written down as a pinned choice in docs/08
+  §3.8, alongside the other numbers the spec didn't pin down itself (the exact ranges and
+  defaults for Centre and Amount). Old projects saved before Radial existed still read as
+  Gaussian, byte for byte, and Amount 0 is an exact passthrough — both pinned by tests.
 - **Flash fires on the beat.** The Flash effect's Mode switch now has three positions.
   *Manual* is exactly the old behaviour — keyframed hits with an exponential fade — and
   stays the default, so nothing saved earlier changes by a single byte. *Trigger* lights

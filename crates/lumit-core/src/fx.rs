@@ -161,12 +161,38 @@ const MIX_PARAM: ParamSchema = ParamSchema {
 /// The catalogue. Grows one entry per landed effect; the schema is the single
 /// source of truth the UI menu, instantiation and resolution all read.
 pub const BUILTINS: &[EffectSchema] = &[
-    // One blur, several modes (docs/08 §3.8): Gaussian (separable two-pass)
-    // and Directional (line-integral streak along an angle); Radial follows.
-    // Mode selects which extra parameters matter — Radius drives Gaussian,
-    // Length/Angle drive Directional. Instances saved before the mode
-    // existed resolve as Gaussian, and the gaussian maths are untouched by
-    // the other modes (same kernel, same version).
+    // One blur, three modes (docs/08 §3.8): Gaussian (separable two-pass),
+    // Directional (line-integral streak along an angle) and Radial (arcs or
+    // rays about a centre). Mode selects which extra parameters matter —
+    // Radius drives Gaussian, Length/Angle drive Directional, Centre/
+    // Amount/Type drive Radial. Instances saved before a mode existed
+    // resolve as Gaussian, and each mode's maths are untouched by the
+    // others (same kernel per mode, same version).
+    //
+    // Status (Radial, shipped): the spec text (§3.8) names Centre, Amount
+    // and Type without giving ranges — pinned here. Centre is Centre X /
+    // Centre Y, two Float params in % of comp width/height (50/50 default):
+    // the schema has no Point-shaped ParamKind (checked — Transform's own
+    // Anchor/Position use the identical anchor_x/anchor_y split, so this
+    // follows established precedent rather than adding a new kind). Amount
+    // is % diag (default 8, slider 0–20, hard 0–100), matching the Radius/
+    // Length unit family so all three modes read in the same currency —
+    // it is the peak per-pixel tap spread, reached at the frame's farthest
+    // corner (half the comp diagonal from Centre). Type is Spin / Zoom.
+    // Both modes reduce to a pure linear scale of the pixel's own
+    // (position − centre) vector — Zoom along that vector (an exact ray
+    // sample), Spin along its perpendicular (the first-order/tangent
+    // approximation to the true arc about Centre) — so neither needs a
+    // division or a runtime trig call: no host trig table was needed
+    // either, since the only scale factor (amount ÷ half diagonal) is a
+    // plain division done once, not per pixel. The approximation is exact
+    // for Zoom and holds closely for Spin across the shipped Amount range
+    // (worst-case sweep well under a radian); it also means every tap
+    // vanishes to zero exactly at Centre with no epsilon guard. The shared
+    // Edge parameter (Transparent/Repeat/Mirror) applies unchanged — taps
+    // run through the same bilinear_edge every mode already uses, so
+    // Radial clamps/mirrors/clears at the frame border exactly like
+    // Gaussian and Directional.
     EffectSchema {
         match_name: "blur",
         label: "Blur",
@@ -186,7 +212,7 @@ pub const BUILTINS: &[EffectSchema] = &[
                 id: "mode",
                 label: "Mode",
                 kind: ParamKind::Choice {
-                    options: &["Gaussian", "Directional"],
+                    options: &["Gaussian", "Directional", "Radial"],
                     default: 0,
                 },
             },
@@ -219,6 +245,50 @@ pub const BUILTINS: &[EffectSchema] = &[
                     default: 0.0,
                     slider: (-180.0, 180.0),
                     hard: (Some(-3600.0), Some(3600.0)),
+                },
+            },
+            ParamSchema {
+                id: "centre_x",
+                label: "Centre X",
+                // Radial mode: % of comp width. resolve_stack only carries
+                // diag_px (no separate width/height), so this resolves to a
+                // *fraction* of the raster and the CPU/GPU function scales
+                // it by its own w — exactly how RGB split's radial mode
+                // already derives the frame centre from w/h it already has.
+                kind: ParamKind::Float {
+                    default: 50.0,
+                    slider: (0.0, 100.0),
+                    hard: (None, None), // off-frame centres are legal
+                },
+            },
+            ParamSchema {
+                id: "centre_y",
+                label: "Centre Y",
+                // Radial mode: % of comp height (see centre_x).
+                kind: ParamKind::Float {
+                    default: 50.0,
+                    slider: (0.0, 100.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "amount",
+                label: "Amount",
+                // Radial mode: peak tap spread, % diag (§2.3), reached at
+                // the farthest corner from Centre — the same currency as
+                // Radius/Length above.
+                kind: ParamKind::Float {
+                    default: 8.0,
+                    slider: (0.0, 20.0),
+                    hard: (Some(0.0), Some(100.0)),
+                },
+            },
+            ParamSchema {
+                id: "radial_type",
+                label: "Type",
+                kind: ParamKind::Choice {
+                    options: &["Spin", "Zoom"],
+                    default: 0,
                 },
             },
             ParamSchema {
@@ -817,6 +887,174 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Glitch (docs/08 §3.12): Block displacement and Scanlines ship now;
+    // Datamosh is deferred (§3.12 status note — it needs the {-1, 0}
+    // temporal window and the flow field, machinery no effect has yet).
+    // Seeded, like Shake — category Distortion to match Shake and RGB
+    // split, its closest siblings (positional wobble, channel split), not
+    // the additive-light Stylise pair (Glow, Flash).
+    //
+    // Status (shipped): the spec text names most of these without ranges;
+    // pinned here. Intensity (0–1, the master dial) scales *everything*
+    // glitched — block jitter, displacement, channel offset, slice-repeat
+    // odds and scanline darkness alike — so it is a genuine single "how
+    // glitched" knob and 0 is the bit-exact passthrough regardless of
+    // which sections are enabled. "Rows/columns jitter" is one Block
+    // jitter % (of Block size), not separate row/column controls, applied
+    // as a per-nominal-block hashed offset to where that block's content
+    // is read from — a cheap stand-in for actually moving grid lines
+    // (which would need a boundary search a single pointwise pass cannot
+    // do), pinned as a deliberate simplification. "Channel-offset toggle
+    // or amount" ships as a Float (Channel offset, % diag) — continuous
+    // like every other amount-shaped parameter in the catalogue, following
+    // RGB split's R/B-offset-from-G shape but with a per-block hashed
+    // offset instead of one global vector. Slice repetition ships as a
+    // Float 0–100%: the odds (scaled by Intensity) that a given block
+    // folds its own content to repeat a short hashed strip instead of a
+    // plain positional read. Per-block hashing runs inside the GPU kernel
+    // (the block index is a per-pixel quantity, so the hash cannot be a
+    // host-precomputed table — docs/08 §3.12 asks for this if the block
+    // hash must run on the GPU): WGSL has no 64-bit integer type, so it
+    // cannot host Shake's actual splitmix64 lattice. `splitmix32` is a
+    // matching-spirit 32-bit sibling added alongside it for exactly this
+    // (both CPU and GPU use it, so they agree on the integer hash
+    // bit-for-bit; only the fp16 sampling that follows carries the usual
+    // small tolerance) — Shake's own splitmix64/value_noise_1d are
+    // untouched. "Time-derived tick" (the spec's phrase for per-frame
+    // block variation) steps at a fixed, unexposed 8 Hz — chosen so
+    // blocks visibly pop rather than blur into continuous noise; no rate
+    // parameter is listed in the spec text, so this is pinned as an
+    // internal constant. Roll speed's sign is open (either direction);
+    // Interlace alternates which half of each scanline period darkens on
+    // odd periods, the classic interlaced-field look.
+    EffectSchema {
+        match_name: "glitch",
+        label: "Glitch",
+        version: 1,
+        category: FxCategory::Distortion,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::FullFrame,
+            temporal: &[0],
+            premultiplied: true,
+            seeded: true,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "intensity",
+                label: "Intensity",
+                // The master dial (§1.2): scales every section's strength.
+                // 0 is the bit-exact passthrough (pinned by test).
+                kind: ParamKind::Float {
+                    default: 0.35,
+                    slider: (0.0, 1.0),
+                    hard: (Some(0.0), Some(1.0)),
+                },
+            },
+            ParamSchema {
+                id: "seed",
+                label: "Seed",
+                kind: ParamKind::Seed,
+            },
+            ParamSchema {
+                id: "block_enabled",
+                label: "Block displacement",
+                kind: ParamKind::Bool { default: true },
+            },
+            ParamSchema {
+                id: "block_size",
+                label: "Block size",
+                // px@comp (§2.3): a deliberately pixel-scale look.
+                kind: ParamKind::Float {
+                    default: 24.0,
+                    slider: (4.0, 128.0),
+                    hard: (Some(2.0), None), // ≥ 2px: never a degenerate grid
+                },
+            },
+            ParamSchema {
+                id: "block_jitter",
+                label: "Rows/columns jitter",
+                // % of Block size (status note above): a hashed offset to
+                // where each nominal block's content is read from.
+                kind: ParamKind::Float {
+                    default: 25.0,
+                    slider: (0.0, 100.0),
+                    hard: (Some(0.0), Some(100.0)),
+                },
+            },
+            ParamSchema {
+                id: "block_amount",
+                label: "Displacement",
+                // % diag (§2.3), the same currency as Blur's Radius/Length.
+                kind: ParamKind::Float {
+                    default: 3.0,
+                    slider: (0.0, 15.0),
+                    hard: (Some(0.0), Some(100.0)),
+                },
+            },
+            ParamSchema {
+                id: "channel_offset",
+                label: "Channel offset",
+                // % diag: a per-block hashed RGB split (status note above).
+                kind: ParamKind::Float {
+                    default: 1.0,
+                    slider: (0.0, 10.0),
+                    hard: (Some(0.0), Some(50.0)),
+                },
+            },
+            ParamSchema {
+                id: "slice_repeat",
+                label: "Slice repeat",
+                // % odds (× Intensity) a block folds to a repeating strip.
+                kind: ParamKind::Float {
+                    default: 20.0,
+                    slider: (0.0, 100.0),
+                    hard: (Some(0.0), Some(100.0)),
+                },
+            },
+            ParamSchema {
+                id: "scanline_enabled",
+                label: "Scanlines",
+                kind: ParamKind::Bool { default: true },
+            },
+            ParamSchema {
+                id: "scanline_period",
+                label: "Line period",
+                // px@comp: the deliberately pixel-scale scanline pitch.
+                kind: ParamKind::Float {
+                    default: 3.0,
+                    slider: (1.0, 20.0),
+                    hard: (Some(1.0), None),
+                },
+            },
+            ParamSchema {
+                id: "scanline_darkness",
+                label: "Darkness",
+                kind: ParamKind::Float {
+                    default: 40.0,
+                    slider: (0.0, 100.0),
+                    hard: (Some(0.0), Some(100.0)),
+                },
+            },
+            ParamSchema {
+                id: "scanline_roll",
+                label: "Roll speed",
+                // Lines (periods) per second; either direction (K-090).
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-30.0, 30.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "scanline_interlace",
+                label: "Interlace offset",
+                kind: ParamKind::Bool { default: false },
+            },
+            MIX_PARAM,
+        ],
+    },
 ];
 
 /// Look a schema up by its match name.
@@ -887,6 +1125,26 @@ pub enum Resolved {
         length_px: f32,
         /// Streak direction, degrees (0° = +x, y-down raster).
         angle_deg: f32,
+        /// 0 = Transparent, 1 = Repeat, 2 = Mirror.
+        edge: u32,
+        /// 0..1.
+        mix: f32,
+    },
+    /// Blur's Radial mode (docs/08 §3.8): rays from, or a tangent to the
+    /// arc about, a centre — see the schema's status note for why both
+    /// reduce to a pure linear scale of (position − centre) with no
+    /// division or runtime trig.
+    RadialBlur {
+        /// Centre as a *fraction* of the raster (not raster pixels):
+        /// resolve_stack carries only diag_px, not separate width/height,
+        /// so the CPU/GPU function scales this by its own w/h — exactly
+        /// how RGB split's radial mode already derives the frame centre.
+        centre_frac: [f32; 2],
+        /// Peak tap spread in raster pixels, reached at the frame's
+        /// farthest corner from Centre (half the raster diagonal away).
+        amount_px: f32,
+        /// True = Spin (tangent direction), false = Zoom (radial direction).
+        spin: bool,
         /// 0 = Transparent, 1 = Repeat, 2 = Mirror.
         edge: u32,
         /// 0..1.
@@ -1001,6 +1259,44 @@ pub enum Resolved {
         zoom_min: f32,
         /// True: scale up so the wobble never reveals an edge (§3.4).
         auto_scale: bool,
+        /// 0..1.
+        mix: f32,
+    },
+    /// Glitch (docs/08 §3.12, schema status note): Block displacement and
+    /// Scanlines, one kernel pass. `tick` is the local time already
+    /// discretised at [`GLITCH_TICK_HZ`] (host-side, so the kernel never
+    /// sees raw time or does its own time maths); `roll_px` is the
+    /// scanline pattern's already-computed pixel offset (roll speed ×
+    /// local time × period). Intensity 0 is the bit-exact passthrough
+    /// (pinned by test) — see the schema's status note for why every
+    /// hashed quantity here is scaled by it.
+    Glitch {
+        /// The master 0..1 dial; scales every section's strength.
+        intensity: f32,
+        seed: u32,
+        /// Local time discretised at [`GLITCH_TICK_HZ`] (§3.12 status
+        /// note): per-block hashing reads this, not raw time.
+        tick: i32,
+        block_enabled: bool,
+        /// Raster pixels (px@comp × the §2.3 preview factor).
+        block_size_px: f32,
+        /// 0..1, fraction of block_size_px (the "Rows/columns jitter").
+        jitter_frac: f32,
+        /// Peak per-block displacement, raster pixels (% diag).
+        amount_px: f32,
+        /// Peak per-block R/B split, raster pixels (% diag).
+        chan_px: f32,
+        /// 0..1: odds (before the Intensity scale) a block slice-repeats.
+        slice_frac: f32,
+        scanline_enabled: bool,
+        /// Raster pixels (px@comp × the §2.3 preview factor).
+        period_px: f32,
+        /// 0..1.
+        darkness: f32,
+        /// The scanline pattern's pixel offset at this frame (roll speed ×
+        /// local time × period_px, host-computed).
+        roll_px: f32,
+        interlace: bool,
         /// 0..1.
         mix: f32,
     },
@@ -1278,6 +1574,50 @@ pub fn shake_noise(seed: u32, channel: u32, x: f64) -> f64 {
     (value_noise_1d(seed, channel, x) + 0.5 * value_noise_1d(seed, channel + 4, x * 2.0)) / 1.5
 }
 
+/// A 32-bit avalanche mixer, in the same five-line-portability spirit as
+/// [`splitmix64`] above (public-domain "splitmix32" shape: golden-ratio
+/// increment, xorshift/multiply/xorshift finalisation) — Glitch's per-block
+/// hash (docs/08 §3.12 status note) needs this narrower sibling because the
+/// block index is a *per-pixel* quantity the WGSL kernel must hash itself
+/// (there are too many blocks to precompute a host-side table into the
+/// uniform), and WGSL has no 64-bit integer type to host the real
+/// splitmix64 lattice. Both the CPU reference and the kernel run this exact
+/// sequence of wrapping u32 ops, so they agree on the integer hash
+/// bit-for-bit; Shake's splitmix64/[`value_noise_1d`] are untouched.
+fn splitmix32(mut x: u32) -> u32 {
+    x = x.wrapping_add(0x9e37_79b9);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x21f0_aaad);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x735a_2d97);
+    x ^= x >> 15;
+    x
+}
+
+/// One Glitch per-block hash channel (docs/08 §3.12 status note): folds
+/// `(seed, channel, block x, block y, tick)` through [`splitmix32`] and
+/// maps the top 24 bits to `[0, 1)` — exactly representable in f32/f64, so
+/// CPU and GPU read the identical value. Discrete and unfiltered on
+/// purpose (unlike [`value_noise_1d`]'s smooth interpolation): adjacent
+/// blocks are meant to be independent draws, and "tick" is the tick-rate
+/// discretisation of local time that gives block glitching its per-frame
+/// pop rather than a continuous wobble.
+pub fn block_hash01(seed: u32, channel: u32, bx: i32, by: i32, tick: i32) -> f32 {
+    let mut h = seed;
+    h = splitmix32(h ^ channel);
+    h = splitmix32(h ^ (bx as u32));
+    h = splitmix32(h ^ (by as u32));
+    h = splitmix32(h ^ (tick as u32));
+    (h >> 8) as f32 / 16_777_216.0 // top 24 bits, /2^24 → exact in f32
+}
+
+/// Glitch's fixed, unexposed block-glitch update rate (docs/08 §3.12
+/// status note): the spec's "time-derived tick" without a listed rate
+/// parameter, pinned as an internal constant — fast enough that block
+/// glitching reads as chaotic, slow enough that individual pops stay
+/// visible instead of blurring into continuous noise.
+pub const GLITCH_TICK_HZ: f64 = 8.0;
+
 /// The §3.4 Auto-scale cover factor: the smallest uniform scale that keeps
 /// the frame fully covered under every wobble the current parameters allow
 /// (offset up to `amp_px` in any direction, rotation up to
@@ -1480,7 +1820,7 @@ pub fn resolve_stack(
                     _ => 1,
                 };
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                // Instances saved before the mode existed carry no "mode"
+                // Instances saved before a mode existed carry no "mode"
                 // parameter and resolve as Gaussian.
                 let mode = match e.param("mode") {
                     Some(EffectValue::Choice(c)) => *c,
@@ -1492,6 +1832,18 @@ pub fn resolve_stack(
                     Some(Resolved::DirBlur {
                         length_px: (length_pct / 100.0 * diag_px).max(0.0),
                         angle_deg,
+                        edge,
+                        mix,
+                    })
+                } else if mode == 2 {
+                    let cx = (e.float_at("centre_x", lt).unwrap_or(50.0) / 100.0) as f32;
+                    let cy = (e.float_at("centre_y", lt).unwrap_or(50.0) / 100.0) as f32;
+                    let amount_pct = e.float_at("amount", lt).unwrap_or(0.0) as f32;
+                    let spin = !matches!(e.param("radial_type"), Some(EffectValue::Choice(1)));
+                    Some(Resolved::RadialBlur {
+                        centre_frac: [cx, cy],
+                        amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
+                        spin,
                         edge,
                         mix,
                     })
@@ -1659,6 +2011,66 @@ pub fn resolve_stack(
                     mix,
                 })
             }
+            "glitch" => {
+                let intensity =
+                    (e.float_at("intensity", lt).unwrap_or(0.35) as f32).clamp(0.0, 1.0);
+                let seed = match e.param("seed") {
+                    Some(EffectValue::Seed(s)) => *s,
+                    _ => 0,
+                };
+                // Local time discretised at the fixed tick rate (§3.12
+                // status note): block hashing reads this, never raw time.
+                let tick = (lt * GLITCH_TICK_HZ).floor() as i32;
+                let block_enabled = match e.param("block_enabled") {
+                    Some(EffectValue::Bool(b)) => *b,
+                    _ => true,
+                };
+                let block_size_px =
+                    (e.float_at("block_size", lt).unwrap_or(24.0) as f32 * px_scale).max(1.0);
+                let jitter_frac =
+                    (e.float_at("block_jitter", lt).unwrap_or(25.0) as f32 / 100.0).clamp(0.0, 1.0);
+                let amount_pct = e.float_at("block_amount", lt).unwrap_or(3.0) as f32;
+                let chan_pct = e.float_at("channel_offset", lt).unwrap_or(1.0) as f32;
+                let slice_frac =
+                    (e.float_at("slice_repeat", lt).unwrap_or(20.0) as f32 / 100.0).clamp(0.0, 1.0);
+                let scanline_enabled = match e.param("scanline_enabled") {
+                    Some(EffectValue::Bool(b)) => *b,
+                    _ => true,
+                };
+                let period_px =
+                    (e.float_at("scanline_period", lt).unwrap_or(3.0) as f32 * px_scale).max(1.0);
+                let darkness = (e.float_at("scanline_darkness", lt).unwrap_or(40.0) as f32 / 100.0)
+                    .clamp(0.0, 1.0);
+                let roll_speed = e.float_at("scanline_roll", lt).unwrap_or(0.0);
+                // The scanline pattern's pixel offset at this frame (roll
+                // speed × local time × period), so the kernel never sees
+                // raw time or does its own time maths (§2.4: the CPU/GPU
+                // must agree, and f32 time would round differently near a
+                // tick boundary than f64 does — precomputing sidesteps it).
+                let roll_px = (roll_speed * lt * f64::from(period_px)) as f32;
+                let interlace = match e.param("scanline_interlace") {
+                    Some(EffectValue::Bool(b)) => *b,
+                    _ => false,
+                };
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::Glitch {
+                    intensity,
+                    seed,
+                    tick,
+                    block_enabled,
+                    block_size_px,
+                    jitter_frac,
+                    amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
+                    chan_px: (chan_pct / 100.0 * diag_px).max(0.0),
+                    slice_frac,
+                    scanline_enabled,
+                    period_px,
+                    darkness,
+                    roll_px,
+                    interlace,
+                    mix,
+                })
+            }
             "transform" => {
                 // px@comp parameters scale by the preview factor (§2.3) so
                 // Half preview frames exactly like Full, only softer.
@@ -1701,6 +2113,13 @@ pub mod cpu {
                 edge,
                 mix,
             } => blur_directional(rgba, w, h, *length_px, *angle_deg, *edge, *mix),
+            Resolved::RadialBlur {
+                centre_frac,
+                amount_px,
+                spin,
+                edge,
+                mix,
+            } => blur_radial(rgba, w, h, *centre_frac, *amount_px, *spin, *edge, *mix),
             Resolved::Sharpen {
                 amount,
                 radius_px,
@@ -1791,6 +2210,42 @@ pub mod cpu {
                 );
                 transform(rgba, w, h, anchor, position, scale, rot, 1.0, *mix);
             }
+            Resolved::Glitch {
+                intensity,
+                seed,
+                tick,
+                block_enabled,
+                block_size_px,
+                jitter_frac,
+                amount_px,
+                chan_px,
+                slice_frac,
+                scanline_enabled,
+                period_px,
+                darkness,
+                roll_px,
+                interlace,
+                mix,
+            } => glitch(
+                rgba,
+                w,
+                h,
+                *intensity,
+                *seed,
+                *tick,
+                *block_enabled,
+                *block_size_px,
+                *jitter_frac,
+                *amount_px,
+                *chan_px,
+                *slice_frac,
+                *scanline_enabled,
+                *period_px,
+                *darkness,
+                *roll_px,
+                *interlace,
+                *mix,
+            ),
         }
     }
 
@@ -2185,6 +2640,16 @@ pub mod cpu {
         (length_px.ceil() as i32).clamp(1, 511)
     }
 
+    /// The radial blur's tap count for a peak per-pixel spread in pixels
+    /// (docs/08 §3.8): the same rule as [`dir_blur_taps`], sized from the
+    /// worst case — the spread reached at the frame's farthest corner —
+    /// so CPU and GPU dispatch the same kernel size everywhere in the
+    /// image (nearer Centre simply over-samples a shorter true spread,
+    /// which costs taps but is never wrong).
+    pub fn radial_blur_taps(amount_px: f32) -> i32 {
+        dir_blur_taps(amount_px)
+    }
+
     /// Bilinear sample under a blur edge policy: out-of-frame taps repeat or
     /// mirror per axis, or read as transparent (contributing nothing while
     /// keeping full weight, exactly like the gaussian's normalisation).
@@ -2255,6 +2720,77 @@ pub mod cpu {
         }
     }
 
+    /// Radial blur (docs/08 §3.8, schema status note): Spin samples along
+    /// an arc about Centre, Zoom along a ray through it — box-weighted,
+    /// evenly spaced taps across `[-0.5, 0.5]` exactly like
+    /// [`blur_directional`]'s line integral, fixed tap order for
+    /// determinism (§2.4). Both reduce to one linear scale of `d = pos −
+    /// centre`: Zoom's ray is `pos + t·k·d` (an exact sample along the ray,
+    /// since scaling `d` moves along the straight line through Centre and
+    /// `pos`); Spin's arc is `pos + t·k·rot90(d)` (the first-order/tangent
+    /// approximation to true rotation about Centre — accurate for the
+    /// small sweep angles `k` reaches across the shipped Amount range).
+    /// `k = amount_px / (half the raster diagonal)` is the same radial
+    /// scale [`rgb_split`]'s radial mode uses. Neither branch divides by
+    /// `|d|`, so every tap collapses to exactly `pos` at Centre — no
+    /// epsilon guard, no NaN risk. `amount_px == 0.0` gives `k == 0.0`,
+    /// [`radial_blur_taps`] floors at one tap (mirroring
+    /// [`dir_blur_taps`]'s floor), and that single tap sits at exactly
+    /// `pos`: with `mix == 1.0` the result is the bit-exact input (pinned
+    /// by test, matching the directional blur's own zero-length case).
+    #[allow(clippy::too_many_arguments)]
+    pub fn blur_radial(
+        rgba: &mut [f32],
+        w: u32,
+        h: u32,
+        centre_frac: [f32; 2],
+        amount_px: f32,
+        spin: bool,
+        edge: u32,
+        mix: f32,
+    ) {
+        let original = rgba.to_vec();
+        let (fw, fh) = (w as f32, h as f32);
+        let centre = (centre_frac[0] * fw, centre_frac[1] * fh);
+        let diag = (fw * fw + fh * fh).sqrt();
+        let k = if diag > 0.0 {
+            amount_px / (0.5 * diag)
+        } else {
+            0.0
+        };
+        let n = radial_blur_taps(amount_px);
+        let nf = n as f32;
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let pos = (x as f32 + 0.5, y as f32 + 0.5);
+                let d = (pos.0 - centre.0, pos.1 - centre.1);
+                // Zoom steps along d itself (a ray through Centre); Spin
+                // steps along its perpendicular (the tangent to the arc).
+                let step = if spin { (-d.1, d.0) } else { d };
+                let mut acc = [0.0f32; 4];
+                for t in 0..n {
+                    let tt = (t as f32 + 0.5) / nf - 0.5;
+                    let s = bilinear_edge(
+                        &original,
+                        w,
+                        h,
+                        pos.0 + tt * k * step.0,
+                        pos.1 + tt * k * step.1,
+                        edge,
+                    );
+                    for c in 0..4 {
+                        acc[c] += s[c];
+                    }
+                }
+                for c in 0..4 {
+                    let v = acc[c] / nf;
+                    rgba[i + c] = original[i + c] * (1.0 - mix) + v * mix;
+                }
+            }
+        }
+    }
+
     /// Separable two-pass gaussian on premultiplied RGBA (docs/08 §3.8),
     /// fixed tap order for determinism (§2.4).
     pub fn blur_gaussian(rgba: &mut [f32], w: u32, h: u32, radius_px: f32, edge: u32, mix: f32) {
@@ -2297,6 +2833,127 @@ pub mod cpu {
                 let d = ((y * w + x) * 4) as usize;
                 for c in 0..4 {
                     rgba[d + c] = original[d + c] * (1.0 - mix) + acc[c] * mix;
+                }
+            }
+        }
+    }
+
+    /// Glitch (docs/08 §3.12, schema status note): Block displacement and
+    /// Scanlines in one pass (Datamosh is deferred — see the status note).
+    ///
+    /// Block displacement partitions the raster into a `block_size_px`
+    /// grid; each *nominal* block hashes a small jitter offset
+    /// (`jitter_frac` of `block_size_px`, scaled by Intensity) that decides
+    /// which block's content a pixel actually reads from — a cheap stand-in
+    /// for moving grid lines themselves. That block then hashes its own
+    /// displacement (± `amount_px` per axis), R/B channel split (±
+    /// `chan_px`, alpha follows green exactly like [`rgb_split`]), and
+    /// slice-repeat odds (`slice_frac` × Intensity: folds the block's own
+    /// local Y to a short hashed repeat height instead of a plain read).
+    /// Every hashed quantity is scaled by Intensity, so Intensity 0
+    /// collapses every read back to the pixel's own position — pinned as
+    /// the bit-exact passthrough by the early return below (matching
+    /// [`glow`]'s neutral short-circuit, not the tap-sum coincidence the
+    /// blur family relies on, because Glitch's Mix should not be able to
+    /// perturb a fully neutral instance either).
+    ///
+    /// Scanlines darken by a periodic band in raster Y (plus the
+    /// precomputed roll offset), alternating which half of the period
+    /// darkens on odd periods when Interlace is on.
+    ///
+    /// Clamp-addressed bilinear sampling throughout (like [`rgb_split`]);
+    /// fixed evaluation order for determinism (§2.4).
+    #[allow(clippy::too_many_arguments)]
+    pub fn glitch(
+        rgba: &mut [f32],
+        w: u32,
+        h: u32,
+        intensity: f32,
+        seed: u32,
+        tick: i32,
+        block_enabled: bool,
+        block_size_px: f32,
+        jitter_frac: f32,
+        amount_px: f32,
+        chan_px: f32,
+        slice_frac: f32,
+        scanline_enabled: bool,
+        period_px: f32,
+        darkness: f32,
+        roll_px: f32,
+        interlace: bool,
+        mix: f32,
+    ) {
+        if intensity == 0.0 || (!block_enabled && !scanline_enabled) {
+            return; // neutral: bit-exact identity (the WGSL twin matches)
+        }
+        let original = rgba.to_vec();
+        let bw = block_size_px.max(1.0);
+        let period = period_px.max(1.0);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let pos = (x as f32 + 0.5, y as f32 + 0.5);
+
+                let (sx, sy, chan) = if block_enabled {
+                    let bx0 = (pos.0 / bw).floor();
+                    let by0 = (pos.1 / bw).floor();
+                    let h01 = |ch: u32, bxx: f32, byy: f32| {
+                        super::block_hash01(seed, ch, bxx as i32, byy as i32, tick)
+                    };
+                    // Grid jitter (status note): a hashed offset of the
+                    // *nominal* block, scaled by Intensity, decides which
+                    // block a pixel actually reads from.
+                    let jx = (h01(0, bx0, by0) - 0.5) * 2.0 * jitter_frac * bw * intensity;
+                    let jy = (h01(1, bx0, by0) - 0.5) * 2.0 * jitter_frac * bw * intensity;
+                    let jpos = (pos.0 + jx, pos.1 + jy);
+                    let bx = (jpos.0 / bw).floor();
+                    let by = (jpos.1 / bw).floor();
+
+                    let dx = (h01(2, bx, by) - 0.5) * 2.0 * amount_px * intensity;
+                    let dy = (h01(3, bx, by) - 0.5) * 2.0 * amount_px * intensity;
+                    let chan = (h01(4, bx, by) - 0.5) * 2.0 * chan_px * intensity;
+                    let slice_u = h01(5, bx, by);
+                    let slice_h_u = h01(6, bx, by);
+
+                    // Slice repeat: fold the block's own local Y to a short
+                    // hashed repeat height instead of a plain read.
+                    let mut eff_y = jpos.1;
+                    if slice_u < slice_frac * intensity {
+                        let local_y = jpos.1 - by * bw;
+                        let repeat_h = (slice_h_u * bw * 0.25).max(1.0);
+                        let folded = local_y - (local_y / repeat_h).floor() * repeat_h;
+                        eff_y = by * bw + folded;
+                    }
+                    (jpos.0 + dx, eff_y + dy, chan)
+                } else {
+                    (pos.0, pos.1, 0.0)
+                };
+
+                // R/B split from the block hash (alpha follows green, like
+                // rgb_split); always computed (chan is exactly 0.0 when
+                // block displacement is off, an exact no-op offset).
+                let r = bilinear(&original, w, h, sx - chan, sy)[0];
+                let g = bilinear(&original, w, h, sx, sy);
+                let b = bilinear(&original, w, h, sx + chan, sy)[2];
+                let mut c = [r, g[1], b, g[3]];
+
+                if scanline_enabled {
+                    let yp = pos.1 + roll_px;
+                    let cell = yp / period;
+                    let cell_floor = cell.floor();
+                    let t = cell - cell_floor;
+                    let odd = (cell_floor as i64).rem_euclid(2) != 0;
+                    let bright = (t < 0.5) != (interlace && odd);
+                    let band = if bright { 1.0 } else { 1.0 - darkness };
+                    let eff_mult = 1.0 - intensity * (1.0 - band);
+                    c[0] *= eff_mult;
+                    c[1] *= eff_mult;
+                    c[2] *= eff_mult;
+                }
+
+                for ch in 0..4 {
+                    rgba[i + ch] = original[i + ch] * (1.0 - mix) + c[ch] * mix;
                 }
             }
         }
@@ -2948,6 +3605,52 @@ mod tests {
             }]
         );
 
+        // Radial mode reads Centre/Amount/Type instead: Centre resolves to
+        // a *fraction* (30/70%, unconverted — resolve_stack has no width/
+        // height to scale it by), Amount 8% of 1000 = 80px, Type defaults
+        // to Spin.
+        for p in &mut e.params {
+            match p.id.as_str() {
+                "mode" => p.value = EffectValue::Choice(2),
+                "centre_x" => p.value = EffectValue::Float(Property::fixed(30.0)),
+                "centre_y" => p.value = EffectValue::Float(Property::fixed(70.0)),
+                "amount" => p.value = EffectValue::Float(Property::fixed(8.0)),
+                _ => {}
+            }
+        }
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
+        assert_eq!(
+            r,
+            vec![Resolved::RadialBlur {
+                centre_frac: [0.3, 0.7],
+                amount_px: 80.0,
+                spin: true,
+                edge: 1,
+                mix: 1.0
+            }]
+        );
+
+        // The Type choice flips Spin/Zoom.
+        for p in &mut e.params {
+            if p.id == "radial_type" {
+                p.value = EffectValue::Choice(1);
+            }
+        }
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
+        assert!(matches!(r[..], [Resolved::RadialBlur { spin: false, .. }]));
+
         // A legacy instance (saved before the mode existed) has no mode
         // parameter and still resolves as Gaussian.
         e.params
@@ -3002,6 +3705,74 @@ mod tests {
             "streak spreads in y"
         );
         assert!(v[at(7, 4)] < 1e-6, "x row stays clean");
+    }
+
+    #[test]
+    fn cpu_radial_blur_spins_and_zooms_from_centre() {
+        // A white impulse 4px right of centre in a transparent square frame
+        // (odd dimensions: pixel 8's centre is the exact frame centre, as
+        // the RGB split radial test already relies on).
+        let (w, h) = (17u32, 17u32);
+        let mut img = vec![0.0f32; (w * h * 4) as usize];
+        let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+        let imp = at(12, 8);
+        img[imp..imp + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+        let centre = [0.5f32, 0.5f32];
+
+        // Amount 0 and mix 0 are both the exact identity, either type (the
+        // same zero-tap-offset reasoning as blur_directional's length 0).
+        let mut a0 = img.clone();
+        cpu::blur_radial(&mut a0, w, h, centre, 0.0, true, 1, 1.0);
+        assert_eq!(a0, img);
+        let mut a0z = img.clone();
+        cpu::blur_radial(&mut a0z, w, h, centre, 0.0, false, 1, 1.0);
+        assert_eq!(a0z, img);
+        let mut m0 = img.clone();
+        cpu::blur_radial(&mut m0, w, h, centre, 30.0, true, 1, 0.0);
+        assert_eq!(m0, img);
+
+        // The exact centre pixel is unmoved even at a huge amount, either
+        // type — d = 0 there, so every tap collapses to that pixel itself.
+        let mut cs = img.clone();
+        cpu::blur_radial(&mut cs, w, h, centre, 60.0, true, 1, 1.0);
+        assert_eq!(cs[at(8, 8)], 0.0, "centre picks up no energy (spin)");
+        let mut cz = img.clone();
+        cpu::blur_radial(&mut cz, w, h, centre, 60.0, false, 1, 1.0);
+        assert_eq!(cz[at(8, 8)], 0.0, "centre picks up no energy (zoom)");
+
+        // Zoom steps along the ray through the impulse — here, exactly the
+        // row — so energy spreads left/right of it on that same row. Row 8
+        // is where the exact proof lives: any output pixel there has a
+        // purely horizontal d (centre is also on row 8), so its zoom taps
+        // never leave the row. Off-row neighbours (12,7)/(12,9) are not
+        // proved zero — bilinear's one-pixel blend radius legitimately
+        // bleeds a little across a row boundary near the impulse — so the
+        // contrast is asserted as "far less", not "none".
+        let mut z = img.clone();
+        cpu::blur_radial(&mut z, w, h, centre, 20.0, false, 1, 1.0);
+        assert!(z[imp] < 1.0, "peak flattens");
+        assert!(
+            z[at(11, 8)] > 0.0 && z[at(13, 8)] > 0.0,
+            "zoom streak spreads along the ray"
+        );
+        assert!(
+            z[at(12, 7)] < z[at(11, 8)] && z[at(12, 9)] < z[at(11, 8)],
+            "zoom bleeds far less off the ray than along it"
+        );
+
+        // Spin steps along the perpendicular instead — energy spreads
+        // above/below the impulse. The exact proof mirrors the zoom one:
+        // row 8's own points have a purely *vertical* spin step there, so
+        // they never reach column 12 — no bleed along the ray at all.
+        let mut s = img.clone();
+        cpu::blur_radial(&mut s, w, h, centre, 20.0, true, 1, 1.0);
+        assert!(s[imp] < 1.0, "peak flattens");
+        assert!(
+            s[at(12, 7)] > 0.0 && s[at(12, 9)] > 0.0,
+            "spin streak spreads tangentially"
+        );
+        assert_eq!(s[at(11, 8)], 0.0, "spin: no bleed along the ray");
+        assert_eq!(s[at(13, 8)], 0.0, "spin: no bleed along the ray");
     }
 
     #[test]
@@ -3832,5 +4603,212 @@ mod tests {
                 after: Some(3.0),
             })
         );
+    }
+
+    #[test]
+    fn block_hash01_is_deterministic_bounded_and_varies() {
+        let a = block_hash01(7, 0, 3, 5, 2);
+        let b = block_hash01(7, 0, 3, 5, 2);
+        assert_eq!(a, b, "same inputs, same hash");
+        assert!((0.0..1.0).contains(&a), "hash lands in [0, 1)");
+
+        // Changing any one input moves the hash (checked, not proved
+        // statistically — a collision is possible in principle but
+        // vanishingly unlikely for a well-mixed hash, and none of these
+        // particular inputs happen to collide).
+        assert_ne!(a, block_hash01(8, 0, 3, 5, 2), "seed matters");
+        assert_ne!(a, block_hash01(7, 1, 3, 5, 2), "channel matters");
+        assert_ne!(a, block_hash01(7, 0, 4, 5, 2), "block x matters");
+        assert_ne!(a, block_hash01(7, 0, 3, 6, 2), "block y matters");
+        assert_ne!(a, block_hash01(7, 0, 3, 5, 3), "tick matters");
+    }
+
+    #[test]
+    fn glitch_instantiates_and_resolves() {
+        let e = instantiate("glitch").unwrap();
+        assert_eq!(e.float_at("intensity", 0.0), Some(0.35));
+        assert!(matches!(e.param("seed"), Some(EffectValue::Seed(_))));
+        assert!(matches!(
+            e.param("block_enabled"),
+            Some(EffectValue::Bool(true))
+        ));
+        assert_eq!(e.float_at("block_size", 0.0), Some(24.0));
+        assert_eq!(e.float_at("block_jitter", 0.0), Some(25.0));
+        assert_eq!(e.float_at("block_amount", 0.0), Some(3.0));
+        assert_eq!(e.float_at("channel_offset", 0.0), Some(1.0));
+        assert_eq!(e.float_at("slice_repeat", 0.0), Some(20.0));
+        assert!(matches!(
+            e.param("scanline_enabled"),
+            Some(EffectValue::Bool(true))
+        ));
+        assert_eq!(e.float_at("scanline_period", 0.0), Some(3.0));
+        assert_eq!(e.float_at("scanline_darkness", 0.0), Some(40.0));
+        assert_eq!(e.float_at("scanline_roll", 0.0), Some(0.0));
+        assert!(matches!(
+            e.param("scanline_interlace"),
+            Some(EffectValue::Bool(false))
+        ));
+
+        // Resolving is deterministic: the same instance at the same time
+        // yields the identical result, twice — and the px_scale factor
+        // (0.5 here) reaches the px@comp parameters exactly like Transform
+        // and Shake's do.
+        let a = resolve_stack(
+            std::slice::from_ref(&e),
+            0.4,
+            1000.0,
+            0.5,
+            &MarkerContext::NONE,
+        );
+        let b = resolve_stack(
+            std::slice::from_ref(&e),
+            0.4,
+            1000.0,
+            0.5,
+            &MarkerContext::NONE,
+        );
+        assert_eq!(a, b);
+        let Resolved::Glitch {
+            intensity,
+            tick,
+            block_enabled,
+            block_size_px,
+            jitter_frac,
+            amount_px,
+            chan_px,
+            slice_frac,
+            scanline_enabled,
+            period_px,
+            darkness,
+            roll_px,
+            interlace,
+            mix,
+            ..
+        } = a[0]
+        else {
+            panic!("expected a Glitch");
+        };
+        assert_eq!(intensity, 0.35);
+        assert_eq!(tick, 3); // floor(0.4 * GLITCH_TICK_HZ 8) = 3
+        assert!(block_enabled);
+        assert_eq!(block_size_px, 12.0); // 24 px@comp * px_scale 0.5
+        assert_eq!(jitter_frac, 0.25);
+        assert_eq!(amount_px, 30.0); // 3% of a 1000px diagonal
+        assert_eq!(chan_px, 10.0); // 1% of a 1000px diagonal
+        assert_eq!(slice_frac, 0.20);
+        assert!(scanline_enabled);
+        assert_eq!(period_px, 1.5); // 3 px@comp * px_scale 0.5
+        assert_eq!(darkness, 0.40);
+        assert_eq!(roll_px, 0.0); // roll speed 0
+        assert!(!interlace);
+        assert_eq!(mix, 1.0);
+
+        // A different frame ticks differently (the per-block hash itself
+        // only runs inside cpu::glitch/the kernel, not here).
+        let later = resolve_stack(
+            std::slice::from_ref(&e),
+            0.9,
+            1000.0,
+            0.5,
+            &MarkerContext::NONE,
+        );
+        assert_ne!(a, later, "the tick moves between frames");
+    }
+
+    #[test]
+    fn cpu_glitch_is_identity_at_zero_intensity_and_with_sections_off() {
+        let (w, h) = (17u32, 9u32);
+        let img = transform_card(w, h);
+
+        // Intensity 0: every hashed quantity collapses regardless of
+        // section toggles or Mix — the early return skips the blend
+        // entirely, so this holds for any Mix, unlike the blur family's
+        // tap-sum coincidence.
+        let mut a = img.clone();
+        cpu::glitch(
+            &mut a, w, h, 0.0, 7, 3, true, 6.0, 0.5, 5.0, 2.0, 0.5, true, 3.0, 0.6, 1.0, true, 0.4,
+        );
+        assert_eq!(a, img, "intensity 0 is the exact identity");
+
+        // Both sections off: the same guarantee, at full intensity and any
+        // Mix.
+        let mut b = img.clone();
+        cpu::glitch(
+            &mut b, w, h, 1.0, 7, 3, false, 6.0, 0.5, 5.0, 2.0, 0.5, false, 3.0, 0.6, 1.0, true,
+            0.4,
+        );
+        assert_eq!(b, img, "both sections off is the exact identity");
+    }
+
+    #[test]
+    fn cpu_glitch_block_params_each_move_the_result() {
+        // Every hashed quantity at zero is still an exact identity even
+        // though block displacement runs (not the early return) — the
+        // "scale by zero" branches must themselves be exact.
+        let (w, h) = (40u32, 40u32);
+        let img = transform_card(w, h);
+        let (seed, tick) = (42u32, 5i32);
+        let run = |amount: f32, jitter: f32, chan: f32, slice: f32| {
+            let mut out = img.clone();
+            cpu::glitch(
+                &mut out, w, h, 1.0, seed, tick, true, 8.0, jitter, amount, chan, slice, false,
+                4.0, 0.5, 0.0, false, 1.0,
+            );
+            out
+        };
+        let zero = run(0.0, 0.0, 0.0, 0.0);
+        assert_eq!(
+            zero, img,
+            "every hashed quantity at zero is the identity too"
+        );
+        assert_ne!(
+            run(6.0, 0.0, 0.0, 0.0),
+            zero,
+            "displacement amount moves pixels"
+        );
+        assert_ne!(run(0.0, 0.5, 0.0, 0.0), zero, "grid jitter moves pixels");
+        assert_ne!(
+            run(0.0, 0.0, 4.0, 0.0),
+            zero,
+            "channel offset splits colour"
+        );
+        assert_ne!(run(0.0, 0.0, 0.0, 1.0), zero, "slice repeat folds rows");
+    }
+
+    #[test]
+    fn cpu_glitch_scanlines_darken_a_periodic_band() {
+        let (w, h) = (4u32, 12u32);
+        let mut img = vec![0.0f32; (w * h * 4) as usize];
+        for px in img.chunks_exact_mut(4) {
+            px.copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+        }
+        let red_at = |img: &[f32], y: u32| img[(y * w * 4) as usize];
+
+        // Period 4px, no roll, no interlace: rows 0-1 of every period are
+        // bright, rows 2-3 dark — the same shape every period.
+        let mut out = img.clone();
+        cpu::glitch(
+            &mut out, w, h, 1.0, 0, 0, false, 8.0, 0.0, 0.0, 0.0, 0.0, true, 4.0, 0.5, 0.0, false,
+            1.0,
+        );
+        for y in 0..h {
+            let expect = if (y % 4) < 2 { 1.0 } else { 0.5 };
+            assert_eq!(red_at(&out, y), expect, "row {y}");
+        }
+
+        // Interlace flips which half darkens on odd periods only: period 1
+        // (rows 4-7) is dark-then-bright instead of bright-then-dark;
+        // period 0 and period 2 (even) are unaffected.
+        let mut inter = img.clone();
+        cpu::glitch(
+            &mut inter, w, h, 1.0, 0, 0, false, 8.0, 0.0, 0.0, 0.0, 0.0, true, 4.0, 0.5, 0.0, true,
+            1.0,
+        );
+        assert_eq!(red_at(&inter, 0), 1.0, "period 0 unaffected");
+        assert_eq!(red_at(&inter, 2), 0.5, "period 0 unaffected");
+        assert_eq!(red_at(&inter, 4), 0.5, "period 1 flips: dark first");
+        assert_eq!(red_at(&inter, 6), 1.0, "period 1 flips: bright second");
+        assert_eq!(red_at(&inter, 8), 1.0, "period 2 (even) unflipped again");
+        assert_eq!(red_at(&inter, 10), 0.5, "period 2 (even) unflipped again");
     }
 }

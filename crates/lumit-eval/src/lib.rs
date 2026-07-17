@@ -805,6 +805,14 @@ mod tests {
         assert_ne!(key(&doc, &shaken, 1.0), key(&doc, &shaken, 2.0));
         assert_eq!(key(&doc, &shaken, 1.0), key(&doc, &shaken, 1.0));
 
+        // Glitch (also seeded, docs/08 §3.12): the same guarantee — a
+        // glitched static solid keys differently across frames (its block
+        // hash reads the local time-derived tick, §3.12 status note) and
+        // identically for the same frame twice.
+        let glitched = with_fx("glitch");
+        assert_ne!(key(&doc, &glitched, 1.0), key(&doc, &glitched, 2.0));
+        assert_eq!(key(&doc, &glitched, 1.0), key(&doc, &glitched, 1.0));
+
         // Blur (not seeded): a static solid keeps one key across frames.
         let blurred = with_fx("blur");
         assert_eq!(key(&doc, &blurred, 1.0), key(&doc, &blurred, 2.0));

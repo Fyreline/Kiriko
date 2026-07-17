@@ -58,6 +58,28 @@ pub fn run_ops(fx: &FxEngine, ctx: &GpuContext, tex: Tex, w: u32, h: u32, ops: &
                     },
                 );
             }
+            Resolved::RadialBlur {
+                centre_frac,
+                amount_px,
+                spin,
+                edge,
+                mix,
+            } => {
+                tex = fx.radial_blur(
+                    ctx,
+                    &tex,
+                    w,
+                    h,
+                    &lumit_gpu::fx::RadialBlurOp {
+                        centre_frac: *centre_frac,
+                        amount_px: *amount_px,
+                        taps: lumit_core::fx::cpu::radial_blur_taps(*amount_px),
+                        spin: *spin,
+                        edge: *edge,
+                        mix: *mix,
+                    },
+                );
+            }
             Resolved::Sharpen {
                 amount,
                 radius_px,
@@ -257,6 +279,47 @@ pub fn run_ops(fx: &FxEngine, ctx: &GpuContext, tex: Tex, w: u32, h: u32, ops: &
                         m,
                         off,
                         opacity,
+                        mix: *mix,
+                    },
+                );
+            }
+            Resolved::Glitch {
+                intensity,
+                seed,
+                tick,
+                block_enabled,
+                block_size_px,
+                jitter_frac,
+                amount_px,
+                chan_px,
+                slice_frac,
+                scanline_enabled,
+                period_px,
+                darkness,
+                roll_px,
+                interlace,
+                mix,
+            } => {
+                tex = fx.glitch(
+                    ctx,
+                    &tex,
+                    w,
+                    h,
+                    &lumit_gpu::fx::GlitchOp {
+                        intensity: *intensity,
+                        seed: *seed,
+                        tick: *tick,
+                        block_enabled: *block_enabled,
+                        block_size_px: *block_size_px,
+                        jitter_frac: *jitter_frac,
+                        amount_px: *amount_px,
+                        chan_px: *chan_px,
+                        slice_frac: *slice_frac,
+                        scanline_enabled: *scanline_enabled,
+                        period_px: *period_px,
+                        darkness: *darkness,
+                        roll_px: *roll_px,
+                        interlace: *interlace,
                         mix: *mix,
                     },
                 );
