@@ -74,12 +74,7 @@ pub(crate) fn render_panel(
         Panel::Viewer => viewer_panel(ui, theme, app, preview_display),
         Panel::Project => project_panel(ui, theme, app),
         Panel::Timeline => timeline_panel(ui, theme, app),
-        Panel::EffectControls => empty_hint(
-            ui,
-            theme,
-            "Effect controls",
-            "For now, edit a layer's effect stack on its own row in the Timeline.",
-        ),
+        Panel::EffectControls => effect_controls_panel(ui, theme, app),
         Panel::EffectsAndPresets => effects_panel(ui, theme),
         Panel::Scopes => empty_hint(
             ui,

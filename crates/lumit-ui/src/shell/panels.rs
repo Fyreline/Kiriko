@@ -878,6 +878,78 @@ pub(crate) fn empty_hint(ui: &mut egui::Ui, theme: &Theme, title: &str, hint: &s
     });
 }
 
+/// The Effect Controls panel (docs/07-UI-SPEC §6): the selected layer's effect
+/// stack, editable, in its own dock panel. Reuses the Timeline's `effects_rows`
+/// through a panel-mode `RowCtx` — the whole panel width is the control column
+/// (`track_left` at the right edge) and `graph_mode` suppresses the lane-side
+/// keyframe painting, since a panel has no time lane. The same rows, the same
+/// ops, the same undo — just a roomier home than the Timeline row.
+pub(crate) fn effect_controls_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
+    let doc = app.store.snapshot();
+    let (Some(comp_id), Some(layer_id)) = (app.selected_comp, app.selected_layer) else {
+        empty_hint(
+            ui,
+            theme,
+            "Effect controls",
+            "Select a layer to see and edit its effect stack.",
+        );
+        return;
+    };
+    let Some(layer) = doc.comp(comp_id).and_then(|c| {
+        c.layers
+            .iter()
+            .find(|l| l.id == layer_id)
+            .map(|l| (c.frame_rate.fps().max(1.0), l))
+    }) else {
+        empty_hint(
+            ui,
+            theme,
+            "Effect controls",
+            "Select a layer to see and edit its effect stack.",
+        );
+        return;
+    };
+    let (fps, layer) = layer;
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(trim_title(&layer.name)).color(theme.text_primary));
+    });
+    ui.add_space(2.0);
+    ui.separator();
+
+    let panel = ui.max_rect();
+    let ctx = RowCtx {
+        theme,
+        comp_id,
+        layer,
+        lt: app.preview_frame as f64 / fps - layer.start_offset.0.to_f64(),
+        off: layer.start_offset.0.to_f64(),
+        fps,
+        viewport: panel,
+        // The whole panel is the control column; there is no time lane, so
+        // put its left edge at the panel's right and skip lane painting.
+        track_left: panel.right(),
+        track_w: 0.0,
+        px_per_sec: 1.0,
+        view_start: 0.0,
+        graph_mode: true,
+    };
+    let mut pending: Option<lumit_core::Op> = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .id_salt("effect-controls-scroll")
+        .show(ui, |ui| {
+            effects_rows(ui, &ctx, &mut pending);
+        });
+    if let Some(op) = pending {
+        app.commit(op);
+        #[cfg(feature = "media")]
+        app.refresh_preview();
+    }
+}
+
 /// Pixels + texture dims + natural size for any layer kind (preview path).
 #[cfg(feature = "media")]
 pub(crate) type LayerPixels = (Vec<u8>, u32, u32, (f32, f32));
