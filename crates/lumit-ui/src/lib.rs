@@ -7,6 +7,7 @@ pub mod fxops;
 pub mod icons;
 pub mod native_menu;
 pub mod pixels;
+pub mod preset;
 pub mod shell;
 pub mod splash;
 pub mod theme;

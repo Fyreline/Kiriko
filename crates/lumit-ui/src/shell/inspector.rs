@@ -1925,6 +1925,54 @@ pub(crate) fn effects_rows(ui: &mut egui::Ui, ctx: &RowCtx, pending: &mut Option
                 }
             },
         );
+        // Preset save/load (docs/07-UI-SPEC §7, K-065): save the whole stack
+        // to a `.lumfx` file, or load one and append it to this layer.
+        c.menu_button(
+            egui::RichText::new("Presets")
+                .small()
+                .color(ctx.theme.text_secondary),
+            |ui| {
+                ui.add_enabled_ui(!layer.effects.is_empty(), |ui| {
+                    if ui.button("Save stack as preset…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name(format!("effects.{}", crate::preset::PRESET_EXTENSION))
+                            .add_filter("Lumit effect preset", &[crate::preset::PRESET_EXTENSION])
+                            .save_file()
+                        {
+                            let name = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("preset")
+                                .to_owned();
+                            if let Ok(json) = crate::preset::to_json(&name, &layer.effects) {
+                                // Best-effort: a failed write leaves the
+                                // document untouched (never an edit).
+                                let _ = std::fs::write(&path, json);
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                });
+                if ui.button("Load preset…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Lumit effect preset", &[crate::preset::PRESET_EXTENSION])
+                        .pick_file()
+                    {
+                        if let Ok(preset) = std::fs::read_to_string(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|t| crate::preset::from_json(&t))
+                        {
+                            // Append the preset's effects (fresh ids) to the
+                            // stack — one undoable SetLayerEffects.
+                            let mut effects = layer.effects.clone();
+                            effects.extend(crate::preset::instantiated(&preset));
+                            *pending = Some(commit(effects));
+                        }
+                    }
+                    ui.close_menu();
+                }
+            },
+        );
     }
 
     for (idx, e) in layer.effects.iter().enumerate() {
