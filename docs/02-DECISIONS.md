@@ -682,3 +682,17 @@ future Settings window is their eventual home).
   Lumit's own menus/dropdowns, which have no animation today regardless of this setting.
 
 Spec: [15-DESIGN.md](15-DESIGN.md) §2, §7.3, §8, §11; [07-UI-SPEC.md](07-UI-SPEC.md) §15.
+
+**K-093 · DECIDED · The sub-frame position is content in the frame-cache key under a
+synthesising interpolation policy.** Fixing a real bug (owner-reported "flow only changes
+once in the middle"): `feed_source` keyed a retimed footage layer on the stamped *integer*
+source frame plus the interpolation tag, but not the sub-frame fraction. Under Blend/Flow a
+ramp from source frame N to N+1 crosses every fraction in between, each a different
+synthesised morph, yet all collapsed onto the nearest integer frame's key — so the three-tier
+cache computed one frame per integer span and held it. The key now also hashes the exact
+retimed `source_time` whenever the policy is non-Nearest (both the Footage and Sequence
+paths). Nearest still hashes nothing beyond the stamped frame, so the "Nearest keys like
+no-retime" law is untouched and pre-existing Nearest keys stay shared. No `ALGO_VERSION`
+bump: the new keys are strictly longer byte strings, so they cannot collide with the old
+buggy keys — stale entries simply stop being addressed, per the Global-Performance-Cache
+lesson.

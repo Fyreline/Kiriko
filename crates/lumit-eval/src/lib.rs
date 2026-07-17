@@ -356,13 +356,22 @@ fn feed_source(
             // A non-Nearest interpolation policy synthesises different
             // in-between pixels (blend/flow, K-088), so it is content. Nearest
             // shows exactly the stamped frame — pixel-identical to no retime —
-            // so it hashes nothing and those keys stay shared. (At an exactly
-            // integral position blend/flow also degenerate to the source
-            // frame; hashing them anyway over-segments harmlessly — a spare
-            // render, never a wrong pixel.)
+            // so it hashes nothing and those keys stay shared.
+            //
+            // The synthesised image depends on the *sub-frame position*, not
+            // just the nearest integer frame: a flow ramp from source frame 39
+            // to 40 crosses every fraction in between, and each fraction is a
+            // different morph. `stamp` returns only the integer frame, so
+            // without also hashing `source_time` every fraction across an
+            // integer span collides onto one key and the cache holds a single
+            // frame per span (K-093 — the "flow only changes once in the
+            // middle" bug). Hashing the exact retimed time keys each fraction
+            // distinctly; identical times reuse, so it never over-renders a
+            // truly repeated position.
             if let Some(r) = retime {
                 if !matches!(r.interpolation, lumit_core::retime::Interpolation::Nearest) {
                     h.update(&[interp_tag(&r.interpolation)]);
+                    feed_f64(h, source_time);
                 }
             }
         }
@@ -424,7 +433,10 @@ fn feed_source(
                             clip.interpolation,
                             lumit_core::retime::Interpolation::Nearest
                         ) {
+                            // The sub-frame position is content under blend/flow
+                            // (see the Footage case above, K-093).
                             h.update(&[interp_tag(&clip.interpolation)]);
+                            feed_f64(h, st);
                         }
                     }
                 }
@@ -1040,6 +1052,62 @@ mod tests {
         }))));
         assert_ne!(blend, half);
         assert_ne!(half, full);
+    }
+
+    /// K-093: two comp times whose retimed source lands in the *same* integer
+    /// source frame (the stamper returns the same frame index) but at
+    /// different sub-frame positions. Blend and Flow synthesise a different
+    /// in-between at each position, so their keys MUST differ — otherwise the
+    /// cache holds one frame across the whole span and flow "only changes
+    /// once in the middle". Nearest shows the one stamped frame either way,
+    /// so its keys stay shared (the "Nearest keys like no-retime" law holds).
+    #[test]
+    fn synthesising_interpolation_keys_each_sub_frame_position() {
+        use lumit_core::retime::{FlowParams, Interpolation, Retime};
+        use lumit_core::time::Rational;
+        let doc = Document::new();
+        let item = Uuid::now_v7();
+        let footage = |interp: Interpolation| {
+            let mut l = text_layer("", 0.0, 10.0, 0.0);
+            let mut r = Retime::constant_speed(
+                Rational::new(10, 1).unwrap(),
+                Rational::ZERO,
+                Rational::ONE,
+            );
+            r.interpolation = interp;
+            l.kind = LayerKind::Footage {
+                item,
+                retime: Some(r),
+            };
+            comp_with(vec![l])
+        };
+        let key = |c: &Composition, t: f64| {
+            comp_frame_key(&doc, c, t, Quality::default(), &StubStamper).unwrap()
+        };
+        // Both times land in the same stamped integer frame (the stub rounds
+        // source·60; 1.000 and 1.004 both round to 60), so it is the sub-frame
+        // fraction, not the frame, that must differentiate the keys below.
+        assert_eq!(
+            StubStamper.stamp(item, 1.000).unwrap().1,
+            StubStamper.stamp(item, 1.004).unwrap().1,
+        );
+        for policy in [
+            Interpolation::Blend,
+            Interpolation::Flow(FlowParams::default()),
+        ] {
+            let c = footage(policy);
+            assert_ne!(
+                key(&c, 1.000),
+                key(&c, 1.004),
+                "a synthesising policy must key each sub-frame position distinctly"
+            );
+        }
+        let nearest = footage(Interpolation::Nearest);
+        assert_eq!(
+            key(&nearest, 1.000),
+            key(&nearest, 1.004),
+            "Nearest shows the one stamped frame — its keys stay shared"
+        );
     }
 
     /// A Sequence layer keys the active clip's source frame; a gap keys
