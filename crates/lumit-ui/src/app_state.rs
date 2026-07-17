@@ -564,6 +564,17 @@ pub struct CompDialog {
     pub pending_item: Option<Uuid>,
 }
 
+/// The lane guide-line mode — what the faint vertical lines mark.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TimelineGrid {
+    /// Detected beats and markers (the montage default).
+    Beats,
+    /// The time grid: seconds, subdividing to frames as the zoom allows.
+    Time,
+    /// No guide lines.
+    Off,
+}
+
 /// Cache-bar memo key: (document snapshot ptr, cache epoch, quality tag,
 /// comp id, disk-set size) — the bar is stale iff any of these moved.
 #[cfg(feature = "media")]
@@ -901,6 +912,10 @@ pub struct AppState {
     /// speed-% (derivative) lens by default; off, to the frame-timecode lens.
     /// Session state for now — a persisted Settings home is a later refinement.
     pub vegas_default_lens: bool,
+    /// What the faint vertical guide lines through the lanes mark: detected
+    /// beats (default), the time grid (seconds, subdividing with zoom), or
+    /// nothing. Session state, like the other timeline preferences.
+    pub timeline_grid: TimelineGrid,
     /// In-flight speed-keyframe drag on the Retime channel's % lens (K-075, 2b):
     /// (keyframe index, provisional speed per cent). The retime rebuilds from the
     /// edited keyframe on release; downstream boundaries recompute (K-070).
@@ -1045,6 +1060,7 @@ impl Default for AppState {
             graph_last_fit: None,
             graph_retime: false,
             vegas_default_lens: false,
+            timeline_grid: TimelineGrid::Beats,
             graph_retime_edit: None,
             preview_comp: None,
             comp_playback: None,

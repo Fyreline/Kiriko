@@ -246,6 +246,10 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   at stay resident on the graphics card, so scrubbing back over them re-shows the exact
   texture with zero work — no upload, no colour maths. All three tiers answer to the same
   content fingerprint, so a frame is a frame wherever it lives.
+- **Timeline guide lines** — the faint vertical lines through the lanes have a mode picker
+  in the bottom bar ("Grid"): **beats** (the default — detected beats shine through every
+  layer so cuts land on the music), **time** (a neutral second grid that subdivides as you
+  zoom in, down to 10 ms), or **off**. The bright ruler ticks up top stay regardless.
 - `crates/lumit-ui/src/export.rs` — **writing video files.** Every frame of a comp is
   rendered through the *exact same* colour engine and compositor the Viewer uses, then
   compressed to an .mp4. Using one shared path isn't laziness — it's the design's central

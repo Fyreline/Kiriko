@@ -262,6 +262,21 @@ fn text_field(
     (resp, buf)
 }
 
+/// The time-grid step (seconds) for a zoom level: the largest step from the
+/// editing-friendly ladder that keeps gridlines at least ~70 px apart, down
+/// to 10 ms when zoomed right in.
+fn time_grid_step(px_per_sec: f64) -> f64 {
+    const LADDER: [f64; 12] = [
+        0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 300.0,
+    ];
+    for step in LADDER {
+        if step * px_per_sec >= 70.0 {
+            return step;
+        }
+    }
+    600.0
+}
+
 /// Short label for a speed-ramp ease.
 fn ease_label(e: lumit_core::retime::Ease) -> &'static str {
     use lumit_core::retime::Ease;
@@ -2380,25 +2395,54 @@ fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppState) {
     ui.set_clip_rect(saved_clip.intersect(lane_area));
     // Vertical separator + drag handle: resizes the left column (Mack).
     let sep_bottom = ui.cursor().top();
-    // Faint marker guide lines through the track rows, so beats line up across
-    // every layer and the waveform (the ruler carries the bright ticks). Lanes
+    // Faint vertical guide lines through the track rows — beats by default so
+    // cuts line up across every layer and the waveform, or the time grid
+    // (seconds, subdividing with zoom), per the bottom-bar Grid pick. Lanes
     // view only: the graph draws its own grid over that area.
     if !app.timeline_graph_mode {
-        for m in &comp.markers {
-            let x = x_of(m.time.0.to_f64());
-            if x < track_left - 1.0 || x > track_left + track_w + 1.0 {
-                continue;
-            }
-            let a = match m.kind {
-                lumit_core::markers::MarkerKind::Beat { confidence } => {
-                    0.10 + 0.15 * confidence.clamp(0.0, 1.0)
+        match app.timeline_grid {
+            crate::app_state::TimelineGrid::Beats => {
+                for m in &comp.markers {
+                    let x = x_of(m.time.0.to_f64());
+                    if x < track_left - 1.0 || x > track_left + track_w + 1.0 {
+                        continue;
+                    }
+                    let a = match m.kind {
+                        lumit_core::markers::MarkerKind::Beat { confidence } => {
+                            0.10 + 0.15 * confidence.clamp(0.0, 1.0)
+                        }
+                        _ => 0.4,
+                    };
+                    ui.painter().line_segment(
+                        [egui::pos2(x, rows_top), egui::pos2(x, sep_bottom)],
+                        egui::Stroke::new(1.0_f32, theme.accent.gamma_multiply(a)),
+                    );
                 }
-                _ => 0.4,
-            };
-            ui.painter().line_segment(
-                [egui::pos2(x, rows_top), egui::pos2(x, sep_bottom)],
-                egui::Stroke::new(1.0_f32, theme.accent.gamma_multiply(a)),
-            );
+            }
+            crate::app_state::TimelineGrid::Time => {
+                // Neutral gridlines at the largest step under ~70 px, whole
+                // seconds a touch stronger than their subdivisions.
+                let step = time_grid_step(px_per_sec);
+                let view_end = view_start + track_w as f64 / px_per_sec.max(1e-6);
+                let mut k = (view_start / step).floor().max(0.0) as u64;
+                loop {
+                    let t = k as f64 * step;
+                    if t > view_end || t > comp.duration.0.to_f64() {
+                        break;
+                    }
+                    let x = x_of(t);
+                    if x >= track_left - 1.0 && x <= track_left + track_w + 1.0 {
+                        let whole = (t - t.round()).abs() < step * 0.25;
+                        let a = if whole { 0.5 } else { 0.25 };
+                        ui.painter().line_segment(
+                            [egui::pos2(x, rows_top), egui::pos2(x, sep_bottom)],
+                            egui::Stroke::new(1.0_f32, theme.hairline_strong.gamma_multiply(a)),
+                        );
+                    }
+                    k += 1;
+                }
+            }
+            crate::app_state::TimelineGrid::Off => {}
         }
     }
     let sep_x = track_left - 4.0;
@@ -2604,6 +2648,29 @@ fn timeline_bottom_bar(
                 .small()
                 .color(theme.text_muted),
         );
+    }
+
+    // Guide-line mode for the lanes (owner request): beats, the time grid, or
+    // nothing. Lives with the zoom cluster since both are about reading time.
+    {
+        use crate::app_state::TimelineGrid;
+        let label = match app.timeline_grid {
+            TimelineGrid::Beats => "Grid: beats",
+            TimelineGrid::Time => "Grid: time",
+            TimelineGrid::Off => "Grid: off",
+        };
+        zc.menu_button(egui::RichText::new(label).small(), |ui| {
+            for (mode, name) in [
+                (TimelineGrid::Beats, "Beats"),
+                (TimelineGrid::Time, "Time (seconds and subdivisions)"),
+                (TimelineGrid::Off, "Off"),
+            ] {
+                if ui.radio(app.timeline_grid == mode, name).clicked() {
+                    app.timeline_grid = mode;
+                    ui.close_menu();
+                }
+            }
+        });
     }
 
     // The value/speed lens toggle (graph mode only): one lens shared by every
@@ -10156,6 +10223,20 @@ mod dock_tests {
             )),
             KeyShape::Square
         );
+    }
+
+    // The time grid subdivides with zoom: gridlines never crowd under ~70 px,
+    // and zooming in walks the ladder down to 10 ms.
+    #[test]
+    fn time_grid_step_follows_the_zoom() {
+        assert_eq!(time_grid_step(10.0), 10.0); // zoomed out: 10 s lines
+        assert_eq!(time_grid_step(80.0), 1.0); // ~normal: whole seconds
+        assert_eq!(time_grid_step(300.0), 0.25); // zoomed: quarter seconds
+        assert_eq!(time_grid_step(10_000.0), 0.01); // way in: 10 ms
+                                                    // Never denser than ~70 px between lines.
+        for pps in [10.0, 80.0, 300.0, 10_000.0] {
+            assert!(time_grid_step(pps) * pps >= 70.0 || time_grid_step(pps) == 0.01);
+        }
     }
 
     // The linked scale control keeps the x:y ratio (K-072).
