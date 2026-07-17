@@ -304,7 +304,7 @@ Variable-width feather is post-v1; the model reserves per-vertex feather data.
 ```rust
 struct EffectInstance {
     id: Uuid,
-    effect: EffectKey,        // { namespace: Builtin|Ofx|Kfx|Placeholder, match_name, version }
+    effect: EffectKey,        // { namespace: Builtin|Ofx|Lfx|Placeholder, match_name, version }
     enabled: bool,
     params: PropertyGroup,    // declared by the effect; all animatable, expression-visible
 }

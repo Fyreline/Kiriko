@@ -36,7 +36,8 @@ effect's maths in a release invalidates stale cached frames rather than mixing g
 
 - **Names** are sentence case in the UI, stable snake_case identifiers in the schema.
 - **Ranges** declare a slider range and a hard range; sliders MAY be exceeded by typing,
-  hard ranges MUST NOT be.
+  hard ranges MUST NOT be. Hard ranges MAY be one-sided (K-090): a threshold clamps at
+  zero below and is unbounded above where that is the honest shape of the parameter.
 - **Defaults** MUST produce a visible, tasteful result on typical 1080p60 game footage —
   the "drop it on and it already looks right" rule. An effect whose default state is a
   no-op is a bug unless the effect is inherently trigger-driven (Flash, Shake in
@@ -145,15 +146,19 @@ the boundary frame, matching Overrun semantics in [04-RETIMING.md](04-RETIMING.m
 
 ## 3. Tier 1 — the montage staples (v1)
 
-The in-box replacements for the scene's paid stack. Summary:
+The in-box replacements for the scene's paid stack. Two shape rules (K-090): an effect
+does **one thing** (multi-purpose designs split; an all-in-one grading suite may exist
+later as a deliberate exception), and every schema declares a **category** — Blur &
+sharpen, Colour, Distortion, Stylise, Temporal, Utility — which is how the Add-effect
+menu groups. The flow engine is **not** in this list: it is a per-layer option (K-088),
+specified in §3.1's original text but surfaced as layer UI, not an effect. Summary:
 
 | # | Effect | Replaces | Cost | Temporal window |
 |---|---|---|---|---|
-| 3.1 | Flow engine (retime interpolation) | Twixtor | heavy | `{-1, 0, +1}` source |
 | 3.2 | Motion blur (flow) | RSMB | heavy | `{-1, 0, +1}` |
 | 3.3 | Glow | Deep Glow | moderate | `{0}` |
 | 3.4 | Shake | Sapphire S_Shake | cheap | `{0}` |
-| 3.5 | Smooth zoom | Transform presets / S_WarpTransform | cheap | `{0}` |
+| 3.5 | Transform | AE's Transform effect | trivial | `{0}` |
 | 3.6 | RGB split | stock CC pack fillers | cheap | `{0}` |
 | 3.7 | Flash | strobe presets | trivial | `{0}` |
 | 3.8 | Blur (gaussian / directional / radial) | stock AE trio | moderate | `{0}` |
@@ -164,6 +169,12 @@ The in-box replacements for the scene's paid stack. Summary:
 | 3.13 | Echo | stock Echo / speed-lines packs | moderate | `{-n..0}` |
 
 ### 3.1 Flow engine — optical-flow retime interpolation (Twixtor-class)
+
+**K-088: not an effect.** Everything below stands as the engine specification, but flow is
+surfaced as a **layer option**: a toggle in the footage layer's switch cluster, a **Flow**
+group beside Transform and Effects carrying these parameters, engaging only when the
+footage's rate (through any retime) undershoots the composition's — when a source frame
+would otherwise hold across two or more comp frames.
 
 Not a stack effect: the flow engine is the shared module behind the **flow** frame
 interpolation mode of Retime ([04-RETIMING.md](04-RETIMING.md)) and the Motion blur effect
@@ -299,23 +310,20 @@ naturally (the S_Shake feature wiggle expressions never had). Edge policy: the r
 reveals area outside the layer; options Repeat edge / Mirror / Transparent / Auto-scale
 (scales up by max amplitude so no edges ever show — the montage default).
 
-### 3.5 Smooth zoom — eased punch-in presets
+### 3.5 Transform — the transform properties as an effect (K-090)
 
-Parameterised scale-and-position moves so a punch-in is one effect instance, not four
-hand-eased keyframes.
-
-**Parameters:** Zoom amount (100–400%, default 130%), Centre (2D point), Direction
-(In / Out / In-out), Duration (frames or beats), Ease preset (enum of the scene's staple
-curves: Smooth, Snap, Overshoot, Bounce — each a fixed bezier pair), Directional blur
-(0–100%, adds blur along the zoom direction proportional to instantaneous zoom speed),
-Trigger (marker-trigger or keyframe, as §3.4).
-
-**Algorithm sketch.** Evaluate the ease curve for progress p, apply an affine
-scale-about-centre with high-quality (bicubic) sampling; optional radial-direction blur
-weighted by dp/dt. Multiple instances stack for compound moves. This effect writes no
-keyframes — it is fully parametric, so beat-retimed edits keep their zooms aligned.
+Position, Anchor, Scale, Rotation, Opacity — the layer transform group, as a stack entry.
+Its point is adjustment layers: applied there, it transforms the composite of everything
+below, which is the montage punch-in/whip gesture without touching per-layer transforms.
+Parameters mirror the transform group exactly (same names, units, animatability); an
+additional Skew pair arrives post-v1. Cost `trivial`, ROI `exact` under pure translation
+and `full-frame` otherwise, `{0}` temporal.
 
 ### 3.6 RGB split — chromatic aberration
+
+**Quality (K-090):** a `Wavelength` Bool (default off) switches from the three-channel
+split to a wavelength-weighted dispersion (more samples across the visible spectrum,
+recombined in linear) for the higher-quality look; parameters are shared between modes.
 
 **Parameters:** Amount (0–10 % diag, default 0.4), Mode (Linear / Radial), Angle (degrees,
 linear mode), Centre (radial mode), Falloff (radial: 0–4, aberration grows toward edges),

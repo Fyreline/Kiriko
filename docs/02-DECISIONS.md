@@ -606,3 +606,36 @@ brand asset filenames, and the GitHub repository (`luminalmvm/Luminal` → `lumi
 old URLs redirect). Explicitly retained from K-083: the subsystem names **Nova** / **Nebula** /
 **Pulsar**, and the `.lum` project extension (it reads even better for Lumit). Historical
 records (this log's earlier entries, `docs/research/`) keep their era's names verbatim.
+
+**K-088 · DECIDED · Flow is a per-layer option, not an effect.** From the owner (2026-07-18).
+docs/08 §3.1 placed the flow engine (retime interpolation) in the effect tier list; the owner
+reverses that: flow is a property of how a footage layer *samples its source*, so it becomes a
+**layer option** — a toggle in the layer's switch cluster, and when enabled, a **Flow** group
+beside Transform and Effects in the expanded layer carrying its parameters (quality, and the
+knobs 08 §3.1 already specifies). It engages only when it can help: when the footage's frame
+rate (through any retime) is lower than the composition's, i.e. when the same source frame
+would otherwise repeat across two or more comp frames. The frame-interpolation *policy*
+storage (Retime.interpolation) remains the underlying model; the option surfaces it. The
+"Flow" name stays pending a better one the owner may pick.
+
+**K-089 · DECIDED · The native plugin API is LFX (was KFX).** From the owner (2026-07-18),
+following K-087: Kiriko's initial is gone from the app, so it goes from the plugin API too.
+`KFX` → `LFX` in every living doc, `EffectNamespace::Kfx` → `Lfx`, the future host crate
+`lumit-kfx` → `lumit-lfx`. Historical entries keep the old name.
+
+**K-090 · DECIDED · Effects do one thing; the menu is categorised; ranges may be one-sided.**
+From the owner (2026-07-18), amending docs/08:
+- **One effect, one job.** Multi-purpose effects split (the v1 Grade becomes separate colour
+  effects); an all-in-one Lumetri-style grading suite MAY exist later as a deliberate
+  exception, but singleness is the default shape.
+- **The Add-effect menu groups by category** (Blur & sharpen, Colour, Distortion, Stylise,
+  Temporal, Utility) — schemas carry a category.
+- **Hard ranges may be one-sided** (§1.2 amendment): a parameter like a glow threshold clamps
+  at zero below and is unbounded above.
+- **Quality tiers where physical accuracy is optional**: chromatic aberration gains a
+  wavelength-based mode behind a Bool beside its simple RGB-split mode (§3.6); the same
+  pattern is welcome elsewhere.
+- **Smooth zoom (§3.5) is dropped**; in its place a **Transform effect** — the transform
+  properties as an effect — so an adjustment layer can transform everything below it.
+- Per-effect bypass next to the name in the effects UI is confirmed as required (§1.5 already
+  specifies it; the implementation carries it).

@@ -1,7 +1,7 @@
 # Plugins, scripting, and expressions
 
 **Status: canonical.** This document specifies Lumit's extensibility surfaces: the OFX
-host (K-061), the KFX native plugin API (K-062), and the expression/scripting runtime
+host (K-061), the LFX native plugin API (K-062), and the expression/scripting runtime
 (K-063) — see [02-DECISIONS.md](02-DECISIONS.md). Terminology follows
 [01-GLOSSARY.md](01-GLOSSARY.md) exactly. RFC-2119 keywords (MUST, SHOULD, MAY) are
 binding. Process/thread architecture context: [05-ARCHITECTURE.md](05-ARCHITECTURE.md) §7;
@@ -31,7 +31,7 @@ Two non-negotiables:
    parameters sit in the Timeline and graph editor exactly like a built-in's, and
    expressions can read them.
 
-To the user there is one concept: **Effect**. Built-in, OFX, and KFX effects all appear in
+To the user there is one concept: **Effect**. Built-in, OFX, and LFX effects all appear in
 Effects & Presets, apply the same way, and stack in the same effect stack
 ([01-GLOSSARY.md](01-GLOSSARY.md) §6).
 
@@ -101,7 +101,7 @@ The main process runs a thin proxy node in the evaluation graph.
 - **Frame plane**: frames cross via **shared memory** — the host writes input frames into a
   shared ring, the plugin renders into shared output buffers; no per-frame copies through
   the pipe. A **shared-texture fast path** (DXGI shared handles on Windows, IOSurface on
-  macOS) is the later optimisation for GPU-rendering plugins, reusing the KFX transport
+  macOS) is the later optimisation for GPU-rendering plugins, reusing the LFX transport
   (§3.5).
 - **Watchdog policy**: every plugin call carries a deadline (default 10 s for `render`,
   2 s for control actions; configurable per plugin in the quirks table). A missed deadline
@@ -114,11 +114,11 @@ The main process runs a thin proxy node in the evaluation graph.
 - **Multi-frame scheduling (K-066)**: OFX plugins cannot be forced to be
   frame-parallel, so the host schedules from each plugin's declared
   `kOfxImageEffectPluginRenderThreadSafety`: *fully safe* → frames render in parallel
-  across pooled instances (same adaptive-concurrency policy as KFX §3.4); *instance safe*
+  across pooled instances (same adaptive-concurrency policy as LFX §3.4); *instance safe*
   → parallel across instances, serialised within one; *unsafe* → bundle-serialised. Depth:
   the host offers fp32 (all major OFX plugins accept it) and converts fp16 comps at the
   boundary — the depth guarantee of K-066 is delivered by the host here, by the plugin in
-  KFX.
+  LFX.
 
 ### 2.4 GPU rendering
 
@@ -158,12 +158,12 @@ to built-ins apart from a small provenance tag in the effect's context menu.
 
 ---
 
-## 3. KFX: the native plugin API
+## 3. LFX: the native plugin API
 
-KFX is the first-party API — for effects that want what OFX cannot offer: Lumit-native
+LFX is the first-party API — for effects that want what OFX cannot offer: Lumit-native
 UI richness, host motion vectors, the fp16 working format without conversion, first-class
-temporal access, and a modern, typed, sandbox-first contract. KFX competes with OFX only
-where OFX is weak; it does not try to out-standard the standard. Host side: `lumit-kfx`,
+temporal access, and a modern, typed, sandbox-first contract. LFX competes with OFX only
+where OFX is weak; it does not try to out-standard the standard. Host side: `lumit-lfx`,
 sharing the sandbox/IPC substrate with `lumit-ofx`.
 
 ### 3.1 Shape: CLAP-shaped C ABI
@@ -177,7 +177,7 @@ The design copies what CLAP got right and what OFX got wrong:
 - **Everything else is an extension**: a named, versioned, **typed struct of function
   pointers** queried at runtime — `host->get_extension("kfx.gpu-frames", 1)`,
   `plugin->get_extension("kfx.temporal", 1)`. No stringly-typed property soup: OFX's
-  untyped get/set on string keys is the single design mistake KFX most deliberately
+  untyped get/set on string keys is the single design mistake LFX most deliberately
   avoids. Planned first extensions: `kfx.temporal` (frames-needed declarations + fetching
   input frames at other times), `kfx.gpu-frames` (shared-texture I/O), `kfx.overlay`
   (Viewer interaction/drawing), `kfx.motion-vectors` (host-computed optical flow, the
@@ -200,7 +200,7 @@ values are the only truth. This is the one OFX idea kept whole, minus the string
 
 - Frames are **scene-linear, premultiplied alpha, RGBA float** — the working space, no
   colour conversion at the boundary ([06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md)).
-- **Every colour depth is mandatory (K-066)**: a KFX plugin MUST process both fp16 and
+- **Every colour depth is mandatory (K-066)**: a LFX plugin MUST process both fp16 and
   fp32 frames correctly — the host sends whichever the comp is set to (K-026) and never
   converts to accommodate a plugin. A plugin MAY declare a preferred depth as a
   performance hint only. The validator (§3.6) runs the conformance suite at both depths.
@@ -240,7 +240,7 @@ governor pressure). Plugins get no say at render time; they declare, the host op
 
 ### 3.5 Sandbox and transport
 
-KFX plugins run **out of process, always** — there is no in-process "trusted" mode in v1
+LFX plugins run **out of process, always** — there is no in-process "trusted" mode in v1
 (one fewer code path, and the crash-isolation promise stays unconditional; measure before
 ever adding one). Same server-process model, watchdog, and restart policy as OFX (§2.3).
 
@@ -259,7 +259,7 @@ ever adding one). Same server-process model, watchdog, and restart policy as OFX
   semver; host and plugin exchange supported extension lists at load and MUST degrade
   gracefully when an extension is absent (a plugin requiring a missing extension fails to
   instantiate with a clear message and becomes a placeholder).
-- **Deliverables shipped with the first KFX release**: MIT-licensed headers (deliberately
+- **Deliverables shipped with the first LFX release**: MIT-licensed headers (deliberately
   more permissive than Lumit's GPLv3 so proprietary vendors can adopt without licence
   anxiety), a **`kfx-validator` CLI** (loads a plugin, exercises lifecycle/threading/ROI
   contracts, fuzzes parameter edges, checks the threading annotations under a stress
@@ -270,7 +270,7 @@ ever adding one). Same server-process model, watchdog, and restart policy as OFX
 
 ### 3.7 Presentation
 
-KFX effects appear in Effects & Presets identically to built-ins: same categories, same
+LFX effects appear in Effects & Presets identically to built-ins: same categories, same
 search, same apply gestures, same Effect Controls layout rules
 ([07-UI-SPEC.md](07-UI-SPEC.md)), same preset save/load (K-065). No plugin ghetto.
 
@@ -301,7 +301,7 @@ The v1 surface — the montage-expression core. Names and semantics match AE exa
 | Area | Provided |
 |---|---|
 | Globals | `time` (comp time, seconds), `value`, `thisComp`, `thisLayer`, `thisProperty`, `comp("name")` |
-| Property access | read-only graph traversal: `thisComp.layer("x").transform.position`, `effect("name")("param")` — including OFX/KFX plugin parameters (§2.2, §3.2) |
+| Property access | read-only graph traversal: `thisComp.layer("x").transform.position`, `effect("name")("param")` — including OFX/LFX plugin parameters (§2.2, §3.2) |
 | Property methods | `valueAtTime(t)`, `numKeys`, `key(i)` (`.time`/`.value`/`.index`), `nearestKey(t)`, `speedAtTime(t)` |
 | Randomness | `wiggle(freq, amp, octaves, amp_mult, t)`, `seedRandom(seed, timeless)`, `random(...)`, `gaussRandom(...)`, `noise(...)` — all seeded-deterministic (§4.3) |
 | Loops | `loopIn`/`loopOut` (`"cycle"`, `"pingpong"`, `"offset"`, `"continue"`), `loopInDuration`/`loopOutDuration` |
@@ -377,7 +377,7 @@ Boundaries:
   wrong number slowly, once, then get disabled. Project files cannot smuggle capability:
   there is no API to reach the filesystem, network, or other processes from expression
   context at all.
-- **Plugins (OFX and KFX)**: process isolation is the primary boundary — a plugin process
+- **Plugins (OFX and LFX)**: process isolation is the primary boundary — a plugin process
   owns no project data beyond the frames and parameter values sent to it, and its death is
   routine (§2.3). The plugin server process SHOULD run with reduced privilege: on Windows a
   restricted token / job object with no network by default; the exact mitigation set
@@ -409,7 +409,7 @@ Boundaries:
 - **OFX Message suite UX**: plugin-raised dialogs and progress from an out-of-process
   server need a policy (marshal to the UI thread; do modal vendor dialogs get shown, calm
   toast instead?). Decide with [07-UI-SPEC.md](07-UI-SPEC.md).
-- **KFX curve/path parameter kind**: shape-warping effects want a bezier path parameter;
+- **LFX curve/path parameter kind**: shape-warping effects want a bezier path parameter;
   does v1 of the parameter set include paths, or does that wait for the `kfx.overlay`
   extension where on-Viewer editing makes them usable?
 - **Expression editor scope**: inline editor per property is assumed in

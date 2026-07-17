@@ -418,7 +418,7 @@ Shows the **effect stack** of the selected layer (tab per recently viewed layer,
   swatches** opening a picker with an eyedropper that samples the Viewer; **angle dials**;
   **point parameters** with a crosshair button that arms a click-in-Viewer pick (and a
   draggable on-Viewer handle while the effect is selected); dropdowns; checkboxes; curves
-  where an effect defines one. OFX and KFX parameter types map onto these same widgets
+  where an effect defines one. OFX and LFX parameter types map onto these same widgets
   ([12-PLUGINS.md](12-PLUGINS.md)).
 - Every animatable parameter carries the stopwatch and expression toggle inline, mirroring
   the Timeline lanes — the two surfaces edit the same properties.
@@ -431,7 +431,7 @@ Shows the **effect stack** of the selected layer (tab per recently viewed layer,
 ## 7. Effects & Presets
 
 - A searchable tree: **built-in effects** by category ([08-EFFECTS.md](08-EFFECTS.md)),
-  **OFX** and **KFX** plugins (labelled with their origin), **user presets**, and imported
+  **OFX** and **LFX** plugins (labelled with their origin), **user presets**, and imported
   preset packs.
 - Search is fuzzy, matches names and categories, and filters the tree live. `Ctrl+F`
   focuses search when the panel has focus.
@@ -545,7 +545,7 @@ Export window. Export never blocks editing; the queue runs in the background.
 - Arrow keys navigate, `Enter` executes, `Esc` closes; the palette MUST be fully
   keyboard-operable and MUST show category badges so an effect is never mistaken for a
   command.
-- Recently used entries rank first. Plugins (KFX) MAY contribute commands.
+- Recently used entries rank first. Plugins (LFX) MAY contribute commands.
 - The palette doubles as the discoverability layer: any command a user cannot find in the
   menus is one palette search away, with its shortcut taught in the result row.
 

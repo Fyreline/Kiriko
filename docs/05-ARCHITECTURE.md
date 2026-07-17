@@ -28,7 +28,7 @@ engine/media — mechanically enforceable rather than aspirational.
 | `lumit-cache` | **Nebula** (K-083): the three-tier cache (VRAM/RAM/disk), content-hash keys, budget accounting, eviction, the resource governor. |
 | `lumit-expr` | QuickJS-ng embedding for expressions (K-063): deterministic runtime, AE-surface library, per-property sandboxing. |
 | `lumit-ofx` | OFX host: out-of-process plugin server, C ABI boundary, shared-memory/shared-texture frame transport. |
-| `lumit-kfx` | KFX host (K-062). Shares the sandbox/IPC substrate with `lumit-ofx`. |
+| `lumit-lfx` | LFX host (K-062). Shares the sandbox/IPC substrate with `lumit-ofx`. |
 | `lumit-project` | Serialisation: `.lum` container read/write, operation journal, autosave, relink, migrations. Spec: [10-FILE-FORMAT.md](10-FILE-FORMAT.md). |
 | `lumit-ui` | The egui shell: a tiling dock (egui_tiles, K-074) with a bare Viewer, timeline/graph-editor/Viewer widgets, theming per [15-DESIGN.md](15-DESIGN.md). |
 | `lumit-app` | The binary: winit event loop, wiring, session lifecycle, crash handler. |
@@ -223,7 +223,7 @@ server) so the binding choice stays swappable.
 
 ## 7. Plugin isolation
 
-First-party effects are trusted, in-process, GPU-native. **Third-party OFX and KFX effects
+First-party effects are trusted, in-process, GPU-native. **Third-party OFX and LFX effects
 run out-of-process** — in-process plugins are the number-one crash source in every host
 Lumit is replacing, and "never crashes" cannot be delegated to third parties.
 

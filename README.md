@@ -31,7 +31,7 @@ beat-sync covenant, and the genre's staple effects in the box. The full pitch:
 | [09-AUDIO](docs/09-AUDIO.md) | v1 sync toolkit; the future Composer |
 | [10-FILE-FORMAT](docs/10-FILE-FORMAT.md) | The .lum container, sidecar caches, autosave |
 | [11-AE-IMPORT](docs/11-AE-IMPORT.md) | After Effects project import and the fidelity matrix |
-| [12-PLUGINS](docs/12-PLUGINS.md) | OFX hosting, the KFX native API, expressions |
+| [12-PLUGINS](docs/12-PLUGINS.md) | OFX hosting, the LFX native API, expressions |
 | [13-PERFORMANCE-RULES](docs/13-PERFORMANCE-RULES.md) | Budgets, resource governor, degradation ladder |
 | [14-ENGINEERING-RULES](docs/14-ENGINEERING-RULES.md) | Binding rules for all code |
 | [15-DESIGN](docs/15-DESIGN.md) | Dark-first Aizome design language |

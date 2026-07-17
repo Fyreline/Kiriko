@@ -185,7 +185,7 @@ fn feed_layer(
             h.update(&[match e.effect.namespace {
                 lumit_core::model::EffectNamespace::Builtin => 0,
                 lumit_core::model::EffectNamespace::Ofx => 1,
-                lumit_core::model::EffectNamespace::Kfx => 2,
+                lumit_core::model::EffectNamespace::Lfx => 2,
                 lumit_core::model::EffectNamespace::Placeholder => 3,
             }]);
             h.update(e.effect.match_name.as_bytes());

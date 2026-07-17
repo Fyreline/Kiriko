@@ -74,7 +74,7 @@ session leaks no memory and never crashes. **This gate is v1.0.**
 
 Expressions (QuickJS-ng, AE surface subset per [12-PLUGINS.md](12-PLUGINS.md)); the OFX host
 (out-of-process, CPU rendering first) proven against Twixtor, RSMB, and Sapphire demos; the
-KFX C ABI, validator, and template repo; the AE Bridge exporter panel and Lumit-side
+LFX C ABI, validator, and template repo; the AE Bridge exporter panel and Lumit-side
 importer with the fidelity report ([11-AE-IMPORT.md](11-AE-IMPORT.md)); best-effort `.aep`
 structural import.
 

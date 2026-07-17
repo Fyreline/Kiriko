@@ -123,7 +123,7 @@ These three words are **not interchangeable**.
 | **Mask** | A bezier path on a layer that gates its alpha, with feather, expansion, opacity, and a combine mode. |
 | **Matte** | Using another layer's alpha or luma to gate this layer. Any layer can be chosen as a matte from a dropdown (AE 2023-style); one matte layer can serve many layers. *Track matte* is the AE name; Lumit says **matte**. |
 | **Blend mode** | Per-layer composite operator (Normal, Add, Screen, Multiply, Overlay, …). Full list in [06-RENDER-PIPELINE.md](06-RENDER-PIPELINE.md). |
-| **Effect** | One image (or audio) operation instance in a layer's **effect stack**, ordered top-to-bottom. Built-in effects, OFX plugins, and KFX plugins are all "effects" to the user. |
+| **Effect** | One image (or audio) operation instance in a layer's **effect stack**, ordered top-to-bottom. Built-in effects, OFX plugins, and LFX plugins are all "effects" to the user. |
 | **Working space** | The engine's internal pixel format: scene-linear, premultiplied alpha, fp16 (fp32 opt-in per comp). |
 
 ## 7. Interface
@@ -143,7 +143,7 @@ These three words are **not interchangeable**.
 
 | Term | Definition |
 |---|---|
-| **KFX** | Lumit's native plugin API: stable C ABI, sandboxed out-of-process execution. See [12-PLUGINS.md](12-PLUGINS.md). |
+| **LFX** | Lumit's native plugin API: stable C ABI, sandboxed out-of-process execution. See [12-PLUGINS.md](12-PLUGINS.md). |
 | **OFX** | The OpenFX standard; Lumit is an OFX host, which is how Twixtor, RSMB, Sapphire et al. run. |
 | **Preset** | A saved, shareable configuration of effects/properties/animations, importable per layer. |
 

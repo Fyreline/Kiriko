@@ -209,8 +209,8 @@ pub enum EffectNamespace {
     Builtin,
     /// An OpenFX plugin (docs/12-PLUGINS.md).
     Ofx,
-    /// A native KFX plugin (docs/12-PLUGINS.md).
-    Kfx,
+    /// A native LFX plugin (docs/12-PLUGINS.md).
+    Lfx,
     /// Unknown to this build (AE import or missing plugin): renders as
     /// identity with a badge, round-trips untouched.
     Placeholder,
