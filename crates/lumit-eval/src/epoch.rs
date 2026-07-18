@@ -94,6 +94,30 @@ mod tests {
     /// The impl-note cancellation-latency drill: a deliberately slow job
     /// checking its token at working granularity stops within 15 ms of the
     /// bump (docs/impl/playback-scheduler.md test plan #1).
+    ///
+    /// The per-step "work" is a busy-spin timed off `Instant`, not
+    /// `thread::sleep`. This was flaky on Windows when it used
+    /// `sleep(Duration::from_millis(1))` per step: Windows' OS timer/sleep
+    /// granularity is coarser than 1 ms unless something has raised the
+    /// process's timer resolution, so a requested 1 ms sleep can itself
+    /// overshoot by up to a whole scheduler tick. Instrumented runs on this
+    /// machine (which already has a fairly fine ~0.5 ms tick) showed
+    /// cancellation "latency" clustering at quantised values — ~0.5 ms,
+    /// ~1.0 ms, ~1.5 ms, occasionally ~1.75 ms — whenever the bump landed
+    /// mid-sleep, versus low-microsecond/nanosecond latency whenever it
+    /// landed while the worker was actually at a `token.check()`. That
+    /// pattern is the signature of the sleep call being the bottleneck, not
+    /// the epoch mechanism (a single relaxed atomic load): on a machine or
+    /// CI runner with the historical ~15.6 ms default Windows tick, a
+    /// single oversized sleep could by itself consume the whole 15 ms
+    /// budget, independent of how fast `Epoch`/`EpochToken` actually are.
+    /// Spinning on `Instant::now()` (backed by a high-resolution monotonic
+    /// counter, not the coarse OS sleep tick) keeps the simulated step
+    /// latency at the requested ~1 ms regardless of OS timer granularity,
+    /// while still faithfully modelling "checks the token frequently during
+    /// long-running work". The worker only ever spins for the ~30 ms until
+    /// the main thread bumps, not the full simulated 4 s, so this doesn't
+    /// meaningfully increase test cost.
     #[test]
     fn workers_stop_within_fifteen_milliseconds_of_a_bump() {
         let epoch = Epoch::new();
@@ -106,7 +130,10 @@ mod tests {
                     let _ = tx.send(Instant::now());
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(1));
+                let step_start = Instant::now();
+                while step_start.elapsed() < Duration::from_millis(1) {
+                    std::hint::spin_loop();
+                }
             }
             let _ = tx.send(Instant::now());
         });
