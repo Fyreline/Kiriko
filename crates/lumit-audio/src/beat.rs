@@ -352,6 +352,47 @@ mod tests {
     }
 
     #[test]
+    fn identical_input_gives_byte_identical_output() {
+        // docs/impl/beat-detection.md §5 item 4: no hashmap ordering, no
+        // time-seeded randomness — same buffer and params must reproduce the
+        // exact same onsets and tempo every time (the fingerprint-keyed cache
+        // this feeds relies on that).
+        let rate = 48_000;
+        let beats: Vec<f64> = (0..6).map(|i| 0.4 + i as f64 * 0.45).collect();
+        let audio = clicks(rate, &beats, 4.0);
+        let a = analyse_mono(&audio, rate, 1.5);
+        let b = analyse_mono(&audio, rate, 1.5);
+        assert_eq!(a.bpm, b.bpm);
+        assert_eq!(a.env_fps, b.env_fps);
+        assert_eq!(a.onsets, b.onsets);
+    }
+
+    #[test]
+    fn octave_preference_favours_the_70_180_band() {
+        // docs/impl/beat-detection.md §5 item 2, white-box on `estimate_bpm`:
+        // a pure periodic impulse train autocorrelates near-equally at every
+        // integer multiple of its fundamental period, so a fundamental placed
+        // *outside* 70..180 whose octave multiple falls *inside* it is a
+        // genuine tie the raw comb score can't break — only the preference
+        // term can, and it must land in-band.
+        let env_fps = 93.75f64; // matches window_hop's ~10.7 ms hop at 48 kHz
+        let fundamental_bpm = 184.0f64; // just above the band; its half, 92, is inside it
+        let period_frames = (env_fps * 60.0 / fundamental_bpm).round() as usize;
+        let n_frames = period_frames * 40; // long train, edge effects small
+        let mut env = vec![0f32; n_frames];
+        let mut i = 0usize;
+        while i < n_frames {
+            env[i] = 1.0;
+            i += period_frames;
+        }
+        let bpm = estimate_bpm(&env, env_fps);
+        assert!(
+            (70.0..=180.0).contains(&bpm),
+            "expected the estimate to resolve inside the preference band, got {bpm}"
+        );
+    }
+
+    #[test]
     fn grid_snap_aligns_jittered_onsets() {
         // Onsets a few ms off a 120 BPM grid (period 0.5 s).
         let onsets = [0.008, 0.494, 1.006, 1.997, 2.489];
