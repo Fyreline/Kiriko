@@ -1,0 +1,2854 @@
+use super::*;
+use crate::anim::{Animation, Property};
+use crate::model::{Composition, EffectInstance, EffectNamespace, EffectValue, Layer};
+
+#[test]
+fn instantiate_carries_declared_defaults() {
+    let e = instantiate("blur").unwrap();
+    assert_eq!(e.effect.match_name, "blur");
+    assert_eq!(e.effect.version, 1);
+    assert!(e.enabled);
+    assert_eq!(e.float_at("radius", 0.0), Some(1.5));
+    assert_eq!(e.float_at("mix", 0.0), Some(100.0));
+    assert!(matches!(e.param("edge"), Some(EffectValue::Choice(1))));
+    assert!(instantiate("nonsense").is_none());
+}
+
+#[test]
+fn resolve_stack_evaluates_converts_and_skips_dead_effects() {
+    let mut e = instantiate("blur").unwrap();
+    // 1.5% of a 1000px diagonal = 15px.
+    let r = resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::Blur {
+            radius_px: 15.0,
+            edge: 1,
+            mix: 1.0
+        }]
+    );
+    e.enabled = false;
+    assert!(resolve_stack(&[e.clone()], 0.0, 1000.0, 1.0, &MarkerContext::NONE).is_empty());
+    e.enabled = true;
+    e.effect.namespace = EffectNamespace::Placeholder;
+    assert!(
+        resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE).is_empty(),
+        "placeholders render as identity"
+    );
+}
+
+#[test]
+fn dof_instantiates_unset_and_resolves_its_floats() {
+    let e = instantiate("dof").unwrap();
+    assert_eq!(e.effect.match_name, "dof");
+    assert_eq!(e.effect.version, 1);
+    // A fresh depth reference is unset — the effect is a labelled no-op
+    // until a layer is picked (its run_ops depth slot is None, a
+    // passthrough), the sanctioned exception the File parameter also takes.
+    assert!(matches!(e.param("depth"), Some(EffectValue::Layer(None))));
+    assert_eq!(e.layer_ref("depth"), None);
+    assert_eq!(e.float_at("focus", 0.0), Some(0.5));
+    assert_eq!(e.float_at("range", 0.0), Some(0.1));
+    assert_eq!(e.float_at("aperture", 0.0), Some(8.0));
+    assert_eq!(e.float_at("near_aperture", 0.0), Some(8.0));
+    assert_eq!(e.float_at("far_aperture", 0.0), Some(8.0));
+    assert_eq!(e.float_at("mix", 0.0), Some(100.0));
+    // Depth invert is off by default (the historical reading).
+    assert!(matches!(
+        e.param("depth_invert"),
+        Some(EffectValue::Bool(false))
+    ));
+    // Display defaults to Rendered (the normal blurred output).
+    assert!(matches!(e.param("display"), Some(EffectValue::Choice(0))));
+
+    // resolve_stack carries only the scalars; the depth is threaded beside
+    // the op. The default Aperture master (8) is unity, so each side
+    // resolves to its Near/Far radius (8) scaled by the §2.3 preview factor
+    // (here 0.5 → 4 raster px). A `dof` always resolves to exactly one
+    // Resolved::Dof, so it stays 1:1 and in order with the depth-input list
+    // even when the depth reference is unset.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 0.5, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::Dof {
+            focus: 0.5,
+            range: 0.1,
+            near_aperture: 4.0,
+            far_aperture: 4.0,
+            depth_invert: false,
+            display: 0,
+            mix: 1.0,
+        }]
+    );
+}
+
+#[test]
+fn dof_near_far_override_and_fall_back_to_the_aperture_master() {
+    // Near/Far override the per-side radii; the Aperture master scales both
+    // about its default 8. Set Aperture 16 (master 2×), Near 10, Far 4.
+    let mut e = instantiate("dof").unwrap();
+    for p in e.params.iter_mut() {
+        match p.id.as_str() {
+            "aperture" => p.value = EffectValue::Float(Property::fixed(16.0)),
+            "near_aperture" => p.value = EffectValue::Float(Property::fixed(10.0)),
+            "far_aperture" => p.value = EffectValue::Float(Property::fixed(4.0)),
+            _ => {}
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Dof {
+            focus: 0.5,
+            range: 0.1,
+            near_aperture: 20.0, // 10 · (16/8)
+            far_aperture: 8.0,   // 4 · (16/8)
+            depth_invert: false,
+            display: 0,
+            mix: 1.0,
+        }]
+    );
+
+    // A legacy instance saved before the Near/Far pair existed has only
+    // `aperture`; both sides then fall back to it, reproducing the old
+    // symmetric single-aperture behaviour exactly.
+    let mut legacy = instantiate("dof").unwrap();
+    for p in legacy.params.iter_mut() {
+        if p.id == "aperture" {
+            p.value = EffectValue::Float(Property::fixed(12.0));
+        }
+    }
+    legacy
+        .params
+        .retain(|p| p.id != "near_aperture" && p.id != "far_aperture");
+    let r = resolve_stack(
+        std::slice::from_ref(&legacy),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Dof {
+            focus: 0.5,
+            range: 0.1,
+            near_aperture: 12.0, // 8 (default) · (12/8)
+            far_aperture: 12.0,
+            depth_invert: false,
+            display: 0,
+            mix: 1.0,
+        }]
+    );
+}
+
+#[test]
+fn layer_param_round_trips_through_serde() {
+    // A Layer parameter survives a JSON round-trip set and unset, and
+    // `layer_ref` reads back the id the caller renders as the depth pass.
+    let id = uuid::Uuid::now_v7();
+    let mut e = instantiate("dof").unwrap();
+    if let Some(p) = e.params.iter_mut().find(|p| p.id == "depth") {
+        p.value = EffectValue::Layer(Some(id));
+    }
+    let json = serde_json::to_string(&e).unwrap();
+    let back: EffectInstance = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.layer_ref("depth"), Some(id));
+
+    // The unset reference round-trips as such (a passthrough, never lost).
+    let unset = EffectValue::Layer(None);
+    let j = serde_json::to_string(&unset).unwrap();
+    assert_eq!(serde_json::from_str::<EffectValue>(&j).unwrap(), unset);
+}
+
+#[test]
+fn temporal_window_is_zero_until_a_temporal_effect_joins() {
+    // Every current built-in is single-frame (temporal &[0]), so any
+    // stack of them needs only the current frame.
+    let blur = instantiate("blur").unwrap();
+    let glow = instantiate("glow").unwrap();
+    assert_eq!(
+        stack_temporal_window(&[blur.clone(), glow.clone()], true),
+        vec![0]
+    );
+    assert!(!stack_is_temporal(&[blur.clone(), glow.clone()], true));
+    // Bypassed stack, empty stack, and a disabled effect all reduce to
+    // the current frame only.
+    assert_eq!(stack_temporal_window(&[blur.clone(), glow], false), vec![0]);
+    assert_eq!(stack_temporal_window(&[], true), vec![0]);
+    let mut off = blur.clone();
+    off.enabled = false;
+    assert_eq!(stack_temporal_window(&[off], true), vec![0]);
+    // The window always contains 0 and is sorted/deduped — pinned so a
+    // temporal effect's offsets union cleanly with the current frame.
+    assert!(stack_temporal_window(&[blur], true).contains(&0));
+}
+
+#[test]
+fn motion_blur_window_reaches_the_next_frame_and_wants_flow() {
+    // Motion blur's window is {0, 1}: the current frame and one ahead,
+    // the pair the flow engine measures motion between.
+    let mb = instantiate("motion_blur").unwrap();
+    let one = std::slice::from_ref(&mb);
+    assert_eq!(stack_temporal_window(one, true), vec![0, 1]);
+    assert!(stack_is_temporal(one, true));
+    // The flow-field gate is set by motion blur and nothing else current.
+    assert_eq!(stack_flow_neighbour(one, true), Some(1));
+    let blur = instantiate("blur").unwrap();
+    let echo = instantiate("echo").unwrap();
+    assert_eq!(stack_flow_neighbour(&[blur.clone(), echo], true), None);
+    // Bypassed by the layer fx switch, or disabled, it wants nothing.
+    assert_eq!(stack_flow_neighbour(one, false), None);
+    let mut off = mb.clone();
+    off.enabled = false;
+    assert_eq!(stack_flow_neighbour(std::slice::from_ref(&off), true), None);
+}
+
+#[test]
+fn datamosh_window_reaches_the_prior_frame_and_wants_flow() {
+    // Datamosh's window is {-1, 0}: the current frame and one behind,
+    // read statically off the schema (K-107 — no per-instance toggle,
+    // unlike the old combined Glitch's dynamic special case).
+    let dm = instantiate("datamosh").unwrap();
+    let one = std::slice::from_ref(&dm);
+    assert_eq!(stack_temporal_window(one, true), vec![-1, 0]);
+    assert!(stack_is_temporal(one, true));
+    assert_eq!(stack_flow_neighbour(one, true), Some(-1));
+
+    // A plain Block glitch stays single-frame.
+    let plain = instantiate("block_glitch").unwrap();
+    let plain_one = std::slice::from_ref(&plain);
+    assert_eq!(stack_temporal_window(plain_one, true), vec![0]);
+    assert!(!stack_is_temporal(plain_one, true));
+    assert_eq!(stack_flow_neighbour(plain_one, true), None);
+
+    // Disabled, or the layer fx switch off, Datamosh wants nothing.
+    let mut off = dm.clone();
+    off.enabled = false;
+    assert_eq!(
+        stack_temporal_window(std::slice::from_ref(&off), true),
+        vec![0]
+    );
+    assert_eq!(stack_flow_neighbour(std::slice::from_ref(&off), true), None);
+    assert_eq!(stack_flow_neighbour(one, false), None);
+}
+
+#[test]
+fn motion_blur_and_datamosh_together_the_first_in_stack_order_wins() {
+    // K-104: a layer can carry only one flow field per frame in v1: if
+    // both a live Motion blur and a live Datamosh are in the same
+    // stack, whichever comes first wins the single slot.
+    let mb = instantiate("motion_blur").unwrap();
+    let dm = instantiate("datamosh").unwrap();
+    assert_eq!(
+        stack_flow_neighbour(&[mb.clone(), dm.clone()], true),
+        Some(1)
+    );
+    assert_eq!(stack_flow_neighbour(&[dm, mb], true), Some(-1));
+}
+
+#[test]
+fn datamosh_instantiates_and_resolves() {
+    let e = instantiate("datamosh").unwrap();
+    assert_eq!(e.float_at("intensity", 0.0), Some(0.5));
+    assert_eq!(e.float_at("mix", 0.0), Some(100.0));
+
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Datamosh {
+            intensity: 0.5,
+            mix: 1.0,
+        }]
+    );
+
+    // Intensity 0 and Mix 0 both resolve cleanly (the bit-exact
+    // passthrough is enforced where the op actually runs, in lumit-gpu
+    // and lumit-ui — this pins the resolve step carries both zeros
+    // through untouched).
+    let mut zero_intensity = e.clone();
+    for p in &mut zero_intensity.params {
+        if p.id == "intensity" {
+            p.value = EffectValue::Float(Property::fixed(0.0));
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&zero_intensity),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Datamosh {
+            intensity: 0.0,
+            mix: 1.0,
+        }]
+    );
+}
+
+#[test]
+fn cpu_apply_datamosh_is_a_passthrough() {
+    // The single-buffer CPU dispatcher cannot carry a neighbour frame or
+    // a flow field, so Resolved::Datamosh degrades to a no-op here,
+    // exactly like Echo and Motion blur.
+    let (w, h) = (5u32, 5u32);
+    let img = transform_card(w, h);
+    let mut out = img.clone();
+    cpu::apply(
+        &mut out,
+        w,
+        h,
+        &Resolved::Datamosh {
+            intensity: 1.0,
+            mix: 1.0,
+        },
+    );
+    assert_eq!(out, img);
+}
+
+#[test]
+fn resolve_motion_blur_converts_shutter_and_rounds_samples() {
+    let e = instantiate("motion_blur").unwrap();
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    // Defaults: 180° → shutter_frac 0.5, 16 samples, full mix.
+    assert_eq!(
+        r,
+        vec![Resolved::MotionBlur {
+            shutter_frac: 0.5,
+            samples: 16,
+            mix: 1.0,
+        }]
+    );
+    // A custom stack: 90° halves the streak; Samples rounds and clamps.
+    let mut e = instantiate("motion_blur").unwrap();
+    for p in e.params.iter_mut() {
+        match p.id.as_str() {
+            "shutter_angle" => p.value = EffectValue::Float(Property::fixed(90.0)),
+            "samples" => p.value = EffectValue::Float(Property::fixed(8.4)),
+            "mix" => p.value = EffectValue::Float(Property::fixed(50.0)),
+            _ => {}
+        }
+    }
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::MotionBlur {
+            shutter_frac: 0.25,
+            samples: 8,
+            mix: 0.5,
+        }]
+    );
+}
+
+#[test]
+fn cpu_motion_blur_still_and_zero_shutter_are_passthrough() {
+    // A 9x9 with one bright premultiplied pixel in the middle.
+    let (w, h) = (9u32, 9u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    let mid = ((4 * w + 4) * 4) as usize;
+    img[mid..mid + 4].copy_from_slice(&[4.0, 2.0, 1.0, 1.0]);
+    let n = (w * h) as usize;
+
+    // Zero flow everywhere: every tap lands on the pixel itself, so with
+    // Mix 1 the output is the bit-exact input whatever the shutter.
+    let (zu, zv) = (vec![0.0f32; n], vec![0.0f32; n]);
+    let mut still = img.clone();
+    cpu::motion_blur(&mut still, w, h, &zu, &zv, 0.5, 16, 1.0);
+    assert_eq!(still, img, "still pixels do not blur");
+
+    // A real motion but a closed shutter (frac 0) is also identity.
+    let (mu, mv) = (vec![3.0f32; n], vec![0.0f32; n]);
+    let mut shut = img.clone();
+    cpu::motion_blur(&mut shut, w, h, &mu, &mv, 0.0, 16, 1.0);
+    assert_eq!(shut, img, "a closed shutter does not blur");
+
+    // Mix 0 returns the input exactly, whatever the motion.
+    let mut mixed = img.clone();
+    cpu::motion_blur(&mut mixed, w, h, &mu, &mv, 0.5, 16, 0.0);
+    assert_eq!(mixed, img, "mix 0 is a passthrough");
+}
+
+#[test]
+fn cpu_motion_blur_smears_along_the_flow() {
+    // A vertical edge (left half bright, right half dark) smeared by a
+    // constant horizontal flow should soften the edge along x while
+    // leaving a pixel deep inside a flat region unchanged (a box streak
+    // over constant colour is that colour) — the defining behaviour.
+    let (w, h) = (16u32, 4u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            let v = if x < w / 2 { 1.0 } else { 0.0 };
+            img[i..i + 4].copy_from_slice(&[v, v, v, 1.0]);
+        }
+    }
+    let n = (w * h) as usize;
+    let (u, vv) = (vec![8.0f32; n], vec![0.0f32; n]); // 8px horizontal
+    let mut out = img.clone();
+    cpu::motion_blur(&mut out, w, h, &u, &vv, 0.5, 16, 1.0); // streak 4px
+
+    // Indices on row 0 (a closure keeps clippy's erasing-op lint happy and
+    // reads clearly as column, row).
+    let idx = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    // A pixel far inside the bright flat region is untouched (1.0).
+    let flat = idx(2, 0);
+    assert!((out[flat] - 1.0).abs() < 1e-4, "flat interior is preserved");
+    // A pixel far inside the dark flat region stays dark.
+    let dark = idx(13, 0);
+    assert!(out[dark].abs() < 1e-4, "dark interior stays dark");
+    // The pixel just right of the edge picks up light from the bright
+    // side it was smeared across — a genuine, directional softening.
+    let edge = idx(8, 0);
+    assert!(
+        out[edge] > 0.05 && out[edge] < 0.95,
+        "the edge softens along the flow: {}",
+        out[edge]
+    );
+}
+
+#[test]
+fn cpu_datamosh_zero_intensity_is_the_bit_exact_current_frame() {
+    let (w, h) = (6u32, 4u32);
+    let n = (w * h) as usize;
+    let current: Vec<f32> = (0..n * 4).map(|i| (i % 7) as f32 * 0.1).collect();
+    let prev: Vec<f32> = (0..n * 4).map(|i| (i % 5) as f32 * 0.2).collect();
+    let (u, v) = (vec![3.0f32; n], vec![-2.0f32; n]);
+    let out = cpu::datamosh(&current, &prev, w, h, &u, &v, 0.0);
+    assert_eq!(out, current, "intensity 0 is a bit-exact passthrough");
+}
+
+#[test]
+fn cpu_datamosh_full_intensity_reads_the_shifted_previous_frame() {
+    // A single bright premultiplied pixel in `prev`; datamosh at full
+    // intensity with a flow that points straight at it should recover
+    // that pixel's colour at the sampling position, not `current`'s.
+    let (w, h) = (9u32, 9u32);
+    let n = (w * h) as usize;
+    let current = vec![0.0f32; n * 4]; // all black
+    let mut prev = vec![0.0f32; n * 4];
+    let bright = ((4 * w + 6) * 4) as usize; // (x=6, y=4)
+    prev[bright..bright + 4].copy_from_slice(&[4.0, 2.0, 1.0, 1.0]);
+    // Sample position for output pixel (4, 4) is (4 + u, 4 + v); pointing
+    // it at (6, 4) means u = 2, v = 0.
+    let mut u = vec![0.0f32; n];
+    let v = vec![0.0f32; n];
+    u[(4 * w + 4) as usize] = 2.0;
+    let out = cpu::datamosh(&current, &prev, w, h, &u, &v, 1.0);
+    let i = ((4 * w + 4) * 4) as usize;
+    assert_eq!(&out[i..i + 4], &[4.0, 2.0, 1.0, 1.0]);
+    // A pixel whose flow is zero and whose `prev` neighbourhood is dark
+    // stays dark (current is also dark there) — no bleed from elsewhere.
+    assert_eq!(&out[0..4], &[0.0, 0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn cpu_blur_identity_energy_and_mix() {
+    // A 9x9 with one bright premultiplied pixel in the middle.
+    let (w, h) = (9u32, 9u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    let mid = ((4 * w + 4) * 4) as usize;
+    img[mid..mid + 4].copy_from_slice(&[4.0, 2.0, 1.0, 1.0]); // HDR > 1
+
+    // Radius 0 is the identity.
+    let mut id = img.clone();
+    cpu::blur_gaussian(&mut id, w, h, 0.0, 1, 1.0);
+    assert_eq!(id, img);
+
+    // A blur spreads but conserves energy away from edges (repeat policy,
+    // small radius, bright pixel far from borders).
+    let mut blurred = img.clone();
+    cpu::blur_gaussian(&mut blurred, w, h, 2.0, 1, 1.0);
+    assert!(blurred[mid] < img[mid], "peak flattens");
+    let sum = |v: &[f32]| v.iter().step_by(4).sum::<f32>(); // red plane
+    assert!((sum(&blurred) - sum(&img)).abs() < 1e-3, "energy conserved");
+
+    // Mix 0 returns the input exactly, whatever the radius.
+    let mut mixed = img.clone();
+    cpu::blur_gaussian(&mut mixed, w, h, 5.0, 1, 0.0);
+    assert_eq!(mixed, img);
+
+    // Transparent edges lose energy when the kernel hangs off the border.
+    let mut corner = vec![0.0f32; (w * h * 4) as usize];
+    corner[0..4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+    let mut t = corner.clone();
+    cpu::blur_gaussian(&mut t, w, h, 3.0, 0, 1.0);
+    let mut rep = corner;
+    cpu::blur_gaussian(&mut rep, w, h, 3.0, 1, 1.0);
+    assert!(sum(&t) < sum(&rep), "transparent edge sheds energy");
+}
+
+#[test]
+fn sharpen_instantiates_and_resolves() {
+    let e = instantiate("sharpen").unwrap();
+    assert_eq!(e.float_at("amount", 0.0), Some(60.0));
+    assert_eq!(e.float_at("radius", 0.0), Some(0.4));
+    assert_eq!(e.float_at("threshold", 0.0), Some(0.05));
+    assert!(matches!(
+        e.param("luminance_only"),
+        Some(EffectValue::Bool(true))
+    ));
+    // 0.4% of a 1000px diagonal = 4px; amount 60% = 0.6.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::Sharpen {
+            amount: 0.6,
+            radius_px: 4.0,
+            threshold: 0.05,
+            luma_only: true,
+            mix: 1.0
+        }]
+    );
+}
+
+/// A step edge for sharpen tests: left half dark, right half bright,
+/// fully opaque, with an HDR right side.
+fn step_image(w: u32, h: u32) -> Vec<f32> {
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            let v = if x < w / 2 { 0.2 } else { 2.0 };
+            img[i..i + 4].copy_from_slice(&[v, v * 0.5, v * 0.25, 1.0]);
+        }
+    }
+    img
+}
+
+#[test]
+fn cpu_sharpen_identity_edge_overshoot_and_threshold() {
+    let (w, h) = (16u32, 8u32);
+    let img = step_image(w, h);
+
+    // Mix 0 is the exact identity.
+    let mut m0 = img.clone();
+    cpu::sharpen(&mut m0, w, h, 1.0, 3.0, 0.0, true, 0.0);
+    assert_eq!(m0, img);
+
+    // Amount 0 changes nothing (opaque pixels, so unpremultiply is exact).
+    let mut a0 = img.clone();
+    cpu::sharpen(&mut a0, w, h, 0.0, 3.0, 0.0, true, 1.0);
+    for (a, b) in a0.iter().zip(&img) {
+        assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+    }
+
+    // A flat region is untouched; the step edge overshoots both ways.
+    let mut s = img.clone();
+    cpu::sharpen(&mut s, w, h, 1.0, 2.0, 0.0, true, 1.0);
+    let px = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    let far = px(1, 4);
+    assert!((s[far] - img[far]).abs() < 1e-4, "flat area stays put");
+    let dark_side = px(w / 2 - 1, 4);
+    let bright_side = px(w / 2, 4);
+    assert!(s[dark_side] < img[dark_side], "dark side of edge dips");
+    assert!(s[bright_side] > img[bright_side], "bright side lifts");
+
+    // A threshold above the edge contrast suppresses the sharpening.
+    let mut t = img.clone();
+    cpu::sharpen(&mut t, w, h, 1.0, 2.0, 1.0, true, 1.0);
+    for (a, b) in t.iter().zip(&img) {
+        assert!((a - b).abs() < 1e-5, "threshold 1.0 gates the edge detail");
+    }
+
+    // Fully transparent input stays fully transparent (no invented light).
+    let mut clear = vec![0.0f32; (w * h * 4) as usize];
+    cpu::sharpen(&mut clear, w, h, 3.0, 2.0, 0.0, false, 1.0);
+    assert!(clear.iter().all(|v| *v == 0.0));
+
+    // Per-channel mode fringes where luma-only does not: on a pure
+    // chroma edge (constant luma), luma-only is inert.
+    let mut chroma = vec![0.0f32; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            // Two colours with identical Rec. 709 luma.
+            let (r, g, b) = if x < w / 2 {
+                (0.5, 0.25, 0.0)
+            } else {
+                let r = 0.1f32;
+                let b = 0.4f32;
+                let g = (0.5 * cpu::LUMA[0] + 0.25 * cpu::LUMA[1] - r * cpu::LUMA[0]
+                    + 0.0 * cpu::LUMA[2]
+                    - b * cpu::LUMA[2])
+                    / cpu::LUMA[1];
+                (r, g, b)
+            };
+            chroma[i..i + 4].copy_from_slice(&[r, g, b, 1.0]);
+        }
+    }
+    let mut luma_pass = chroma.clone();
+    cpu::sharpen(&mut luma_pass, w, h, 2.0, 2.0, 0.0, true, 1.0);
+    let mut chan_pass = chroma.clone();
+    cpu::sharpen(&mut chan_pass, w, h, 2.0, 2.0, 0.0, false, 1.0);
+    let dev = |out: &[f32]| {
+        out.iter()
+            .zip(&chroma)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max)
+    };
+    assert!(dev(&luma_pass) < 1e-4, "luma-only ignores chroma edges");
+    assert!(dev(&chan_pass) > 0.05, "per-channel mode sharpens them");
+}
+
+#[test]
+fn rgb_split_instantiates_and_resolves() {
+    let e = instantiate("rgb_split").unwrap();
+    assert_eq!(e.float_at("amount", 0.0), Some(0.4));
+    assert_eq!(e.float_at("angle", 0.0), Some(0.0));
+    assert!(matches!(e.param("radial"), Some(EffectValue::Bool(false))));
+    // 0.4% of a 1000px diagonal = 4px.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::RgbSplit {
+            amount_px: 4.0,
+            angle_deg: 0.0,
+            radial: false,
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn cpu_rgb_split_shifts_channels_and_keeps_alpha() {
+    // A white impulse in the middle of a black opaque frame.
+    let (w, h) = (17u32, 9u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for px in img.chunks_exact_mut(4) {
+        px[3] = 1.0;
+    }
+    let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    let mid = at(8, 4);
+    img[mid..mid + 3].copy_from_slice(&[1.0, 1.0, 1.0]);
+
+    // Amount 0 and mix 0 are both the exact identity.
+    let mut a0 = img.clone();
+    cpu::rgb_split(&mut a0, w, h, 0.0, 0.0, false, 1.0);
+    assert_eq!(a0, img);
+    let mut m0 = img.clone();
+    cpu::rgb_split(&mut m0, w, h, 3.0, 45.0, false, 0.0);
+    assert_eq!(m0, img);
+
+    // Angle 0°, 2px: red lands 2px right of the impulse, blue 2px left,
+    // green and alpha exactly where they were.
+    let mut s = img.clone();
+    cpu::rgb_split(&mut s, w, h, 2.0, 0.0, false, 1.0);
+    assert_eq!(s[at(10, 4)], 1.0, "red shifted +x");
+    assert_eq!(s[at(8, 4)], 0.0, "red left the impulse");
+    assert_eq!(s[at(6, 4) + 2], 1.0, "blue shifted -x");
+    assert_eq!(s[at(8, 4) + 1], 1.0, "green stays");
+    assert!(
+        s.iter().skip(3).step_by(4).all(|a| *a == 1.0),
+        "alpha follows green: untouched"
+    );
+
+    // Radial: the exact centre pixel is unmoved even at a huge amount.
+    let mut c = img.clone();
+    // Centre the impulse for the radial test (odd dimensions: the middle
+    // pixel's centre is the frame centre).
+    cpu::rgb_split(&mut c, w, h, 20.0, 0.0, true, 1.0);
+    assert_eq!(c[mid], 1.0, "frame-centre red is unmoved");
+    assert_eq!(c[mid + 2], 1.0, "frame-centre blue is unmoved");
+}
+
+#[test]
+fn rgb_split_wavelength_bool_selects_the_variant() {
+    // A fresh instance defaults to the classic split — and resolves to
+    // the exact same Resolved value it did before the Bool existed.
+    let mut e = instantiate("rgb_split").unwrap();
+    assert!(matches!(
+        e.param("wavelength"),
+        Some(EffectValue::Bool(false))
+    ));
+    let classic = Resolved::RgbSplit {
+        amount_px: 4.0,
+        angle_deg: 0.0,
+        radial: false,
+        mix: 1.0,
+    };
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(r, vec![classic]);
+
+    // Wavelength on: the same numbers arrive as SpectralSplit.
+    for p in &mut e.params {
+        if p.id == "wavelength" {
+            p.value = EffectValue::Bool(true);
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::SpectralSplit {
+            amount_px: 4.0,
+            angle_deg: 0.0,
+            radial: false,
+            mix: 1.0
+        }]
+    );
+
+    // A legacy instance (saved before the Bool existed) has no
+    // wavelength parameter and still resolves as the classic split.
+    e.params.retain(|p| p.id != "wavelength");
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(r, vec![classic]);
+}
+
+#[test]
+fn chromatic_aberration_instantiates_and_resolves() {
+    let e = instantiate("chromatic_aberration").unwrap();
+    assert_eq!(e.float_at("amount", 0.0), Some(4.0));
+    // px@comp, not % diag: diag_px does not enter the conversion, unlike
+    // rgb_split's own Amount — only the preview-resolution px_scale does.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::ChromaticAberration {
+            amount_px: 4.0,
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn chromatic_aberration_amount_scales_with_the_preview_factor() {
+    let e = instantiate("chromatic_aberration").unwrap();
+    // Half preview (px_scale 0.5): px@comp parameters scale down with
+    // it, exactly like Glitch's Block size (§2.3).
+    let r = resolve_stack(&[e], 0.0, 1000.0, 0.5, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::ChromaticAberration {
+            amount_px: 2.0,
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn cpu_chromatic_aberration_shifts_channels_radially_and_keeps_alpha() {
+    // A white impulse in the middle of a black opaque frame — the same
+    // corpus rgb_split's own radial-mode test uses.
+    let (w, h) = (17u32, 9u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for px in img.chunks_exact_mut(4) {
+        px[3] = 1.0;
+    }
+    let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    let mid = at(8, 4);
+    img[mid..mid + 3].copy_from_slice(&[1.0, 1.0, 1.0]);
+
+    // Amount 0 and mix 0 are both the exact identity (the general
+    // formula's own passthrough, mirroring rgb_split's un-guarded style).
+    let mut a0 = img.clone();
+    cpu::chromatic_aberration(&mut a0, w, h, 0.0, 1.0);
+    assert_eq!(a0, img);
+    let mut m0 = img.clone();
+    cpu::chromatic_aberration(&mut m0, w, h, 5.0, 0.0);
+    assert_eq!(m0, img);
+
+    // The exact centre pixel is unmoved even at a huge amount: its own
+    // (position − centre) vector is zero, so every tap collapses onto it.
+    let mut c = img.clone();
+    cpu::chromatic_aberration(&mut c, w, h, 20.0, 1.0);
+    assert_eq!(c[mid], 1.0, "frame-centre red is unmoved");
+    assert_eq!(c[mid + 2], 1.0, "frame-centre blue is unmoved");
+    assert_eq!(c[mid + 1], 1.0, "green untouched everywhere");
+
+    // At Amount = half the frame diagonal, k is exactly 1: every
+    // pixel's R sample point algebraically collapses onto the frame
+    // centre (`pos − (pos − centre)·1 = centre`) — and because every
+    // coordinate here is an integer or half-integer well inside f32's
+    // exact range, that cancellation is bit-exact, not approximate. So
+    // red reads the centre's own red value (the impulse, 1.0)
+    // everywhere: a clean, exact witness that the offset visibly moves
+    // colour off-centre, which a single arbitrary amount cannot give
+    // (a lone one-texel impulse can fall clean outside a shifted tap's
+    // bilinear footprint, missing it entirely).
+    let (fw, fh) = (w as f32, h as f32);
+    let diag = (fw * fw + fh * fh).sqrt();
+    let mut half_diag = img.clone();
+    cpu::chromatic_aberration(&mut half_diag, w, h, 0.5 * diag, 1.0);
+    assert!(
+        half_diag.iter().step_by(4).all(|&r| r == 1.0),
+        "every pixel's red reads the centre's red at Amount = half diagonal"
+    );
+}
+
+#[test]
+fn spectral_basis_columns_sum_to_one() {
+    // The normalisation that makes a uniform image pass through
+    // unchanged: each channel's nine weights sum to 1 (within f32
+    // rounding of the summation itself).
+    for c in 0..3 {
+        let sum: f32 = SPECTRAL_BASIS.iter().map(|w| w[c]).sum();
+        assert!((sum - 1.0).abs() < 1e-6, "channel {c} sums to {sum}");
+    }
+}
+
+#[test]
+fn cpu_spectral_split_disperses_and_preserves_uniform() {
+    let (w, h) = (17u32, 9u32);
+    let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+
+    // A uniform image is unchanged (the basis is normalised, and clamp
+    // addressing keeps edges uniform too).
+    let mut uniform = vec![0.0f32; (w * h * 4) as usize];
+    for px in uniform.chunks_exact_mut(4) {
+        px.copy_from_slice(&[0.5, 0.25, 0.125, 1.0]);
+    }
+    let before = uniform.clone();
+    cpu::spectral_split(&mut uniform, w, h, 3.0, 25.0, false, 1.0);
+    for (i, (a, b)) in uniform.iter().zip(&before).enumerate() {
+        assert!((a - b).abs() < 1e-6, "texel {i}: {a} vs {b}");
+    }
+
+    // A white impulse on an opaque black frame disperses: red mass
+    // lands ahead of the impulse (the classic mode's R direction), blue
+    // behind, green astride it — and alpha never moves.
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for px in img.chunks_exact_mut(4) {
+        px[3] = 1.0;
+    }
+    let mid = at(8, 4);
+    img[mid..mid + 3].copy_from_slice(&[1.0, 1.0, 1.0]);
+
+    // Mix 0 is the exact identity.
+    let mut m0 = img.clone();
+    cpu::spectral_split(&mut m0, w, h, 3.0, 45.0, false, 0.0);
+    assert_eq!(m0, img);
+
+    let mut s = img.clone();
+    cpu::spectral_split(&mut s, w, h, 2.0, 0.0, false, 1.0);
+    assert!(s[at(10, 4)] > 0.1, "red end lands +2x of the impulse");
+    assert!(s[at(6, 4) + 2] > 0.3, "blue end lands -2x of the impulse");
+    assert!(s[mid + 1] > 0.3, "green stays astride the impulse");
+    assert!(s[at(10, 4) + 2] < 1e-6, "no blue leaks toward the red end");
+    assert!(
+        s.iter().skip(3).step_by(4).all(|a| *a == 1.0),
+        "alpha stays put: mattes never fringe"
+    );
+}
+
+#[test]
+fn flash_envelope_decays_hits_and_holds_statics() {
+    use crate::anim::{Keyframe, SideInterp};
+    use crate::time::Rational;
+    // A static trigger is a constant flash.
+    assert_eq!(flash_envelope(&Property::fixed(0.5), 7.0, 0.12), 0.5);
+    assert_eq!(flash_envelope(&Property::fixed(2.0), 0.0, 0.12), 1.0);
+
+    // Keyframed: hits at t=1 (full) and t=2 (0.6), decay 0.5s.
+    let key = |t: i64, v: f64| Keyframe {
+        time: Rational::new(t, 1).unwrap(),
+        value: v,
+        interp_in: SideInterp::Linear,
+        interp_out: SideInterp::Linear,
+    };
+    let trig = Property {
+        animation: Animation::Keyframed(vec![key(1, 1.0), key(2, 0.6)]),
+        extra: serde_json::Map::new(),
+    };
+    assert_eq!(flash_envelope(&trig, 0.5, 0.5), 0.0, "before the first hit");
+    assert_eq!(
+        flash_envelope(&trig, 1.0, 0.5),
+        1.0,
+        "full on the hit frame"
+    );
+    let half_later = flash_envelope(&trig, 1.5, 0.5);
+    assert!(
+        (half_later - (-1.0f64).exp()).abs() < 1e-12,
+        "1/e after one decay constant"
+    );
+    assert_eq!(
+        flash_envelope(&trig, 2.0, 0.5),
+        0.6,
+        "second hit wins over the tail"
+    );
+    // Overlap takes the loudest: right after t=2 the first hit's tail
+    // (1.0·e^-2) is quieter than the fresh 0.6 hit.
+    let after = flash_envelope(&trig, 2.1, 0.5);
+    assert!((after - 0.6 * (-0.2f64).exp()).abs() < 1e-12);
+
+    // Decay 0 flashes only on the exact hit time.
+    assert_eq!(flash_envelope(&trig, 1.0, 0.0), 1.0);
+    assert_eq!(flash_envelope(&trig, 1.01, 0.0), 0.0);
+}
+
+#[test]
+fn flash_instantiates_resolves_and_lights_within_the_footprint() {
+    let e = instantiate("flash").unwrap();
+    assert_eq!(e.float_at("trigger", 0.0), Some(0.0));
+    assert_eq!(e.float_at("intensity", 0.0), Some(100.0));
+    assert_eq!(e.float_at("decay", 0.0), Some(120.0));
+    assert_eq!(e.colour_at("colour", 0.0), Some([1.0, 1.0, 1.0, 1.0]));
+    // Trigger 0: resolves to a zero-strength (identity) flash — the
+    // §1.2 trigger-driven exemption.
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Flash {
+            strength: 0.0,
+            colour: [1.0; 4],
+            mix: 1.0
+        }]
+    );
+
+    // CPU semantics: strength 1 paints the footprint the flash colour.
+    let mut img = vec![
+        0.5, 0.25, 0.1, 1.0, // opaque pixel
+        0.2, 0.1, 0.05, 0.5, // half-transparent pixel
+        0.0, 0.0, 0.0, 0.0, // empty pixel
+    ];
+    let before = img.clone();
+    cpu::flash(&mut img, 1.0, [2.0, 1.0, 0.5, 1.0], 1.0);
+    assert_eq!(&img[0..4], &[2.0, 1.0, 0.5, 1.0], "opaque: flash colour");
+    assert_eq!(
+        &img[4..8],
+        &[1.0, 0.5, 0.25, 0.5],
+        "half alpha: premultiplied flash"
+    );
+    assert_eq!(&img[8..12], &[0.0; 4], "empty pixels never light up");
+
+    // Strength 0 and mix 0 are both the exact identity.
+    let mut s0 = before.clone();
+    cpu::flash(&mut s0, 0.0, [1.0; 4], 1.0);
+    assert_eq!(s0, before);
+    let mut m0 = before.clone();
+    cpu::flash(&mut m0, 1.0, [1.0; 4], 0.0);
+    assert_eq!(m0, before);
+}
+
+#[test]
+fn colour_balance_instantiates_and_resolves_neutral() {
+    let e = instantiate("colour_balance").unwrap();
+    assert_eq!(e.colour_at("lift", 0.0), Some([0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(e.colour_at("gamma", 0.0), Some([1.0; 4]));
+    assert_eq!(e.colour_at("gain", 0.0), Some([1.0; 4]));
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::ColourBalance {
+            lift: [0.0; 3],
+            gamma: [1.0; 3],
+            gain: [1.0; 3],
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn saturation_instantiates_and_resolves_neutral() {
+    let e = instantiate("saturation").unwrap();
+    assert_eq!(e.float_at("saturation", 0.0), Some(100.0));
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Saturation {
+            saturation: 1.0,
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn matte_key_instantiates_and_resolves_defaults() {
+    let e = instantiate("matte_key").unwrap();
+    // The defaults visibly key a green screen (a green key + a 20 %
+    // tolerance); Spill is off so a fresh instance keys without despill.
+    assert_eq!(e.colour_at("key", 0.0), Some([0.0, 0.6, 0.0, 1.0]));
+    assert_eq!(e.float_at("tolerance", 0.0), Some(20.0));
+    assert_eq!(e.float_at("softness", 0.0), Some(10.0));
+    assert_eq!(e.float_at("spill", 0.0), Some(0.0));
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::MatteKey {
+            key: [0.0, 0.6, 0.0, 1.0],
+            tol: 0.2,
+            soft: 0.1,
+            spill: 0.0,
+            mix: 1.0,
+        }]
+    );
+}
+
+#[test]
+fn exposure_instantiates_resolves_and_gains_light() {
+    let e = instantiate("exposure").unwrap();
+    assert_eq!(e.float_at("stops", 0.0), Some(0.0));
+    // 0 stops resolves to a neutral factor of 1.0.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::Exposure {
+            factor: 1.0,
+            mix: 1.0
+        }]
+    );
+    // The CPU reference: 0 stops is identity; +1 stop (factor 2) doubles
+    // RGB and leaves alpha alone; Mix 0 is the identity at any factor.
+    let mut neutral = vec![0.4_f32, 0.5, 0.6, 1.0];
+    cpu::exposure(&mut neutral, 1.0, 1.0);
+    assert_eq!(neutral, vec![0.4, 0.5, 0.6, 1.0]);
+    let mut bright = vec![0.2_f32, 0.3, 0.1, 0.8];
+    cpu::exposure(&mut bright, 2.0, 1.0);
+    assert_eq!(bright, vec![0.4, 0.6, 0.2, 0.8]);
+    let mut mixed = vec![0.2_f32, 0.3, 0.1, 1.0];
+    cpu::exposure(&mut mixed, 3.0, 0.0);
+    assert_eq!(mixed, vec![0.2, 0.3, 0.1, 1.0]);
+}
+
+#[test]
+fn temperature_instantiates_resolves_and_warms_and_cools() {
+    let e = instantiate("temperature").unwrap();
+    assert_eq!(e.float_at("temperature", 0.0), Some(0.0));
+    // Temperature 0 resolves to neutral gains of exactly 1.0 each.
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Temperature {
+            gain_r: 1.0,
+            gain_b: 1.0,
+            mix: 1.0
+        }]
+    );
+    // +100 resolves to gains (1.5, 0.5): red boosted, blue cut. −100 is the
+    // mirror (0.5, 1.5). The resolve step owns the gain formula.
+    let mut warm = e.clone();
+    for p in &mut warm.params {
+        if p.id == "temperature" {
+            p.value = EffectValue::Float(Property::fixed(100.0));
+        }
+    }
+    assert_eq!(
+        resolve_stack(&[warm], 0.0, 1000.0, 1.0, &MarkerContext::NONE),
+        vec![Resolved::Temperature {
+            gain_r: 1.5,
+            gain_b: 0.5,
+            mix: 1.0
+        }]
+    );
+    let mut cool = e;
+    for p in &mut cool.params {
+        if p.id == "temperature" {
+            p.value = EffectValue::Float(Property::fixed(-100.0));
+        }
+    }
+    assert_eq!(
+        resolve_stack(&[cool], 0.0, 1000.0, 1.0, &MarkerContext::NONE),
+        vec![Resolved::Temperature {
+            gain_r: 0.5,
+            gain_b: 1.5,
+            mix: 1.0
+        }]
+    );
+    // The CPU reference: neutral gains are the bit-exact identity; a warm
+    // shift (gains 1.5 / 0.5) boosts red and cuts blue, green and alpha
+    // untouched; Mix 0 is the identity at any gains.
+    let mut neutral = vec![0.4_f32, 0.5, 0.6, 1.0];
+    cpu::temperature(&mut neutral, 1.0, 1.0, 1.0);
+    assert_eq!(neutral, vec![0.4, 0.5, 0.6, 1.0]);
+    let mut hot = vec![0.5_f32, 0.5, 0.5, 0.8];
+    cpu::temperature(&mut hot, 1.5, 0.5, 1.0);
+    assert_eq!(hot, vec![0.75, 0.5, 0.25, 0.8]);
+    let mut mixed = vec![0.4_f32, 0.5, 0.6, 1.0];
+    cpu::temperature(&mut mixed, 1.5, 0.5, 0.0);
+    assert_eq!(mixed, vec![0.4, 0.5, 0.6, 1.0]);
+}
+
+#[test]
+fn invert_instantiates_resolves_and_inverts() {
+    let e = instantiate("invert").unwrap();
+    // The only parameter is Mix, defaulting to 100 %.
+    assert_eq!(e.float_at("mix", 0.0), Some(100.0));
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(r, vec![Resolved::Invert { mix: 1.0 }]);
+
+    // The CPU reference: an opaque pixel inverts as 1 − c, alpha untouched.
+    let mut opaque = vec![0.2_f32, 0.5, 0.9, 1.0];
+    cpu::invert(&mut opaque, 1.0);
+    for (v, want) in opaque.iter().zip([0.8_f32, 0.5, 0.1, 1.0]) {
+        assert!((v - want).abs() < 1e-6, "opaque invert: {v} vs {want}");
+    }
+    // Mix 0 is the identity at any input.
+    let mut m0 = vec![0.2_f32, 0.5, 0.9, 1.0];
+    cpu::invert(&mut m0, 0.0);
+    assert_eq!(m0, vec![0.2, 0.5, 0.9, 1.0]);
+
+    // Half-alpha pixel: invert runs on the unpremultiplied colour and is
+    // re-premultiplied — the round trip a naive invert of premultiplied
+    // colour gets wrong. Straight (0.4,0.6,0.8) at alpha 0.5 is stored
+    // premultiplied as (0.2,0.3,0.4); inverting the straight colour gives
+    // (0.6,0.4,0.2), re-premultiplied to (0.3,0.2,0.1); alpha untouched.
+    let mut half = vec![0.2_f32, 0.3, 0.4, 0.5];
+    cpu::invert(&mut half, 1.0);
+    for (v, want) in half.iter().zip([0.3_f32, 0.2, 0.1, 0.5]) {
+        assert!((v - want).abs() < 1e-6, "half-alpha invert: {v} vs {want}");
+    }
+
+    // Scene-linear HDR values above 1 invert to honest negatives (§2.1).
+    let mut hdr = vec![2.0_f32, 3.0, 0.5, 1.0];
+    cpu::invert(&mut hdr, 1.0);
+    for (v, want) in hdr.iter().zip([-1.0_f32, -2.0, 0.5, 1.0]) {
+        assert!((v - want).abs() < 1e-6, "hdr invert: {v} vs {want}");
+    }
+}
+
+#[test]
+fn tint_instantiates_resolves_and_maps_luma() {
+    let e = instantiate("tint").unwrap();
+    assert_eq!(e.colour_at("black", 0.0), Some([0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(e.colour_at("white", 0.0), Some([1.0, 1.0, 1.0, 1.0]));
+    // Defaults resolve to black→black, white→white (a greyscale mapping).
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::Tint {
+            black: [0.0, 0.0, 0.0],
+            white: [1.0, 1.0, 1.0],
+            mix: 1.0
+        }]
+    );
+
+    // The CPU reference: default black→black / white→white maps every pixel
+    // to its own Rec.709 luma in all three channels (a greyscale).
+    let rgb = [0.8_f32, 0.2, 0.5];
+    let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let mut grey = vec![rgb[0], rgb[1], rgb[2], 1.0];
+    cpu::tint(&mut grey, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0);
+    for v in grey.iter().take(3) {
+        assert!((v - luma).abs() < 1e-6, "greyscale luma: {v} vs {luma}");
+    }
+    assert_eq!(grey[3], 1.0, "alpha untouched");
+
+    // A duotone: black→(0.1,0,0.2), white→(0.9,0.8,1.0). Each channel lerps
+    // by the pixel's luma. Mix 0 is the identity at any colours.
+    let black = [0.1_f32, 0.0, 0.2];
+    let white = [0.9_f32, 0.8, 1.0];
+    let mut duo = vec![rgb[0], rgb[1], rgb[2], 1.0];
+    cpu::tint(&mut duo, black, white, 1.0);
+    for c in 0..3 {
+        let want = black[c] + (white[c] - black[c]) * luma;
+        assert!(
+            (duo[c] - want).abs() < 1e-6,
+            "duotone ch{c}: {} vs {want}",
+            duo[c]
+        );
+    }
+    let mut m0 = vec![rgb[0], rgb[1], rgb[2], 1.0];
+    cpu::tint(&mut m0, black, white, 0.0);
+    assert_eq!(m0, vec![rgb[0], rgb[1], rgb[2], 1.0]);
+
+    // Half-alpha pixel: the map runs on the unpremultiplied colour and is
+    // re-premultiplied. Straight (0.8,0.2,0.5) at alpha 0.5 is stored
+    // premultiplied as (0.4,0.1,0.25); with defaults it maps to the straight
+    // luma in each channel, re-premultiplied to luma·0.5; alpha untouched.
+    let mut half = vec![0.4_f32, 0.1, 0.25, 0.5];
+    cpu::tint(&mut half, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0);
+    for v in half.iter().take(3) {
+        assert!((v - luma * 0.5).abs() < 1e-6, "half-alpha map: {v}");
+    }
+    assert_eq!(half[3], 0.5, "alpha untouched");
+}
+
+#[test]
+fn hue_shift_is_neutral_at_zero_and_preserves_grey_and_luma() {
+    let e = instantiate("hue_shift").unwrap();
+    assert_eq!(e.float_at("angle", 0.0), Some(0.0));
+    // 0° resolves to the identity matrix.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::HueShift {
+            m: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            mix: 1.0
+        }]
+    );
+    // Identity is bit-exact identity.
+    let mut a = vec![0.4_f32, 0.5, 0.6, 1.0];
+    cpu::hue_shift(&mut a, hue_matrix(0.0), 1.0);
+    assert_eq!(a, vec![0.4, 0.5, 0.6, 1.0]);
+    // Rotating a neutral grey leaves it grey (rows each ~sum to 1), and any
+    // rotation preserves Rec.709 luma to within rounding.
+    let m = hue_matrix(90.0);
+    let grey = [0.5_f32, 0.5, 0.5];
+    let out = [
+        m[0] * grey[0] + m[1] * grey[1] + m[2] * grey[2],
+        m[3] * grey[0] + m[4] * grey[1] + m[5] * grey[2],
+        m[6] * grey[0] + m[7] * grey[1] + m[8] * grey[2],
+    ];
+    for c in out {
+        assert!((c - 0.5).abs() < 1e-3, "grey stays grey: {c}");
+    }
+    let lin = [0.8_f32, 0.2, 0.5];
+    let luma_in = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+    let ro = [
+        m[0] * lin[0] + m[1] * lin[1] + m[2] * lin[2],
+        m[3] * lin[0] + m[4] * lin[1] + m[5] * lin[2],
+        m[6] * lin[0] + m[7] * lin[1] + m[8] * lin[2],
+    ];
+    let luma_out = 0.2126 * ro[0] + 0.7152 * ro[1] + 0.0722 * ro[2];
+    assert!((luma_in - luma_out).abs() < 1e-3, "luma preserved");
+}
+
+#[test]
+fn contrast_is_neutral_at_100_and_pivots_about_mid_grey() {
+    let e = instantiate("contrast").unwrap();
+    assert_eq!(e.float_at("contrast", 0.0), Some(100.0));
+    // 100 % resolves to a neutral factor of 1.0.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(r, vec![Resolved::Contrast { k: 1.0, mix: 1.0 }]);
+
+    // Neutral (k 1.0) is the bit-exact identity; Mix 0 is too at any k.
+    let mut n = vec![0.4_f32, 0.5, 0.6, 1.0];
+    cpu::contrast(&mut n, 1.0, 1.0);
+    assert_eq!(n, vec![0.4, 0.5, 0.6, 1.0]);
+    let mut m0 = vec![0.4_f32, 0.5, 0.6, 1.0];
+    cpu::contrast(&mut m0, 2.5, 0.0);
+    assert_eq!(m0, vec![0.4, 0.5, 0.6, 1.0]);
+
+    // Mid-grey (0.5) is the fixed point of the pivot at any k.
+    let mut grey = vec![0.5_f32, 0.5, 0.5, 1.0];
+    cpu::contrast(&mut grey, 2.0, 1.0);
+    for v in grey.iter().take(3) {
+        assert!((v - 0.5).abs() < 1e-6, "mid-grey stays put");
+    }
+
+    // Opaque pixel, k 2.0: each channel moves twice as far from 0.5.
+    let mut op = vec![0.4_f32, 0.5, 0.6, 1.0];
+    cpu::contrast(&mut op, 2.0, 1.0);
+    for (v, want) in op.iter().zip([0.3_f32, 0.5, 0.7, 1.0]) {
+        assert!((v - want).abs() < 1e-6, "opaque grade: {v} vs {want}");
+    }
+
+    // Half-alpha pixel: the grade runs on the unpremultiplied colour and
+    // is re-premultiplied — the premult round trip that a naive grade on
+    // premultiplied colour would get wrong. Straight (0.4,0.6,0.5) at
+    // alpha 0.5 is stored premultiplied as (0.2,0.3,0.25); k 2.0 grades
+    // the straight colour to (0.3,0.7,0.5), re-premultiplied to
+    // (0.15,0.35,0.25); alpha is untouched.
+    let mut half = vec![0.2_f32, 0.3, 0.25, 0.5];
+    cpu::contrast(&mut half, 2.0, 1.0);
+    for (v, want) in half.iter().zip([0.15_f32, 0.35, 0.25, 0.5]) {
+        assert!((v - want).abs() < 1e-6, "half-alpha grade: {v} vs {want}");
+    }
+
+    // Empty pixels stay empty (unpremult reads black, re-premult is zero).
+    let mut empty = vec![0.0_f32, 0.0, 0.0, 0.0];
+    cpu::contrast(&mut empty, 2.0, 1.0);
+    assert_eq!(empty, vec![0.0, 0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn gamma_is_neutral_at_one_and_curves_per_channel() {
+    let e = instantiate("gamma").unwrap();
+    assert_eq!(e.float_at("gamma", 0.0), Some(1.0));
+    // Default 1.0 resolves to a neutral gamma.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::Gamma {
+            gamma: 1.0,
+            mix: 1.0
+        }]
+    );
+
+    // Neutral (gamma 1.0) is the bit-exact identity; Mix 0 is too at any
+    // gamma (a short-circuit, not a reliance on pow(x, 1) == x).
+    let mut n = vec![0.4_f32, 0.5, 0.6, 1.0];
+    cpu::gamma(&mut n, 1.0, 1.0);
+    assert_eq!(n, vec![0.4, 0.5, 0.6, 1.0]);
+    let mut m0 = vec![0.4_f32, 0.5, 0.6, 1.0];
+    cpu::gamma(&mut m0, 2.2, 0.0);
+    assert_eq!(m0, vec![0.4, 0.5, 0.6, 1.0]);
+
+    // Opaque pixel, gamma 2.0: each channel becomes pow(u, 1/2).
+    let mut op = vec![0.25_f32, 0.5, 0.81, 1.0];
+    cpu::gamma(&mut op, 2.0, 1.0);
+    for (v, want) in op.iter().zip([0.5_f32, 0.5_f32.powf(0.5), 0.9, 1.0]) {
+        assert!((v - want).abs() < 1e-6, "opaque curve: {v} vs {want}");
+    }
+
+    // 0 and 1 are fixed points of any gamma (pow(0) = 0, pow(1) = 1).
+    let mut ends = vec![0.0_f32, 1.0, 0.0, 1.0];
+    cpu::gamma(&mut ends, 0.45, 1.0);
+    assert!((ends[0] - 0.0).abs() < 1e-6 && (ends[1] - 1.0).abs() < 1e-6);
+
+    // Half-alpha pixel: the curve runs on the unpremultiplied colour and is
+    // re-premultiplied — the premult round trip a naive curve on
+    // premultiplied colour would get wrong. Straight (0.25,0.81,0.49) at
+    // alpha 0.5 is stored premultiplied as (0.125,0.405,0.245); gamma 2.0
+    // curves the straight colour to (0.5,0.9,0.7), re-premultiplied to
+    // (0.25,0.45,0.35); alpha is untouched.
+    let mut half = vec![0.125_f32, 0.405, 0.245, 0.5];
+    cpu::gamma(&mut half, 2.0, 1.0);
+    for (v, want) in half.iter().zip([0.25_f32, 0.45, 0.35, 0.5]) {
+        assert!((v - want).abs() < 1e-6, "half-alpha curve: {v} vs {want}");
+    }
+
+    // Negative scene-linear input is clamped to 0 before the pow (pow of a
+    // negative base is undefined), so it curves to 0 rather than NaN.
+    let mut neg = vec![-0.2_f32, 0.0, 0.0, 1.0];
+    cpu::gamma(&mut neg, 2.0, 1.0);
+    assert!(
+        neg[0].is_finite() && neg[0].abs() < 1e-6,
+        "clamped, not NaN: {}",
+        neg[0]
+    );
+
+    // Empty pixels stay empty (unpremult reads black, re-premult is zero).
+    let mut empty = vec![0.0_f32, 0.0, 0.0, 0.0];
+    cpu::gamma(&mut empty, 2.0, 1.0);
+    assert_eq!(empty, vec![0.0, 0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn vignette_instantiates_and_resolves() {
+    let e = instantiate("vignette").unwrap();
+    assert_eq!(e.float_at("amount", 0.0), Some(0.5));
+    assert_eq!(e.float_at("radius", 0.0), Some(0.75));
+    assert_eq!(e.float_at("softness", 0.0), Some(0.5));
+    assert_eq!(e.float_at("roundness", 0.0), Some(1.0));
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::Vignette {
+            amount: 0.5,
+            radius: 0.75,
+            softness: 0.5,
+            roundness: 1.0,
+            mix: 1.0,
+        }]
+    );
+}
+
+#[test]
+fn cpu_vignette_darkens_the_corners_and_is_neutral_at_zero_amount() {
+    let (w, h) = (20u32, 20u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for px in img.chunks_exact_mut(4) {
+        px.copy_from_slice(&[1.0, 1.0, 1.0, 1.0]); // opaque white
+    }
+    let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+
+    // Amount 0 and mix 0 are both the exact identity (the early return
+    // and the general blend formula's own 1·x + 0·y identity).
+    let mut a0 = img.clone();
+    cpu::vignette(&mut a0, w, h, 0.0, 0.75, 0.5, 1.0, 1.0);
+    assert_eq!(a0, img);
+    let mut m0 = img.clone();
+    cpu::vignette(&mut m0, w, h, 0.8, 0.2, 0.1, 1.0, 0.0);
+    assert_eq!(m0, img);
+
+    // A tight, hard-edged, fully-strength vignette: the centre stays
+    // lit, the corner goes dark, alpha is never touched.
+    let mut v = img.clone();
+    cpu::vignette(&mut v, w, h, 1.0, 0.2, 0.05, 1.0, 1.0);
+    let centre = at(10, 10);
+    let corner = at(0, 0);
+    assert!(v[centre] > 0.95, "centre stays lit: {}", v[centre]);
+    assert!(v[corner] < 0.05, "corner goes dark: {}", v[corner]);
+    assert_eq!(v[corner + 3], 1.0, "alpha is never touched");
+}
+
+#[test]
+fn cpu_vignette_roundness_changes_the_shape_on_a_non_square_frame() {
+    let (w, h) = (40u32, 20u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for px in img.chunks_exact_mut(4) {
+        px.copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+    }
+    let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    // The long edge's midpoint: circular roundness (normalised by the
+    // short side, h here) reads its x distance as almost twice as far
+    // as elliptical roundness (normalised by w itself) does, so a
+    // Radius/Softness pair that fully darkens only one metric's reach
+    // tells the two apart.
+    let edge_right_mid = at(w - 1, h / 2);
+
+    let mut circular = img.clone();
+    cpu::vignette(&mut circular, w, h, 1.0, 0.9, 0.2, 1.0, 1.0);
+    let mut elliptical = img.clone();
+    cpu::vignette(&mut elliptical, w, h, 1.0, 0.9, 0.2, 0.0, 1.0);
+
+    assert!(
+        circular[edge_right_mid] < 1e-5,
+        "circular is fully dark this far out: {}",
+        circular[edge_right_mid]
+    );
+    assert!(
+        elliptical[edge_right_mid] > 0.0,
+        "elliptical has not fully darkened here: {}",
+        elliptical[edge_right_mid]
+    );
+    assert!(
+        circular[edge_right_mid] < elliptical[edge_right_mid],
+        "circular darkens the long edge harder than elliptical: \
+             circular {} elliptical {}",
+        circular[edge_right_mid],
+        elliptical[edge_right_mid]
+    );
+}
+
+/// One opaque mid-grey-ish pixel, one half-alpha, one HDR, one empty —
+/// the colour-effect test quartet.
+fn colour_quartet() -> Vec<f32> {
+    vec![
+        0.25, 0.5, 0.1, 1.0, //
+        0.1, 0.2, 0.05, 0.5, //
+        4.0, 2.0, 1.0, 1.0, //
+        0.0, 0.0, 0.0, 0.0,
+    ]
+}
+
+#[test]
+fn cpu_colour_balance_stages_behave() {
+    let img = colour_quartet();
+
+    // A neutral balance is the bit-exact identity (K-090 split: the
+    // whole effect short-circuits, no unpremultiply round trip).
+    let mut n = img.clone();
+    cpu::colour_balance(&mut n, [0.0; 3], [1.0; 3], [1.0; 3], 1.0);
+    assert_eq!(n, img);
+
+    // Mix 0 is the exact identity whatever the balance.
+    let mut m0 = img.clone();
+    cpu::colour_balance(&mut m0, [0.5; 3], [2.0; 3], [3.0; 3], 0.0);
+    assert_eq!(m0, img);
+
+    // Gain doubles linear values; HDR stays unclipped (§2.1).
+    let mut g = img.clone();
+    cpu::colour_balance(&mut g, [0.0; 3], [1.0; 3], [2.0; 3], 1.0);
+    assert_eq!(g[0], 0.5);
+    assert_eq!(g[8], 8.0, "highlights never clip");
+
+    // Lift raises blacks (empty alpha stays empty: premultiplied zero).
+    let mut l = img.clone();
+    cpu::colour_balance(&mut l, [0.1; 3], [1.0; 3], [1.0; 3], 1.0);
+    assert!((l[2] - 0.2).abs() < 1e-6, "0.1 blue lifted by 0.1");
+    assert_eq!(&l[12..16], &[0.0; 4], "empty pixels stay empty");
+
+    // Gamma 2 is a square root in linear: 0.25 → 0.5.
+    let mut ga = img.clone();
+    cpu::colour_balance(&mut ga, [0.0; 3], [2.0; 3], [1.0; 3], 1.0);
+    assert!((ga[0] - 0.5).abs() < 1e-6);
+
+    // Alpha is untouched by any of it.
+    for v in [&n, &m0, &g, &l, &ga] {
+        assert_eq!(v[3], 1.0);
+        assert_eq!(v[7], 0.5);
+    }
+}
+
+#[test]
+fn cpu_saturation_behaves() {
+    let img = colour_quartet();
+
+    // Saturation 1 is the bit-exact identity (whole-effect
+    // short-circuit, K-090 split).
+    let mut n = img.clone();
+    cpu::saturate(&mut n, 1.0, 1.0);
+    assert_eq!(n, img);
+
+    // Mix 0 is the exact identity whatever the saturation.
+    let mut m0 = img.clone();
+    cpu::saturate(&mut m0, 0.0, 0.0);
+    assert_eq!(m0, img);
+
+    // Saturation 0 collapses to Rec. 709 luma (true greyscale).
+    let mut s = img.clone();
+    cpu::saturate(&mut s, 0.0, 1.0);
+    let luma = 0.25 * cpu::LUMA[0] + 0.5 * cpu::LUMA[1] + 0.1 * cpu::LUMA[2];
+    for (c, v) in s.iter().take(3).enumerate() {
+        assert!((v - luma).abs() < 1e-6, "channel {c} at luma");
+    }
+    // The half-alpha pixel desaturates in unpremultiplied space: its
+    // premultiplied channels all land on (unpremult luma) × alpha.
+    let luma_half = (0.2 * cpu::LUMA[0] + 0.4 * cpu::LUMA[1] + 0.1 * cpu::LUMA[2]) * 0.5;
+    for c in 0..3 {
+        assert!((s[4 + c] - luma_half).abs() < 1e-6, "channel {c}");
+    }
+    assert_eq!(&s[12..16], &[0.0; 4], "empty pixels stay empty");
+
+    // Oversaturation spreads channels apart and clamps at zero, never
+    // clipping highlights (§2.1).
+    let mut o = img.clone();
+    cpu::saturate(&mut o, 2.0, 1.0);
+    assert!(o[1] > 0.5, "dominant green pushes up");
+    assert!(o[2] >= 0.0, "recessive blue clamps at zero, not negative");
+    assert!(o[8] > 4.0, "HDR red keeps its headroom");
+
+    // Alpha is untouched by any of it.
+    for v in [&n, &m0, &s, &o] {
+        assert_eq!(v[3], 1.0);
+        assert_eq!(v[7], 0.5);
+    }
+}
+
+#[test]
+fn cpu_matte_key_behaves() {
+    let key = [0.0_f32, 0.6, 0.0, 1.0];
+
+    // A pixel exactly the key colour keys out fully (alpha → 0), and its
+    // premultiplied colour collapses with it.
+    let mut on_key = vec![0.0_f32, 0.6, 0.0, 1.0];
+    cpu::matte_key(&mut on_key, key, 0.2, 0.1, 0.0, 1.0);
+    assert_eq!(
+        on_key,
+        vec![0.0, 0.0, 0.0, 0.0],
+        "the key colour is removed"
+    );
+
+    // A half-alpha key pixel (premultiplied [0,0.3,0,0.5] = straight
+    // [0,0.6,0]) keys to nothing too — the metric works on straight colour.
+    let mut half = vec![0.0_f32, 0.3, 0.0, 0.5];
+    cpu::matte_key(&mut half, key, 0.2, 0.1, 0.0, 1.0);
+    assert_eq!(half, vec![0.0, 0.0, 0.0, 0.0], "partial-alpha key removed");
+
+    // A far-from-key colour (red) is kept exactly, with Spill off.
+    let red = vec![0.8_f32, 0.0, 0.0, 1.0];
+    let mut r = red.clone();
+    cpu::matte_key(&mut r, key, 0.2, 0.1, 0.0, 1.0);
+    assert_eq!(r, red, "far-from-key pixels are kept exactly");
+
+    // Mix 0 is the exact identity whatever the settings.
+    let mut m0 = red.clone();
+    cpu::matte_key(&mut m0, key, 0.2, 0.1, 1.0, 0.0);
+    assert_eq!(m0, red, "Mix 0 is the identity");
+
+    // Spill: a kept pixel that is grey plus a pure key-hue tint desaturates
+    // to that grey at full Spill — its chroma is entirely along the key
+    // hue, so removing it lands every channel on the pixel's own luma.
+    let mut spill = vec![0.4_f32, 0.6, 0.4, 1.0];
+    cpu::matte_key(&mut spill, key, 0.2, 0.1, 1.0, 1.0);
+    let luma = 0.4 * cpu::LUMA[0] + 0.6 * cpu::LUMA[1] + 0.4 * cpu::LUMA[2];
+    for (c, v) in spill.iter().take(3).enumerate() {
+        assert!((v - luma).abs() < 1e-4, "channel {c} despilled to luma");
+    }
+    assert_eq!(spill[3], 1.0, "a kept pixel keeps its alpha");
+
+    // The soft edge is continuous: a pixel whose chroma distance lands
+    // between tol and tol+soft keeps a partial alpha, never a hard 0 or 1
+    // — the smoothstep that keeps the effect oracle-safe (§1.6). This
+    // pixel is grey + 0.6·(key chroma), so its distance is 0.4·|key chroma|.
+    let mut edge = vec![0.2425_f32, 0.6025, 0.2425, 1.0];
+    cpu::matte_key(&mut edge, key, 0.2, 0.1, 0.0, 1.0);
+    assert!(
+        edge[3] > 0.0 && edge[3] < 1.0,
+        "soft edge keeps a partial alpha: {}",
+        edge[3]
+    );
+}
+
+#[test]
+fn blur_mode_resolves_gaussian_directional_and_legacy() {
+    // A fresh instance defaults to Gaussian and resolves exactly as the
+    // pre-mode blur did.
+    let mut e = instantiate("blur").unwrap();
+    assert!(matches!(e.param("mode"), Some(EffectValue::Choice(0))));
+    assert_eq!(e.float_at("length", 0.0), Some(10.0));
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Blur {
+            radius_px: 15.0,
+            edge: 1,
+            mix: 1.0
+        }]
+    );
+
+    // Directional mode reads Length/Angle instead (10% of 1000 = 100px).
+    for p in &mut e.params {
+        if p.id == "mode" {
+            p.value = EffectValue::Choice(1);
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::DirBlur {
+            length_px: 100.0,
+            angle_deg: 0.0,
+            edge: 1,
+            mix: 1.0
+        }]
+    );
+
+    // Radial mode reads Centre/Amount/Type instead: Centre resolves to
+    // a *fraction* (30/70%, unconverted — resolve_stack has no width/
+    // height to scale it by), Amount 8% of 1000 = 80px, Type defaults
+    // to Spin.
+    for p in &mut e.params {
+        match p.id.as_str() {
+            "mode" => p.value = EffectValue::Choice(2),
+            "centre_x" => p.value = EffectValue::Float(Property::fixed(30.0)),
+            "centre_y" => p.value = EffectValue::Float(Property::fixed(70.0)),
+            "amount" => p.value = EffectValue::Float(Property::fixed(8.0)),
+            _ => {}
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::RadialBlur {
+            centre_frac: [0.3, 0.7],
+            amount_px: 80.0,
+            spin: true,
+            edge: 1,
+            mix: 1.0
+        }]
+    );
+
+    // The Type choice flips Spin/Zoom.
+    for p in &mut e.params {
+        if p.id == "radial_type" {
+            p.value = EffectValue::Choice(1);
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert!(matches!(r[..], [Resolved::RadialBlur { spin: false, .. }]));
+
+    // A legacy instance (saved before the mode existed) has no mode
+    // parameter and still resolves as Gaussian.
+    e.params
+        .retain(|p| !matches!(p.id.as_str(), "mode" | "length" | "angle"));
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert!(matches!(r[..], [Resolved::Blur { .. }]));
+}
+
+#[test]
+fn cpu_directional_blur_streaks_along_the_angle() {
+    // A white impulse in the middle of a transparent frame.
+    let (w, h) = (17u32, 9u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    let mid = at(8, 4);
+    img[mid..mid + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+
+    // Length 0 and mix 0 are both the exact identity.
+    let mut l0 = img.clone();
+    cpu::blur_directional(&mut l0, w, h, 0.0, 0.0, 1, 1.0);
+    assert_eq!(l0, img);
+    let mut m0 = img.clone();
+    cpu::blur_directional(&mut m0, w, h, 6.0, 45.0, 1, 0.0);
+    assert_eq!(m0, img);
+
+    // Angle 0, length 5: the impulse smears along x only — energy
+    // appears beside it on its own row, none above or below.
+    let mut s = img.clone();
+    cpu::blur_directional(&mut s, w, h, 5.0, 0.0, 1, 1.0);
+    assert!(s[mid] < 1.0, "peak flattens");
+    assert!(
+        s[at(7, 4)] > 0.0 && s[at(9, 4)] > 0.0,
+        "streak spreads in x"
+    );
+    assert_eq!(s[at(8, 3)], 0.0, "no bleed upward");
+    assert_eq!(s[at(8, 5)], 0.0, "no bleed downward");
+    // Box weights conserve energy away from edges (5 interior taps).
+    let sum = |v: &[f32]| v.iter().step_by(4).sum::<f32>();
+    assert!((sum(&s) - sum(&img)).abs() < 1e-4, "energy conserved");
+
+    // Angle 90 streaks along y instead.
+    let mut v = img.clone();
+    cpu::blur_directional(&mut v, w, h, 5.0, 90.0, 1, 1.0);
+    assert!(
+        v[at(8, 3)] > 0.0 && v[at(8, 5)] > 0.0,
+        "streak spreads in y"
+    );
+    assert!(v[at(7, 4)] < 1e-6, "x row stays clean");
+}
+
+#[test]
+fn cpu_radial_blur_spins_and_zooms_from_centre() {
+    // A white impulse 4px right of centre in a transparent square frame
+    // (odd dimensions: pixel 8's centre is the exact frame centre, as
+    // the RGB split radial test already relies on).
+    let (w, h) = (17u32, 17u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    let imp = at(12, 8);
+    img[imp..imp + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+    let centre = [0.5f32, 0.5f32];
+
+    // Amount 0 and mix 0 are both the exact identity, either type (the
+    // same zero-tap-offset reasoning as blur_directional's length 0).
+    let mut a0 = img.clone();
+    cpu::blur_radial(&mut a0, w, h, centre, 0.0, true, 1, 1.0);
+    assert_eq!(a0, img);
+    let mut a0z = img.clone();
+    cpu::blur_radial(&mut a0z, w, h, centre, 0.0, false, 1, 1.0);
+    assert_eq!(a0z, img);
+    let mut m0 = img.clone();
+    cpu::blur_radial(&mut m0, w, h, centre, 30.0, true, 1, 0.0);
+    assert_eq!(m0, img);
+
+    // The exact centre pixel is unmoved even at a huge amount, either
+    // type — d = 0 there, so every tap collapses to that pixel itself.
+    let mut cs = img.clone();
+    cpu::blur_radial(&mut cs, w, h, centre, 60.0, true, 1, 1.0);
+    assert_eq!(cs[at(8, 8)], 0.0, "centre picks up no energy (spin)");
+    let mut cz = img.clone();
+    cpu::blur_radial(&mut cz, w, h, centre, 60.0, false, 1, 1.0);
+    assert_eq!(cz[at(8, 8)], 0.0, "centre picks up no energy (zoom)");
+
+    // Zoom steps along the ray through the impulse — here, exactly the
+    // row — so energy spreads left/right of it on that same row. Row 8
+    // is where the exact proof lives: any output pixel there has a
+    // purely horizontal d (centre is also on row 8), so its zoom taps
+    // never leave the row. Off-row neighbours (12,7)/(12,9) are not
+    // proved zero — bilinear's one-pixel blend radius legitimately
+    // bleeds a little across a row boundary near the impulse — so the
+    // contrast is asserted as "far less", not "none".
+    let mut z = img.clone();
+    cpu::blur_radial(&mut z, w, h, centre, 20.0, false, 1, 1.0);
+    assert!(z[imp] < 1.0, "peak flattens");
+    assert!(
+        z[at(11, 8)] > 0.0 && z[at(13, 8)] > 0.0,
+        "zoom streak spreads along the ray"
+    );
+    assert!(
+        z[at(12, 7)] < z[at(11, 8)] && z[at(12, 9)] < z[at(11, 8)],
+        "zoom bleeds far less off the ray than along it"
+    );
+
+    // Spin steps along the perpendicular instead — energy spreads
+    // above/below the impulse. The exact proof mirrors the zoom one:
+    // row 8's own points have a purely *vertical* spin step there, so
+    // they never reach column 12 — no bleed along the ray at all.
+    let mut s = img.clone();
+    cpu::blur_radial(&mut s, w, h, centre, 20.0, true, 1, 1.0);
+    assert!(s[imp] < 1.0, "peak flattens");
+    assert!(
+        s[at(12, 7)] > 0.0 && s[at(12, 9)] > 0.0,
+        "spin streak spreads tangentially"
+    );
+    assert_eq!(s[at(11, 8)], 0.0, "spin: no bleed along the ray");
+    assert_eq!(s[at(13, 8)], 0.0, "spin: no bleed along the ray");
+}
+
+#[test]
+fn transform_instantiates_and_resolves_with_the_preview_factor() {
+    let e = instantiate("transform").unwrap();
+    assert_eq!(e.float_at("anchor_x", 0.0), Some(0.0));
+    assert_eq!(e.float_at("position_x", 0.0), Some(0.0));
+    assert_eq!(e.float_at("scale_x", 0.0), Some(100.0));
+    assert_eq!(e.float_at("rotation", 0.0), Some(0.0));
+    assert_eq!(e.float_at("opacity", 0.0), Some(100.0));
+    // Defaults resolve to the exact identity op.
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Transform {
+            anchor: [0.0; 2],
+            position: [0.0; 2],
+            scale: [1.0; 2],
+            rotation_deg: 0.0,
+            opacity: 1.0,
+            mix: 1.0
+        }]
+    );
+
+    // px@comp parameters scale by the §2.3 preview factor; percentages
+    // and degrees do not.
+    let mut e = e;
+    for p in &mut e.params {
+        match p.id.as_str() {
+            "anchor_x" => p.value = EffectValue::Float(Property::fixed(40.0)),
+            "position_x" => p.value = EffectValue::Float(Property::fixed(100.0)),
+            "scale_x" => p.value = EffectValue::Float(Property::fixed(200.0)),
+            "rotation" => p.value = EffectValue::Float(Property::fixed(90.0)),
+            _ => {}
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        500.0,
+        0.5,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::Transform {
+            anchor: [20.0, 0.0],
+            position: [50.0, 0.0],
+            scale: [2.0, 1.0],
+            rotation_deg: 90.0,
+            opacity: 1.0,
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn glow_instantiates_resolves_and_pins_the_one_sided_threshold() {
+    // The K-090 poster child: the Threshold hard range is clamped at
+    // zero below and unbounded above — HDR values glow harder.
+    let s = schema("glow").unwrap();
+    let threshold = s.params.iter().find(|p| p.id == "threshold").unwrap();
+    assert!(matches!(
+        threshold.kind,
+        ParamKind::Float {
+            hard: (Some(0.0), None),
+            ..
+        }
+    ));
+
+    let e = instantiate("glow").unwrap();
+    assert_eq!(e.float_at("threshold", 0.0), Some(1.0));
+    assert_eq!(e.float_at("knee", 0.0), Some(0.5));
+    assert_eq!(e.float_at("radius", 0.0), Some(8.0));
+    assert_eq!(e.float_at("intensity", 0.0), Some(1.0));
+    assert_eq!(e.colour_at("tint", 0.0), Some([1.0; 4]));
+    // 8% of a 1000px diagonal = 80px.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert_eq!(
+        r,
+        vec![Resolved::Glow {
+            radius_px: 80.0,
+            threshold: 1.0,
+            knee: 0.5,
+            intensity: 1.0,
+            tint: [1.0; 4],
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn glow_bright_gates_eases_and_passes_hdr() {
+    // Below the threshold: nothing, knee or not.
+    assert_eq!(glow_bright(0.5, 1.0, 0.0), 0.0);
+    assert_eq!(glow_bright(0.5, 1.0, 0.5), 0.0);
+    assert_eq!(glow_bright(1.0, 1.0, 0.5), 0.0);
+    // Knee 0 is the hard subtract.
+    assert_eq!(glow_bright(3.0, 1.0, 0.0), 2.0);
+    // Inside the knee the onset is eased below the hard hinge.
+    let eased = glow_bright(1.25, 1.0, 0.5);
+    assert!(eased > 0.0 && eased < 0.25, "eased onset: {eased}");
+    // Beyond threshold + knee the smoothstep saturates: hard subtract.
+    assert_eq!(glow_bright(3.0, 1.0, 0.5), 2.0);
+    // Monotone across the knee (no dips as the smoothstep engages).
+    let mut prev = 0.0;
+    for i in 0..=40 {
+        let x = 0.4 + i as f32 * 0.05;
+        let b = glow_bright(x, 1.0, 0.5);
+        assert!(b >= prev, "monotone at x={x}");
+        prev = b;
+    }
+}
+
+#[test]
+fn cpu_glow_blooms_spreads_alpha_and_keeps_neutral_exact() {
+    // An HDR spike on an opaque dark frame, plus a transparent border.
+    let (w, h) = (17u32, 9u32);
+    let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 2..w - 2 {
+            let i = at(x, y);
+            img[i..i + 4].copy_from_slice(&[0.1, 0.1, 0.1, 1.0]);
+        }
+    }
+    let mid = at(8, 4);
+    img[mid..mid + 4].copy_from_slice(&[6.0, 3.0, 1.5, 1.0]);
+
+    // Intensity 0 is the bit-exact identity (the neutral pin).
+    let mut n = img.clone();
+    cpu::glow(&mut n, w, h, 4.0, 1.0, 0.5, 0.0, [1.0; 4], 1.0);
+    assert_eq!(n, img);
+
+    // Mix 0 is the exact identity whatever the parameters.
+    let mut m0 = img.clone();
+    cpu::glow(&mut m0, w, h, 4.0, 0.2, 0.1, 2.0, [1.0; 4], 0.0);
+    assert_eq!(m0, img);
+
+    // A frame entirely below the threshold gains nothing: the halo is
+    // zero everywhere and the add is exact.
+    let dim = {
+        let mut d = img.clone();
+        d[mid..mid + 4].copy_from_slice(&[0.1, 0.1, 0.1, 1.0]);
+        d
+    };
+    let mut quiet = dim.clone();
+    cpu::glow(&mut quiet, w, h, 4.0, 1.0, 0.5, 1.0, [1.0; 4], 1.0);
+    assert_eq!(quiet, dim);
+
+    // The spike blooms: neighbours gain light, the spike itself gains
+    // its own halo back (additive, §2.1: nothing clips).
+    let mut g = img.clone();
+    cpu::glow(&mut g, w, h, 3.0, 1.0, 0.5, 1.0, [1.0; 4], 1.0);
+    assert!(g[at(10, 4)] > img[at(10, 4)], "neighbour catches the halo");
+    assert!(g[mid] > img[mid], "the spike gains its own bloom");
+
+    // The halo carries alpha over transparency: with a threshold low
+    // enough that opaque coverage passes it, the transparent border
+    // next to the footprint gains coverage — glow reads as light there.
+    let mut a = img.clone();
+    cpu::glow(&mut a, w, h, 3.0, 0.05, 0.0, 1.0, [1.0; 4], 1.0);
+    assert!(a[at(1, 4) + 3] > 0.0, "coverage bloomed past the edge");
+    assert!(a[at(8, 4) + 3] <= 1.0, "alpha saturates at full coverage");
+
+    // Tint colours the halo, not the underlying image: with a red tint,
+    // the transparent border gains red light only.
+    let mut t = img.clone();
+    cpu::glow(&mut t, w, h, 3.0, 0.05, 0.0, 1.0, [1.0, 0.0, 0.0, 1.0], 1.0);
+    assert!(t[at(1, 4)] > 0.0, "red halo over the border");
+    assert_eq!(t[at(1, 4) + 1], 0.0, "no green in a red-tinted halo");
+}
+
+#[test]
+fn shake_noise_is_deterministic_seeded_and_hop_free() {
+    // Same inputs → same outputs, exactly (§2.4 determinism).
+    for i in 0..50 {
+        let x = i as f64 * 0.173;
+        assert_eq!(shake_noise(7, 0, x), shake_noise(7, 0, x));
+    }
+    // Different seeds → different sequences; different channels too.
+    assert_ne!(shake_noise(1, 0, 0.37), shake_noise(2, 0, 0.37));
+    assert_ne!(shake_noise(1, 0, 0.37), shake_noise(1, 1, 0.37));
+    // Bounded to [−1, 1] and actually moving.
+    let mut spread = (f64::MAX, f64::MIN);
+    for i in 0..500 {
+        let v = shake_noise(11, 2, i as f64 * 0.31);
+        assert!(v.abs() <= 1.0, "bounded at x={i}: {v}");
+        spread = (spread.0.min(v), spread.1.max(v));
+    }
+    assert!(spread.1 - spread.0 > 0.5, "the wobble wanders: {spread:?}");
+    // Hop-free: tiny steps in time give tiny steps in value, across
+    // lattice boundaries included (the smoothstep is C¹ there).
+    for i in 0..400 {
+        let x = i as f64 * 0.01;
+        let dv = (shake_noise(3, 1, x + 1e-4) - shake_noise(3, 1, x)).abs();
+        assert!(dv < 1e-2, "no hop at x={x}: step {dv}");
+    }
+}
+
+#[test]
+fn shake_cover_scale_keeps_every_worst_case_corner_inside() {
+    // For a sweep of parameter sets, the inverse map of every frame
+    // corner under every extreme wobble must stay inside the source
+    // frame when the cover scale is applied.
+    for (w, h, amp, rot, zmin) in [
+        (1920u32, 1080u32, 33.0f32, 1.0f32, 1.0f32),
+        (1920, 1080, 440.0, 45.0, 0.8),
+        (640, 480, 0.0, 0.0, 1.0),
+        (100, 100, 10.0, 30.0, 0.9),
+        (1280, 720, 100.0, 5.0, 1.0),
+    ] {
+        let cover = shake_cover_scale(w, h, amp, rot, zmin);
+        assert!(cover >= 1.0, "cover never shrinks the frame");
+        let (cx, cy) = (f64::from(w) * 0.5, f64::from(h) * 0.5);
+        // The tolerance absorbs the cover's f64 → f32 rounding: a
+        // thousandth of a pixel, far below anything visible.
+        let tol = 1e-3;
+        for (ox, oy) in [(amp, amp), (-amp, amp), (amp, -amp), (-amp, -amp)] {
+            // Sweep the rotation range densely: the worst angle sits
+            // strictly inside (−rot, rot) for wide frames.
+            for k in 0..=8 {
+                let theta = f64::from(rot) * (f64::from(k) / 4.0 - 1.0);
+                for zoom in [zmin, 1.0] {
+                    let s = f64::from(cover) * f64::from(zoom);
+                    let rad = theta.to_radians();
+                    for (px, py) in [
+                        (0.0, 0.0),
+                        (f64::from(w), 0.0),
+                        (0.0, f64::from(h)),
+                        (f64::from(w), f64::from(h)),
+                    ] {
+                        // Inverse map: q = centre + R(−θ)·(p − centre − off)/s.
+                        let ux = px - cx - f64::from(ox);
+                        let uy = py - cy - f64::from(oy);
+                        let qx = cx + (rad.cos() * ux + rad.sin() * uy) / s;
+                        let qy = cy + (-rad.sin() * ux + rad.cos() * uy) / s;
+                        assert!(
+                            qx >= -tol
+                                && qx <= f64::from(w) + tol
+                                && qy >= -tol
+                                && qy <= f64::from(h) + tol,
+                            "{w}x{h} amp {amp} rot {rot} zmin {zmin} theta {theta}: \
+                                 corner ({px},{py}) maps outside to ({qx},{qy})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Zero maxima: the cover is exactly 1 — auto-scale on a neutral
+    // shake stays the bit-exact identity.
+    assert_eq!(shake_cover_scale(1920, 1080, 0.0, 0.0, 1.0), 1.0);
+}
+
+#[test]
+fn shake_instantiates_with_a_per_instance_seed_and_resolves() {
+    let e = instantiate("shake").unwrap();
+    assert_eq!(e.float_at("amplitude", 0.0), Some(1.5));
+    assert_eq!(e.float_at("frequency", 0.0), Some(8.0));
+    assert_eq!(e.float_at("rotation", 0.0), Some(1.0));
+    assert_eq!(e.float_at("zoom_pump", 0.0), Some(0.0));
+    assert!(matches!(
+        e.param("auto_scale"),
+        Some(EffectValue::Bool(true))
+    ));
+    assert!(matches!(e.param("seed"), Some(EffectValue::Seed(_))));
+
+    // Resolving is deterministic: the same instance at the same time
+    // yields the identical wobble, twice.
+    let a = resolve_stack(
+        std::slice::from_ref(&e),
+        0.4,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    let b = resolve_stack(
+        std::slice::from_ref(&e),
+        0.4,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(a, b);
+    let Resolved::Shake {
+        offset_px,
+        amp_px,
+        zoom,
+        zoom_min,
+        auto_scale,
+        mix,
+        ..
+    } = a[0]
+    else {
+        panic!("expected a Shake");
+    };
+    // 1.5% of a 1000px diagonal = 15px ceiling; the wobble stays
+    // within it, and pump 0 leaves zoom at exactly 1.
+    assert_eq!(amp_px, 15.0);
+    assert!(offset_px[0].abs() <= 15.0 && offset_px[1].abs() <= 15.0);
+    assert_eq!(zoom, 1.0);
+    assert_eq!(zoom_min, 1.0);
+    assert!(auto_scale);
+    assert_eq!(mix, 1.0);
+
+    // Different frames wobble differently; different seeds too.
+    let later = resolve_stack(
+        std::slice::from_ref(&e),
+        0.9,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_ne!(a, later, "the wobble moves between frames");
+    let mut reseeded = e.clone();
+    for p in &mut reseeded.params {
+        if p.id == "seed" {
+            let old = match p.value {
+                EffectValue::Seed(s) => s,
+                _ => 0,
+            };
+            p.value = EffectValue::Seed(old.wrapping_add(1));
+        }
+    }
+    let other = resolve_stack(
+        std::slice::from_ref(&reseeded),
+        0.4,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_ne!(a, other, "a different seed wobbles differently");
+}
+
+#[test]
+fn cpu_shake_is_identity_at_zero_and_wobbles_through_the_affine() {
+    let (w, h) = (17u32, 9u32);
+    let img = transform_card(w, h);
+
+    // A neutral shake (zero amplitude, rotation, pump) is the
+    // bit-exact identity even with auto-scale on: the cover is
+    // exactly 1 and the affine is the identity.
+    let neutral = Resolved::Shake {
+        offset_px: [0.0, 0.0],
+        rotation_deg: 0.0,
+        zoom: 1.0,
+        amp_px: 0.0,
+        rotation_max_deg: 0.0,
+        zoom_min: 1.0,
+        auto_scale: true,
+        mix: 1.0,
+    };
+    let mut n = img.clone();
+    cpu::apply(&mut n, w, h, &neutral);
+    assert_eq!(n, img);
+
+    // A pure offset without auto-scale matches the Transform reference
+    // fed the same shared affine — the oracle path is one path.
+    let shaken = Resolved::Shake {
+        offset_px: [2.0, -1.0],
+        rotation_deg: 0.0,
+        zoom: 1.0,
+        amp_px: 2.0,
+        rotation_max_deg: 0.0,
+        zoom_min: 1.0,
+        auto_scale: false,
+        mix: 1.0,
+    };
+    let mut s = img.clone();
+    cpu::apply(&mut s, w, h, &shaken);
+    let (anchor, position, scale, rot) =
+        shake_affine(w, h, [2.0, -1.0], 0.0, 1.0, 2.0, 0.0, 1.0, false);
+    let mut t = img.clone();
+    cpu::transform(&mut t, w, h, anchor, position, scale, rot, 1.0, 1.0);
+    assert_eq!(s, t);
+    assert_ne!(s, img, "the wobble actually moves pixels");
+
+    // Auto-scale zooms in: with a rotation ceiling the cover exceeds 1,
+    // so the revealed corners stay covered (no transparent corners).
+    let covered = Resolved::Shake {
+        offset_px: [1.0, 0.0],
+        rotation_deg: 5.0,
+        zoom: 1.0,
+        amp_px: 1.0,
+        rotation_max_deg: 5.0,
+        zoom_min: 1.0,
+        auto_scale: true,
+        mix: 1.0,
+    };
+    let mut c = img.clone();
+    cpu::apply(&mut c, w, h, &covered);
+    let corner_alpha = |v: &[f32]| {
+        let at = |x: u32, y: u32| ((y * w + x) * 4 + 3) as usize;
+        [
+            v[at(0, 0)],
+            v[at(w - 1, 0)],
+            v[at(0, h - 1)],
+            v[at(w - 1, h - 1)],
+        ]
+    };
+    assert!(
+        corner_alpha(&c).iter().all(|a| *a > 0.0),
+        "auto-scale keeps every corner covered: {:?}",
+        corner_alpha(&c)
+    );
+}
+
+#[test]
+fn transform_inverse_is_exact_at_identity_and_none_at_zero_scale() {
+    let (m, o) = transform_inverse([0.0; 2], [0.0; 2], [1.0; 2], 0.0).unwrap();
+    assert_eq!(m, [1.0, 0.0, -0.0, 1.0]);
+    assert_eq!(o, [0.0, 0.0]);
+    assert!(transform_inverse([0.0; 2], [0.0; 2], [0.0, 1.0], 0.0).is_none());
+    assert!(transform_inverse([0.0; 2], [0.0; 2], [1.0, 0.0], 0.0).is_none());
+}
+
+/// A varied premultiplied test card for the transform: gradient, an HDR
+/// spike, a half-alpha region and an opaque border pixel.
+fn transform_card(w: u32, h: u32) -> Vec<f32> {
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            let g = (x + y) as f32 / (w + h) as f32;
+            let a = if y < h / 2 { 1.0 } else { 0.5 };
+            img[i] = g * a;
+            img[i + 1] = (1.0 - g) * a;
+            img[i + 2] = 0.25 * a;
+            img[i + 3] = a;
+        }
+    }
+    let spike = ((3 * w + 4) * 4) as usize;
+    img[spike..spike + 4].copy_from_slice(&[6.0, 3.0, 1.5, 1.0]);
+    img
+}
+
+#[test]
+fn cpu_transform_identity_is_bit_exact() {
+    let (w, h) = (13u32, 9u32);
+    let img = transform_card(w, h);
+    // Identity parameters: the docs/08 §3.5 bit-exact passthrough pin.
+    let mut id = img.clone();
+    cpu::transform(&mut id, w, h, [0.0; 2], [0.0; 2], [1.0; 2], 0.0, 1.0, 1.0);
+    assert_eq!(id, img);
+    // Mix 0 is the exact identity whatever the parameters.
+    let mut m0 = img.clone();
+    cpu::transform(
+        &mut m0,
+        w,
+        h,
+        [3.0; 2],
+        [9.0, 1.0],
+        [2.0, 0.5],
+        33.0,
+        0.4,
+        0.0,
+    );
+    assert_eq!(m0, img);
+}
+
+#[test]
+fn cpu_transform_moves_scales_rotates_and_fades() {
+    // A white impulse on a transparent frame.
+    let (w, h) = (17u32, 9u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    let mid = at(8, 4);
+    img[mid..mid + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+
+    // Position +2 in x (anchor 0): the impulse lands two pixels right,
+    // exactly (integer offsets keep bilinear taps on pixel centres).
+    let mut t = img.clone();
+    cpu::transform(&mut t, w, h, [0.0; 2], [2.0, 0.0], [1.0; 2], 0.0, 1.0, 1.0);
+    assert_eq!(t[at(10, 4)], 1.0, "impulse moved +2x");
+    assert_eq!(t[mid], 0.0, "and left its old home");
+
+    // The area revealed beyond the source edge is transparent, not a
+    // smeared border: shifting +2 leaves columns 0-1 fully empty.
+    for y in 0..h {
+        for x in 0..2 {
+            assert_eq!(t[at(x, y) + 3], 0.0, "({x},{y}) revealed as clear");
+        }
+    }
+
+    // Rotation 90° about the frame centre: y-down raster, so the pixel
+    // two to the right of centre lands two below it (clockwise).
+    let centre = [8.5, 4.5];
+    let mut r = img.clone();
+    img[at(10, 4)..at(10, 4) + 4].copy_from_slice(&[0.0, 1.0, 0.0, 1.0]);
+    r.copy_from_slice(&img);
+    cpu::transform(&mut r, w, h, centre, centre, [1.0; 2], 90.0, 1.0, 1.0);
+    assert_eq!(r[mid], 1.0, "the centre pixel stays put");
+    assert!(r[at(8, 6) + 1] > 0.999, "+2x lands at +2y");
+
+    // Scale 0 is degenerate: the image collapses to nothing and renders
+    // fully transparent — never a division fault (docs/14).
+    let mut z = img.clone();
+    cpu::transform(&mut z, w, h, centre, centre, [0.0, 0.0], 0.0, 1.0, 1.0);
+    assert!(z.iter().all(|v| *v == 0.0), "zero scale collapses to clear");
+
+    // Opacity halves all four channels (premultiplied).
+    let mut o = img.clone();
+    cpu::transform(&mut o, w, h, [0.0; 2], [0.0; 2], [1.0; 2], 0.0, 0.5, 1.0);
+    for c in 0..4 {
+        assert_eq!(o[mid + c], 0.5, "channel {c} at half");
+    }
+}
+
+/// A minimal comp + layer pair for marker-context tests: a comp at the
+/// given frame rate carrying `markers`, and an adjustment layer whose
+/// start offset is `offset_s` seconds.
+fn marker_rig(
+    fps: (u32, u32),
+    markers: Vec<crate::markers::Marker>,
+    offset_s: (i64, i64),
+) -> (Composition, Layer) {
+    use crate::model::{LayerKind, LinearColour, Switches, TransformGroup};
+    use crate::time::{CompTime, Duration, FrameRate, Rational};
+    let secs = |n, d| CompTime(Rational::new(n, d).unwrap());
+    let comp = Composition {
+        id: uuid::Uuid::now_v7(),
+        name: "c".into(),
+        width: 1920,
+        height: 1080,
+        frame_rate: FrameRate::new(fps.0, fps.1).unwrap(),
+        duration: Duration(Rational::new(10, 1).unwrap()),
+        background: LinearColour([0.0, 0.0, 0.0, 1.0]),
+        work_area: None,
+        layers: Vec::new(),
+        markers,
+        motion_blur: Default::default(),
+        extra: serde_json::Map::new(),
+    };
+    let layer = Layer {
+        id: uuid::Uuid::now_v7(),
+        name: "l".into(),
+        kind: LayerKind::Adjustment,
+        in_point: secs(0, 1),
+        out_point: secs(10, 1),
+        start_offset: secs(offset_s.0, offset_s.1),
+        transform: TransformGroup::default(),
+        matte: None,
+        parent: None,
+        blend: Default::default(),
+        masks: Vec::new(),
+        effects: Vec::new(),
+        switches: Switches::default(),
+        extra: serde_json::Map::new(),
+    };
+    (comp, layer)
+}
+
+#[test]
+fn marker_context_builds_layer_local_ordered_beats() {
+    use crate::markers::{Marker, MarkerKind};
+    use crate::time::{CompTime, Rational};
+    let rat = |n, d| Rational::new(n, d).unwrap();
+    // Beats out of order, plus a user and a chapter marker to ignore.
+    let user = Marker::user(uuid::Uuid::now_v7(), rat(1, 2));
+    let chapter = Marker {
+        kind: MarkerKind::Chapter,
+        time: CompTime(rat(3, 1)),
+        ..Marker::user(uuid::Uuid::now_v7(), rat(3, 1))
+    };
+    let late = Marker::beat(uuid::Uuid::now_v7(), rat(2, 1), 0.9);
+    let early = Marker::beat(uuid::Uuid::now_v7(), rat(1, 1), 0.5);
+    let (comp, layer) = marker_rig((30, 1), vec![user, late, chapter, early], (1, 4));
+    let ctx = MarkerContext::for_layer(&comp, &layer);
+    // Beat kind only, layer-local (comp time − start offset), sorted.
+    assert_eq!(ctx.beats, vec![0.75, 1.75]);
+    assert_eq!(ctx.fps, 30.0);
+    // The local translation matches the resolver's own lt subtraction
+    // exactly: a beat at comp second 1 and a frame evaluated there land
+    // on the identical f64.
+    let lt = 1.0 - layer.start_offset.0.to_f64();
+    assert_eq!(ctx.beats[0], lt);
+    // The obvious no-marker default (§1.4 graceful fallback).
+    assert_eq!(MarkerContext::NONE.beats, Vec::<f64>::new());
+    assert_eq!(MarkerContext::NONE.fps, 0.0);
+    assert_eq!(MarkerContext::default(), MarkerContext::NONE);
+}
+
+#[test]
+fn marker_context_window_and_nearest() {
+    let ctx = MarkerContext {
+        beats: vec![1.0, 2.0, 4.0],
+        fps: 30.0,
+    };
+    // The §1.4 temporal-window view: inclusive both ends.
+    assert_eq!(ctx.window(1.0, 2.0), &[1.0, 2.0]);
+    assert_eq!(ctx.window(1.5, 3.9), &[2.0]);
+    assert_eq!(ctx.window(2.5, 3.5), &[] as &[f64]);
+    assert_eq!(
+        ctx.window(3.0, 1.0),
+        &[] as &[f64],
+        "inverted span is empty"
+    );
+    // The nearest-either-side pair: "before" is at/before the frame.
+    assert_eq!(ctx.nearest(2.0), (Some(2.0), Some(4.0)));
+    assert_eq!(ctx.nearest(2.5), (Some(2.0), Some(4.0)));
+    assert_eq!(ctx.nearest(0.5), (None, Some(1.0)));
+    assert_eq!(ctx.nearest(9.0), (Some(4.0), None));
+    assert_eq!(MarkerContext::NONE.nearest(1.0), (None, None));
+}
+
+/// A context whose beats and rate use exactly representable values, so
+/// envelope boundary assertions are exact rather than tolerance games.
+fn beat_ctx(beats: &[f64], fps: f64) -> MarkerContext {
+    MarkerContext {
+        beats: beats.to_vec(),
+        fps,
+    }
+}
+
+#[test]
+fn flash_beat_envelope_hard_and_fade_shapes() {
+    let ctx = beat_ctx(&[1.0], 4.0);
+    // On the beat: full strength, whichever the shape.
+    assert_eq!(flash_beat_envelope(&ctx, 1.0, 2.0, false, 1, 0.0), 1.0);
+    assert_eq!(flash_beat_envelope(&ctx, 1.0, 2.0, true, 1, 0.0), 1.0);
+    // One frame in (0.25 s at 4 fps): Hard still full, Fade at the
+    // midpoint of a 2-frame duration.
+    assert_eq!(flash_beat_envelope(&ctx, 1.25, 2.0, false, 1, 0.0), 1.0);
+    assert_eq!(flash_beat_envelope(&ctx, 1.25, 2.0, true, 1, 0.0), 0.5);
+    // The span is [0, duration): at exactly two frames both shapes are
+    // spent, and well past the duration they stay zero.
+    assert_eq!(flash_beat_envelope(&ctx, 1.5, 2.0, false, 1, 0.0), 0.0);
+    assert_eq!(flash_beat_envelope(&ctx, 1.5, 2.0, true, 1, 0.0), 0.0);
+    assert_eq!(flash_beat_envelope(&ctx, 3.0, 2.0, false, 1, 0.0), 0.0);
+    // Before the first trigger there is nothing to decay from.
+    assert_eq!(flash_beat_envelope(&ctx, 0.75, 2.0, false, 1, 0.0), 0.0);
+    // A fresh beat wins over a spent one (nearest at/before rule).
+    let two = beat_ctx(&[1.0, 2.0], 4.0);
+    assert_eq!(flash_beat_envelope(&two, 2.0, 2.0, true, 1, 0.0), 1.0);
+}
+
+#[test]
+fn flash_beat_envelope_phase_shifts_the_triggers() {
+    let ctx = beat_ctx(&[1.0], 4.0);
+    // Phase +2 frames at 4 fps = +0.5 s: the beat itself no longer
+    // fires; the shifted moment does, at full strength.
+    assert_eq!(flash_beat_envelope(&ctx, 1.0, 2.0, false, 1, 2.0), 0.0);
+    assert_eq!(flash_beat_envelope(&ctx, 1.5, 2.0, false, 1, 2.0), 1.0);
+    // Negative phase leads the beat.
+    assert_eq!(flash_beat_envelope(&ctx, 0.5, 2.0, false, 1, -2.0), 1.0);
+    assert_eq!(
+        flash_beat_envelope(&ctx, 0.75, 2.0, true, 1, -2.0),
+        0.5,
+        "fade measures from the shifted trigger"
+    );
+}
+
+#[test]
+fn flash_beat_envelope_strobe_skips_to_every_nth() {
+    // Beats each second; every 2nd fires indices 0 and 2 (the comp's
+    // first beat is index 0).
+    let ctx = beat_ctx(&[1.0, 2.0, 3.0, 4.0], 4.0);
+    assert_eq!(flash_beat_envelope(&ctx, 1.0, 2.0, false, 2, 0.0), 1.0);
+    assert_eq!(
+        flash_beat_envelope(&ctx, 2.0, 2.0, false, 2, 0.0),
+        0.0,
+        "the skipped beat does not fire"
+    );
+    assert_eq!(flash_beat_envelope(&ctx, 3.0, 2.0, false, 2, 0.0), 1.0);
+    // Nth 1 fires them all; a degenerate 0 clamps to 1.
+    assert_eq!(flash_beat_envelope(&ctx, 2.0, 2.0, false, 1, 0.0), 1.0);
+    assert_eq!(flash_beat_envelope(&ctx, 2.0, 2.0, false, 0, 0.0), 1.0);
+}
+
+#[test]
+fn flash_beat_envelope_falls_back_gracefully() {
+    // No markers, the NONE context, a zero duration and a zero frame
+    // rate all yield exactly nothing (§1.4: MUST work with no markers).
+    assert_eq!(
+        flash_beat_envelope(&MarkerContext::NONE, 1.0, 2.0, false, 1, 0.0),
+        0.0
+    );
+    assert_eq!(
+        flash_beat_envelope(&beat_ctx(&[], 30.0), 1.0, 2.0, true, 1, 0.0),
+        0.0
+    );
+    let ctx = beat_ctx(&[1.0], 4.0);
+    assert_eq!(flash_beat_envelope(&ctx, 1.0, 0.0, false, 1, 0.0), 0.0);
+    assert_eq!(
+        flash_beat_envelope(&beat_ctx(&[1.0], 0.0), 1.0, 2.0, false, 1, 0.0),
+        0.0
+    );
+}
+
+#[test]
+fn flash_mode_resolves_manual_trigger_strobe_and_legacy() {
+    let ctx = beat_ctx(&[1.0, 2.0, 3.0], 4.0);
+    // A fresh instance defaults to Manual and resolves exactly as the
+    // pre-mode flash did, markers or none.
+    let mut e = instantiate("flash").unwrap();
+    assert!(matches!(e.param("mode"), Some(EffectValue::Choice(0))));
+    assert_eq!(e.float_at("duration", 0.0), Some(2.0));
+    assert!(matches!(e.param("shape"), Some(EffectValue::Choice(0))));
+    assert_eq!(e.float_at("every_nth", 0.0), Some(1.0));
+    assert_eq!(e.float_at("phase", 0.0), Some(0.0));
+    let dark = Resolved::Flash {
+        strength: 0.0,
+        colour: [1.0; 4],
+        mix: 1.0,
+    };
+    let r = resolve_stack(std::slice::from_ref(&e), 1.0, 1000.0, 1.0, &ctx);
+    assert_eq!(r, vec![dark], "Manual ignores markers entirely");
+
+    // Trigger mode lights on the beat and is spent past Duration.
+    for p in &mut e.params {
+        if p.id == "mode" {
+            p.value = EffectValue::Choice(1);
+        }
+    }
+    let lit = Resolved::Flash {
+        strength: 1.0,
+        colour: [1.0; 4],
+        mix: 1.0,
+    };
+    let r = resolve_stack(std::slice::from_ref(&e), 1.0, 1000.0, 1.0, &ctx);
+    assert_eq!(r, vec![lit]);
+    let r = resolve_stack(std::slice::from_ref(&e), 1.75, 1000.0, 1.0, &ctx);
+    assert_eq!(r, vec![dark], "3 frames past a 2-frame flash");
+    // And with no markers at all it resolves dark — never an error
+    // (§1.4 graceful fallback).
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        1.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(r, vec![dark]);
+
+    // Strobe every 2nd beat: beat index 1 (2 s) does not fire, index 2
+    // (3 s) does.
+    for p in &mut e.params {
+        match p.id.as_str() {
+            "mode" => p.value = EffectValue::Choice(2),
+            "every_nth" => p.value = EffectValue::Float(Property::fixed(2.0)),
+            _ => {}
+        }
+    }
+    let r = resolve_stack(std::slice::from_ref(&e), 2.0, 1000.0, 1.0, &ctx);
+    assert_eq!(r, vec![dark]);
+    let r = resolve_stack(std::slice::from_ref(&e), 3.0, 1000.0, 1.0, &ctx);
+    assert_eq!(r, vec![lit]);
+
+    // A legacy instance (saved before the marker modes existed) has no
+    // mode parameter and still resolves Manual: a static Trigger of
+    // 0.4 holds a 0.4 flash whatever the markers say.
+    let mut legacy = instantiate("flash").unwrap();
+    legacy.params.retain(|p| {
+        !matches!(
+            p.id.as_str(),
+            "mode" | "duration" | "shape" | "every_nth" | "phase"
+        )
+    });
+    for p in &mut legacy.params {
+        if p.id == "trigger" {
+            p.value = EffectValue::Float(Property::fixed(0.4));
+        }
+    }
+    let r = resolve_stack(std::slice::from_ref(&legacy), 1.0, 1000.0, 1.0, &ctx);
+    assert_eq!(
+        r,
+        vec![Resolved::Flash {
+            strength: 0.4,
+            colour: [1.0; 4],
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn marker_window_reports_what_the_envelope_reads() {
+    let ctx = beat_ctx(&[1.0, 2.0, 3.0], 4.0);
+    // Manual mode — and any effect without marker input — has no
+    // window, which is what keeps its frame keys time-free.
+    let mut e = instantiate("flash").unwrap();
+    assert_eq!(marker_window(&e, 1.5, &ctx), None);
+    let blur = instantiate("blur").unwrap();
+    assert_eq!(marker_window(&blur, 1.5, &ctx), None);
+
+    // Trigger mode: the nearest trigger either side of the frame.
+    for p in &mut e.params {
+        if p.id == "mode" {
+            p.value = EffectValue::Choice(1);
+        }
+    }
+    assert_eq!(
+        marker_window(&e, 1.5, &ctx),
+        Some(MarkerWindow {
+            fps: 4.0,
+            before: Some(1.0),
+            after: Some(2.0),
+        })
+    );
+    assert_eq!(
+        marker_window(&e, 0.5, &ctx),
+        Some(MarkerWindow {
+            fps: 4.0,
+            before: None,
+            after: Some(1.0),
+        })
+    );
+
+    // Strobe filters first: with every 2nd beat, the frame after beat
+    // index 1 still sees indices 0 and 2 as its neighbours — the
+    // window is the triggers the envelope actually consumes.
+    for p in &mut e.params {
+        match p.id.as_str() {
+            "mode" => p.value = EffectValue::Choice(2),
+            "every_nth" => p.value = EffectValue::Float(Property::fixed(2.0)),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        marker_window(&e, 2.5, &ctx),
+        Some(MarkerWindow {
+            fps: 4.0,
+            before: Some(1.0),
+            after: Some(3.0),
+        })
+    );
+}
+
+#[test]
+fn block_hash01_is_deterministic_bounded_and_varies() {
+    let a = block_hash01(7, 0, 3, 5, 2);
+    let b = block_hash01(7, 0, 3, 5, 2);
+    assert_eq!(a, b, "same inputs, same hash");
+    assert!((0.0..1.0).contains(&a), "hash lands in [0, 1)");
+
+    // Changing any one input moves the hash (checked, not proved
+    // statistically — a collision is possible in principle but
+    // vanishingly unlikely for a well-mixed hash, and none of these
+    // particular inputs happen to collide).
+    assert_ne!(a, block_hash01(8, 0, 3, 5, 2), "seed matters");
+    assert_ne!(a, block_hash01(7, 1, 3, 5, 2), "channel matters");
+    assert_ne!(a, block_hash01(7, 0, 4, 5, 2), "block x matters");
+    assert_ne!(a, block_hash01(7, 0, 3, 6, 2), "block y matters");
+    assert_ne!(a, block_hash01(7, 0, 3, 5, 3), "tick matters");
+}
+
+#[test]
+fn block_glitch_instantiates_and_resolves() {
+    let e = instantiate("block_glitch").unwrap();
+    assert_eq!(e.float_at("intensity", 0.0), Some(0.35));
+    assert!(matches!(e.param("seed"), Some(EffectValue::Seed(_))));
+    assert_eq!(e.float_at("block_size", 0.0), Some(24.0));
+    assert_eq!(e.float_at("block_jitter", 0.0), Some(25.0));
+    assert_eq!(e.float_at("block_amount", 0.0), Some(3.0));
+    assert_eq!(e.float_at("channel_offset", 0.0), Some(1.0));
+    assert_eq!(e.float_at("slice_repeat", 0.0), Some(20.0));
+
+    // Resolving is deterministic: the same instance at the same time
+    // yields the identical result, twice — and the px_scale factor
+    // (0.5 here) reaches the px@comp parameters exactly like Transform
+    // and Shake's do.
+    let a = resolve_stack(
+        std::slice::from_ref(&e),
+        0.4,
+        1000.0,
+        0.5,
+        &MarkerContext::NONE,
+    );
+    let b = resolve_stack(
+        std::slice::from_ref(&e),
+        0.4,
+        1000.0,
+        0.5,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(a, b);
+    let Resolved::BlockGlitch {
+        intensity,
+        tick,
+        block_size_px,
+        jitter_frac,
+        amount_px,
+        chan_px,
+        slice_frac,
+        mix,
+        ..
+    } = a[0]
+    else {
+        panic!("expected a BlockGlitch");
+    };
+    assert_eq!(intensity, 0.35);
+    assert_eq!(tick, 3); // floor(0.4 * GLITCH_TICK_HZ 8) = 3
+    assert_eq!(block_size_px, 12.0); // 24 px@comp * px_scale 0.5
+    assert_eq!(jitter_frac, 0.25);
+    assert_eq!(amount_px, 30.0); // 3% of a 1000px diagonal
+    assert_eq!(chan_px, 10.0); // 1% of a 1000px diagonal
+    assert_eq!(slice_frac, 0.20);
+    assert_eq!(mix, 1.0);
+
+    // A different frame ticks differently (the per-block hash itself
+    // only runs inside cpu::block_glitch/the kernel, not here).
+    let later = resolve_stack(
+        std::slice::from_ref(&e),
+        0.9,
+        1000.0,
+        0.5,
+        &MarkerContext::NONE,
+    );
+    assert_ne!(a, later, "the tick moves between frames");
+}
+
+#[test]
+fn scanlines_instantiates_and_resolves() {
+    let e = instantiate("scanlines").unwrap();
+    assert_eq!(e.float_at("intensity", 0.0), Some(0.35));
+    assert_eq!(e.float_at("scanline_period", 0.0), Some(3.0));
+    assert_eq!(e.float_at("scanline_darkness", 0.0), Some(40.0));
+    assert_eq!(e.float_at("scanline_roll", 0.0), Some(0.0));
+    assert!(matches!(
+        e.param("scanline_interlace"),
+        Some(EffectValue::Bool(false))
+    ));
+
+    let a = resolve_stack(
+        std::slice::from_ref(&e),
+        0.4,
+        1000.0,
+        0.5,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        a,
+        vec![Resolved::Scanlines {
+            intensity: 0.35,
+            period_px: 1.5, // 3 px@comp * px_scale 0.5
+            darkness: 0.40,
+            roll_px: 0.0, // roll speed 0
+            interlace: false,
+            mix: 1.0,
+        }]
+    );
+}
+
+#[test]
+fn cpu_block_glitch_is_identity_at_zero_intensity() {
+    let (w, h) = (17u32, 9u32);
+    let img = transform_card(w, h);
+
+    // Intensity 0: every hashed quantity collapses — the early return
+    // skips the blend entirely, so this holds for any Mix, unlike the
+    // blur family's tap-sum coincidence.
+    let mut a = img.clone();
+    cpu::block_glitch(&mut a, w, h, 0.0, 7, 3, 6.0, 0.5, 5.0, 2.0, 0.5, 0.4);
+    assert_eq!(a, img, "intensity 0 is the exact identity");
+}
+
+#[test]
+fn cpu_scanlines_is_identity_at_zero_intensity() {
+    let (w, h) = (17u32, 9u32);
+    let img = transform_card(w, h);
+    let mut a = img.clone();
+    cpu::scanlines(&mut a, w, h, 0.0, 3.0, 0.6, 1.0, true, 0.4);
+    assert_eq!(a, img, "intensity 0 is the exact identity");
+}
+
+#[test]
+fn cpu_block_glitch_params_each_move_the_result() {
+    // Every hashed quantity at zero is still an exact identity even
+    // though block displacement runs (not the early return) — the
+    // "scale by zero" branches must themselves be exact.
+    let (w, h) = (40u32, 40u32);
+    let img = transform_card(w, h);
+    let (seed, tick) = (42u32, 5i32);
+    let run = |amount: f32, jitter: f32, chan: f32, slice: f32| {
+        let mut out = img.clone();
+        cpu::block_glitch(
+            &mut out, w, h, 1.0, seed, tick, 8.0, jitter, amount, chan, slice, 1.0,
+        );
+        out
+    };
+    let zero = run(0.0, 0.0, 0.0, 0.0);
+    assert_eq!(
+        zero, img,
+        "every hashed quantity at zero is the identity too"
+    );
+    assert_ne!(
+        run(6.0, 0.0, 0.0, 0.0),
+        zero,
+        "displacement amount moves pixels"
+    );
+    assert_ne!(run(0.0, 0.5, 0.0, 0.0), zero, "grid jitter moves pixels");
+    assert_ne!(
+        run(0.0, 0.0, 4.0, 0.0),
+        zero,
+        "channel offset splits colour"
+    );
+    assert_ne!(run(0.0, 0.0, 0.0, 1.0), zero, "slice repeat folds rows");
+}
+
+#[test]
+fn cpu_scanlines_darken_a_periodic_band() {
+    let (w, h) = (4u32, 12u32);
+    let mut img = vec![0.0f32; (w * h * 4) as usize];
+    for px in img.chunks_exact_mut(4) {
+        px.copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+    }
+    let red_at = |img: &[f32], y: u32| img[(y * w * 4) as usize];
+
+    // Period 4px, no roll, no interlace: rows 0-1 of every period are
+    // bright, rows 2-3 dark — the same shape every period.
+    let mut out = img.clone();
+    cpu::scanlines(&mut out, w, h, 1.0, 4.0, 0.5, 0.0, false, 1.0);
+    for y in 0..h {
+        let expect = if (y % 4) < 2 { 1.0 } else { 0.5 };
+        assert_eq!(red_at(&out, y), expect, "row {y}");
+    }
+
+    // Interlace flips which half darkens on odd periods only: period 1
+    // (rows 4-7) is dark-then-bright instead of bright-then-dark;
+    // period 0 and period 2 (even) are unaffected.
+    let mut inter = img.clone();
+    cpu::scanlines(&mut inter, w, h, 1.0, 4.0, 0.5, 0.0, true, 1.0);
+    assert_eq!(red_at(&inter, 0), 1.0, "period 0 unaffected");
+    assert_eq!(red_at(&inter, 2), 0.5, "period 0 unaffected");
+    assert_eq!(red_at(&inter, 4), 0.5, "period 1 flips: dark first");
+    assert_eq!(red_at(&inter, 6), 1.0, "period 1 flips: bright second");
+    assert_eq!(red_at(&inter, 8), 1.0, "period 2 (even) unflipped again");
+    assert_eq!(red_at(&inter, 10), 0.5, "period 2 (even) unflipped again");
+}
