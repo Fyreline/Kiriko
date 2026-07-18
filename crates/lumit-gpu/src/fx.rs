@@ -313,6 +313,27 @@ struct ExposureParams {
     _pad1: f32,
 }
 
+/// One resolved hue shift (docs/08 §3.17): a row-major linear 3×3 colour
+/// matrix, computed host-side (`lumit_core::fx::hue_matrix`) so the CPU
+/// reference and the kernel multiply by identical coefficients. The identity
+/// matrix is the neutral point; alpha is untouched.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HueShiftOp {
+    /// Row-major 3×3: `[m00,m01,m02, m10,m11,m12, m20,m21,m22]`.
+    pub m: [f32; 9],
+    /// 0..1, blended against the unprocessed input.
+    pub mix: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct HueParams {
+    m: [f32; 9],
+    mix_amt: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+
 /// One resolved transform (docs/08 §3.5, K-090): the inverse affine arrives
 /// host-computed (`lumit_core::fx::transform_op`) so the kernel never runs
 /// its own trigonometry and the CPU reference consumes bit-identical
@@ -528,6 +549,7 @@ pub struct FxEngine {
     saturation: wgpu::ComputePipeline,
     vignette: wgpu::ComputePipeline,
     exposure: wgpu::ComputePipeline,
+    hue_shift: wgpu::ComputePipeline,
     transform: wgpu::ComputePipeline,
     glow_bright: wgpu::ComputePipeline,
     glow_combine: wgpu::ComputePipeline,
@@ -698,6 +720,7 @@ impl FxEngine {
         let saturation_mod = module(include_str!("fx_saturation.wgsl"), "fx-saturation");
         let vignette_mod = module(include_str!("fx_vignette.wgsl"), "fx-vignette");
         let exposure_mod = module(include_str!("fx_exposure.wgsl"), "fx-exposure");
+        let hue_mod = module(include_str!("fx_hue.wgsl"), "fx-hue");
         let transform_mod = module(include_str!("fx_transform.wgsl"), "fx-transform");
         let glow_mod = module(include_str!("fx_glow.wgsl"), "fx-glow");
         let block_glitch_mod = module(include_str!("fx_block_glitch.wgsl"), "fx-block-glitch");
@@ -723,6 +746,7 @@ impl FxEngine {
         let saturation = pipeline(&saturation_mod, "fx-saturation", "saturate_fx");
         let vignette = pipeline(&vignette_mod, "fx-vignette", "vignette");
         let exposure = pipeline(&exposure_mod, "fx-exposure", "exposure");
+        let hue_shift = pipeline(&hue_mod, "fx-hue", "hue_shift");
         let transform = pipeline(&transform_mod, "fx-transform", "transform");
         let glow_bright = pipeline(&glow_mod, "fx-glow-bright", "glow_bright");
         let glow_combine = pipeline(&glow_mod, "fx-glow", "glow_combine");
@@ -774,6 +798,7 @@ impl FxEngine {
             saturation,
             vignette,
             exposure,
+            hue_shift,
             transform,
             glow_bright,
             glow_combine,
@@ -1527,6 +1552,36 @@ impl FxEngine {
             h,
             bytemuck::bytes_of(&ExposureParams {
                 factor: op.factor,
+                mix_amt: op.mix,
+                _pad0: 0.0,
+                _pad1: 0.0,
+            }),
+        );
+        out
+    }
+
+    /// Apply one hue shift (docs/08 §3.17) to a linear working texture,
+    /// returning a new texture of the same size. One pointwise pass: RGB × the
+    /// host-computed colour matrix, alpha untouched.
+    pub fn hue_shift(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        op: &HueShiftOp,
+    ) -> wgpu::Texture {
+        let out = work_texture(ctx, w, h, "fx-hue-out");
+        self.dispatch(
+            ctx,
+            &self.hue_shift,
+            src,
+            src,
+            &out,
+            w,
+            h,
+            bytemuck::bytes_of(&HueParams {
+                m: op.m,
                 mix_amt: op.mix,
                 _pad0: 0.0,
                 _pad1: 0.0,
@@ -2612,6 +2667,49 @@ mod tests {
             let out2 = fx.exposure(&ctx, &tex, w, h, &op);
             let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
             assert_eq!(gpu, gpu2, "GPU exposure must be bit-stable");
+        }
+    }
+
+    /// The §1.6 oracle for hue shift: a cheap pointwise colour-matrix product,
+    /// so CPU and GPU must agree to ≤ 2 fp16 ULP, the GPU is bit-stable, and
+    /// 0° (the identity matrix) or Mix 0 is the bit-exact identity on both.
+    #[test]
+    fn wgsl_hue_shift_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        for (name, deg, mix) in [
+            ("neutral", 0.0, 1.0),
+            ("quarter", 90.0, 1.0),
+            ("half", 180.0, 1.0),
+            ("mixed", 45.0, 0.5),
+            ("mix-zero", 120.0, 0.0),
+        ] {
+            let op = HueShiftOp {
+                m: lumit_core::fx::hue_matrix(deg),
+                mix,
+            };
+            let mut cpu = img.clone();
+            lumit_core::fx::cpu::hue_shift(&mut cpu, op.m, op.mix);
+
+            let tex = upload_linear_f32(&ctx, &img, w, h);
+            let out = fx.hue_shift(&ctx, &tex, w, h, &op);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("hue_shift {name}: worst {worst} ulp");
+            assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+            if name == "neutral" || name == "mix-zero" {
+                assert_eq!(gpu, img, "{name}: must be the bit-exact identity");
+            }
+
+            let out2 = fx.hue_shift(&ctx, &tex, w, h, &op);
+            let gpu2 = readback_linear_f32(&ctx, &out2, w, h).unwrap();
+            assert_eq!(gpu, gpu2, "GPU hue shift must be bit-stable");
         }
     }
 

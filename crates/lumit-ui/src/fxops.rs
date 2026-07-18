@@ -254,6 +254,15 @@ pub fn run_ops(
                     },
                 );
             }
+            Resolved::HueShift { m, mix } => {
+                tex = fx.hue_shift(
+                    ctx,
+                    &tex,
+                    w,
+                    h,
+                    &lumit_gpu::fx::HueShiftOp { m: *m, mix: *mix },
+                );
+            }
             Resolved::Transform {
                 anchor,
                 position,

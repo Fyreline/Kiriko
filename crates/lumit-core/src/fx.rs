@@ -765,6 +765,39 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Hue shift (docs/08 §3.17): rotate every colour's hue by an angle, a
+    // constant-luminance rotation (Rec.709 luma stays put). A linear 3×3
+    // colour matrix, computed host-side so the CPU reference and the kernel
+    // multiply by identical coefficients; premultiplied (a linear matrix
+    // scales through alpha), alpha untouched. 0° is the bit-exact neutral
+    // point. Category Colour, beside its grade siblings.
+    EffectSchema {
+        match_name: "hue_shift",
+        label: "Hue shift",
+        version: 1,
+        category: FxCategory::Colour,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::Exact,
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "angle",
+                label: "Angle",
+                // Degrees; wraps every 360. 0 is neutral.
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-180.0, 180.0),
+                    hard: (None, None),
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
     // Transform (docs/08 §3.5, K-090): the layer transform group as a stack
     // entry — same parameter names, units and animatability. Its point is
     // adjustment layers: applied there, it transforms the composite of
@@ -1488,6 +1521,31 @@ pub fn fresh_seed() -> u32 {
     u32::from_le_bytes([b[12], b[13], b[14], b[15]])
 }
 
+/// The constant-luminance hue-rotation matrix for `deg` degrees, row-major
+/// (docs/08 §3.17). Rec.709 luma weights keep perceived brightness fixed as
+/// the hue turns. Computed host-side (f64 then cast) so the CPU reference and
+/// the WGSL kernel multiply by the identical `f32` coefficients. Exactly the
+/// identity at 0°, so the effect's neutral point is bit-exact.
+pub fn hue_matrix(deg: f64) -> [f32; 9] {
+    if deg % 360.0 == 0.0 {
+        return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    }
+    let (s, c) = deg.to_radians().sin_cos();
+    // Rec.709 luma; the standard SVG feColorMatrix hue-rotate coefficients.
+    let (lr, lg, lb) = (0.2126_f64, 0.7152, 0.0722);
+    [
+        (lr + c * (1.0 - lr) - s * lr) as f32,
+        (lg - c * lg - s * lg) as f32,
+        (lb - c * lb + s * (1.0 - lb)) as f32,
+        (lr - c * lr + s * 0.143) as f32,
+        (lg + c * (1.0 - lg) + s * 0.140) as f32,
+        (lb - c * lb - s * 0.283) as f32,
+        (lr - c * lr - s * (1.0 - lr)) as f32,
+        (lg - c * lg + s * lg) as f32,
+        (lb + c * (1.0 - lb) + s * lb) as f32,
+    ]
+}
+
 /// A new instance of a built-in, carrying the declared defaults.
 pub fn instantiate(match_name: &str) -> Option<EffectInstance> {
     let s = schema(match_name)?;
@@ -1658,6 +1716,15 @@ pub enum Resolved {
     Exposure {
         /// Linear gain, 2^stops.
         factor: f32,
+        /// 0..1.
+        mix: f32,
+    },
+    /// Hue shift (docs/08 §3.17): a row-major linear 3×3 colour matrix (the
+    /// constant-luminance hue rotation), computed host-side. Identity is the
+    /// neutral point.
+    HueShift {
+        /// Row-major 3×3: `[m00,m01,m02, m10,m11,m12, m20,m21,m22]`.
+        m: [f32; 9],
         /// 0..1.
         mix: f32,
     },
@@ -2486,6 +2553,14 @@ pub fn resolve_stack(
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
                 Some(Resolved::Exposure { factor, mix })
             }
+            "hue_shift" => {
+                let angle = e.float_at("angle", lt).unwrap_or(0.0);
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::HueShift {
+                    m: hue_matrix(angle),
+                    mix,
+                })
+            }
             "glow" => {
                 let radius_pct = e.float_at("radius", lt).unwrap_or(8.0) as f32;
                 let threshold = (e.float_at("threshold", lt).unwrap_or(1.0) as f32).max(0.0);
@@ -2729,6 +2804,7 @@ pub mod cpu {
                 mix,
             } => vignette(rgba, w, h, *amount, *radius, *softness, *roundness, *mix),
             Resolved::Exposure { factor, mix } => exposure(rgba, *factor, *mix),
+            Resolved::HueShift { m, mix } => hue_shift(rgba, *m, *mix),
             Resolved::Transform {
                 anchor,
                 position,
@@ -2992,6 +3068,26 @@ pub mod cpu {
                 let scaled = *ch * factor;
                 *ch = *ch * (1.0 - mix) + scaled * mix;
             }
+        }
+    }
+
+    /// Hue shift (docs/08 §3.17): a row-major linear 3×3 colour matrix `m`
+    /// (from [`super::hue_matrix`]) applied to RGB, alpha untouched. Works on
+    /// premultiplied colour directly — a linear matrix scales through alpha —
+    /// so no unpremultiply round trip. The identity matrix is the bit-exact
+    /// neutral point (the WGSL twin matches); Mix 0 is likewise the identity.
+    pub fn hue_shift(rgba: &mut [f32], m: [f32; 9], mix: f32) {
+        if m == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+            return;
+        }
+        for px in rgba.chunks_exact_mut(4) {
+            let (r, g, b) = (px[0], px[1], px[2]);
+            let nr = m[0] * r + m[1] * g + m[2] * b;
+            let ng = m[3] * r + m[4] * g + m[5] * b;
+            let nb = m[6] * r + m[7] * g + m[8] * b;
+            px[0] = r * (1.0 - mix) + nr * mix;
+            px[1] = g * (1.0 - mix) + ng * mix;
+            px[2] = b * (1.0 - mix) + nb * mix;
         }
     }
 
@@ -4726,6 +4822,46 @@ mod tests {
         let mut mixed = vec![0.2_f32, 0.3, 0.1, 1.0];
         cpu::exposure(&mut mixed, 3.0, 0.0);
         assert_eq!(mixed, vec![0.2, 0.3, 0.1, 1.0]);
+    }
+
+    #[test]
+    fn hue_shift_is_neutral_at_zero_and_preserves_grey_and_luma() {
+        let e = instantiate("hue_shift").unwrap();
+        assert_eq!(e.float_at("angle", 0.0), Some(0.0));
+        // 0° resolves to the identity matrix.
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+        assert_eq!(
+            r,
+            vec![Resolved::HueShift {
+                m: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                mix: 1.0
+            }]
+        );
+        // Identity is bit-exact identity.
+        let mut a = vec![0.4_f32, 0.5, 0.6, 1.0];
+        cpu::hue_shift(&mut a, hue_matrix(0.0), 1.0);
+        assert_eq!(a, vec![0.4, 0.5, 0.6, 1.0]);
+        // Rotating a neutral grey leaves it grey (rows each ~sum to 1), and any
+        // rotation preserves Rec.709 luma to within rounding.
+        let m = hue_matrix(90.0);
+        let grey = [0.5_f32, 0.5, 0.5];
+        let out = [
+            m[0] * grey[0] + m[1] * grey[1] + m[2] * grey[2],
+            m[3] * grey[0] + m[4] * grey[1] + m[5] * grey[2],
+            m[6] * grey[0] + m[7] * grey[1] + m[8] * grey[2],
+        ];
+        for c in out {
+            assert!((c - 0.5).abs() < 1e-3, "grey stays grey: {c}");
+        }
+        let lin = [0.8_f32, 0.2, 0.5];
+        let luma_in = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+        let ro = [
+            m[0] * lin[0] + m[1] * lin[1] + m[2] * lin[2],
+            m[3] * lin[0] + m[4] * lin[1] + m[5] * lin[2],
+            m[6] * lin[0] + m[7] * lin[1] + m[8] * lin[2],
+        ];
+        let luma_out = 0.2126 * ro[0] + 0.7152 * ro[1] + 0.0722 * ro[2];
+        assert!((luma_in - luma_out).abs() < 1e-3, "luma preserved");
     }
 
     #[test]

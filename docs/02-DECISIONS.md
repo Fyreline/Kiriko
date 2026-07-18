@@ -967,3 +967,15 @@ wobble; a channel split), not the additive-light Stylise pair (Glow, Flash) — 
 the old combined Glitch. Landed as three green commits: Datamosh split out first (retiring the
 dynamic special case on its own), then Block glitch/Scanlines split out and `glitch` deleted,
 then docs.
+
+**K-108 · DECIDED · Hue shift ships as a new single-frame grade effect (docs/08 §3.17).**
+A constant-luminance hue rotation (the standard SVG `feColorMatrix` hue-rotate, Rec.709 luma
+weights), a linear 3×3 colour matrix computed host-side (`fx::hue_matrix`) so the CPU
+reference and the WGSL kernel multiply by identical `f32` coefficients — the nine travel as
+individual uniform fields so their tight packing matches the Rust `[f32; 9]` (a uniform array
+strides at 16). Params Angle (degrees, default 0) plus the host Mix; Category **Colour**,
+beside Exposure and Saturation. Premultiplied — a linear matrix scales through alpha, so no
+unpremultiply round trip and alpha is untouched. Continuous, so the §1.6 oracle holds to ≤ 2
+fp16 ULP (0–1 on the dev RTX). 0° resolves to the exact identity matrix (the bit-exact neutral
+point, pinned by test); Mix 0 is likewise the identity. The rotation runs in scene-linear
+working space, consistent with the other grades. Wired at the usual four sites.

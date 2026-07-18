@@ -416,6 +416,12 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   the scene-linear light the compositor works in, so it behaves like a real camera exposure,
   not a washed-out lift), with 0 stops leaving the picture exactly untouched. Distinct from
   Colour balance's three-channel gain: a single animatable control for the whole image.
+- **Hue shift (K-108).** Turn every colour's hue by an angle — reds toward orange, blues
+  toward purple, and so on — while keeping how *bright* each looks unchanged (a
+  "constant-luminance" rotation, the same maths web browsers use for their hue-rotate filter).
+  0° leaves the picture exactly as it was. Under the hood it is a small fixed colour-mixing
+  matrix worked out once for the angle, so the preview and the export apply the identical
+  numbers.
 - `crates/lumit-core/src/ops.rs` — **Every possible edit, as data.** An edit is an `Op`
   (AddLayer, SetLayerSpan…). Applying an op returns its exact inverse — that pair is what
   makes undo *provably* correct instead of hopefully correct.

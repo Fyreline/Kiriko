@@ -183,6 +183,7 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.14 | Vignette | stock CC pack vignette | cheap | `{0}` |
 | 3.15 | Chromatic aberration | stock CC pack fillers | cheap | `{0}` |
 | 3.16 | Exposure | stock CC pack exposure/levels | cheap | `{0}` |
+| 3.17 | Hue shift | stock CC pack hue/saturation | cheap | `{0}` |
 
 ### 3.1 Flow engine — optical-flow retime interpolation (Twixtor-class)
 
@@ -706,6 +707,24 @@ holds to ≤ 2 fp16 ULP. 0 stops (`factor` 1.0) short-circuits to the input on b
 bit-exact neutral point, pinned by test); Mix 0 is likewise the identity. Distinct from Colour
 balance's three-channel Gain: a single, animatable, photographic-stops control — the common
 one-knob exposure move.
+
+### 3.17 Hue shift
+
+**Parameters:** Angle (degrees, default 0, slider −180..+180, wraps), Mix.
+
+**Algorithm sketch.** A constant-luminance hue rotation — the standard SVG `feColorMatrix`
+hue-rotate, with Rec.709 luma weights so perceived brightness stays put as the hue turns. The
+row-major 3×3 colour matrix is computed host-side (`lumit_core::fx::hue_matrix`) so the CPU
+reference and the WGSL kernel multiply by identical coefficients; its nine coefficients travel
+as individual `f32` uniform fields (tight 4-byte packing, matching the Rust `[f32; 9]` — a
+uniform array would stride at 16). Premultiplied throughout: a linear matrix scales through
+alpha, so no unpremultiply round trip and alpha is untouched. `cheap` cost, `Exact` ROI.
+
+**Status (v1, shipped, K-108):** the third one-knob grade, beside Exposure and Saturation in
+the **Colour** category. Continuous (a linear matrix), so the §1.6 oracle holds to ≤ 2 fp16
+ULP (measured 0–1 on the dev RTX). 0° resolves to the exact identity matrix — the bit-exact
+neutral point, pinned by test — and Mix 0 is likewise the identity. Hue rotation runs in the
+compositor's scene-linear working space (not gamma), consistent with every other grade here.
 
 ---
 
