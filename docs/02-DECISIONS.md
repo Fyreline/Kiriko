@@ -1184,3 +1184,26 @@ inner layers of a **collapsed Precomp** are deferred follow-ups. Numbered K-120 
 just after K-121 (matte key), the two being independent parallel-worktree work. Distinct from
 the flow `motion_blur` effect (footage-internal motion) and the coming accumulation MB (full
 sub-frame re-render).
+
+**K-122 · DECIDED · Timeline and effects-panel interaction pass (docs/07 §4/§6).**
+A batch of timeline/effects-panel UX with two decision-sized parts. **Reorder by
+drag:** a layer is restacked by dragging its name in the outline, committing one
+`ReorderLayer { comp, layer, new_index }` (lift-and-reinsert, clamped, 0 = top,
+its own inverse); an effect is restacked by dragging its name, committing the
+existing whole-stack `SetLayerEffects` (its doc already designates it the
+add/remove/reorder commit, so no dedicated `ReorderEffect`). Each move is one
+undo step with an accent insertion line. **A single layer context menu:**
+right-clicking a layer's name opens one menu — rename, add effect (BUILTINS
+submenu), add mask, duplicate, delete, solo, enable, convert-to-sequenced,
+trim-to-source — **replacing** the old lane-bar right-click menu, so a layer's
+actions live in one place (right-clicking the bar no longer opens a menu).
+Non-decision polish landing with it: double-click a name to rename inline
+(`RenameLayer`); names are a frameless button so dragging never selects text;
+opening a layer twirl no longer auto-opens the Transform sub-twirl; the Effect
+Controls panel and layer area get themed separator bars per effect/section title;
+a column-header icon row sits over the outline switches level with the ruler; and
+the effect drag-drop onto a layer (outline or lane) and into the Effect Controls
+panel is fixed — the old drop tested a lane-clipped rect, so the visible half
+never registered; it now uses occlusion-proof `contains_pointer` full-row drop
+zones. Layer-area width is session state, not persisted (like every timeline
+preference). Built in an isolated worktree and merged.
