@@ -15,6 +15,7 @@ mod dock;
 mod draws;
 mod gpu;
 mod graph;
+mod hierarchy;
 mod inspector;
 mod overlays;
 mod panels;
@@ -27,6 +28,7 @@ pub(crate) use dock::*;
 pub(crate) use draws::*;
 pub(crate) use gpu::*;
 pub(crate) use graph::*;
+pub(crate) use hierarchy::*;
 pub(crate) use inspector::*;
 pub(crate) use overlays::*;
 pub(crate) use panels::*;
@@ -48,6 +50,7 @@ pub enum Panel {
     EffectControls,
     EffectsAndPresets,
     Scopes(ScopeKind),
+    Hierarchy,
 }
 
 impl Panel {
@@ -59,6 +62,7 @@ impl Panel {
             Panel::EffectControls => "Effect controls",
             Panel::EffectsAndPresets => "Effects & presets",
             Panel::Scopes(_) => "Scopes",
+            Panel::Hierarchy => "Hierarchy",
         }
     }
 }
@@ -486,8 +490,9 @@ impl Shell {
         const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
         // The macOS-standard Settings shortcut (Cmd/Ctrl+comma).
         const SETTINGS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
-        // Command palette (Cmd/Ctrl+P).
-        const PALETTE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
+        // Command palette (Cmd/Ctrl+Shift+P, per docs/07-UI-SPEC §12/§15).
+        const PALETTE: KeyboardShortcut =
+            KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::P);
         // Order matters: consume the more-modified shortcut first.
         if ctx.input_mut(|i| i.consume_shortcut(&REDO)) {
             self.app.redo();
@@ -2629,6 +2634,7 @@ mod dock_tests {
             Panel::EffectControls,
             Panel::EffectsAndPresets,
             Panel::Scopes(ScopeKind::default()),
+            Panel::Hierarchy,
         ] {
             let id = tile_id_of(&tree, panel).expect("panel present in default layout");
             assert!(tree.tiles.is_visible(id), "{panel:?} should start visible");

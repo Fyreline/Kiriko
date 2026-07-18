@@ -820,3 +820,22 @@ effect (`fx::instantiate`) and appends it to the layer's `effects` through the s
 `Op::SetLayerEffects` the "Add effect" row commits, so applying by drag is one ordinary undo
 step, then the preview refreshes the way other Timeline commits do. Double-click apply, drag
 onto the Viewer, and presets/favourites — the rest of §7's inventory — remain later steps.
+
+**K-102 · DECIDED · Command palette and a composition hierarchy panel ship as the first two
+command/navigation surfaces.** Two self-contained UI surfaces, both `egui::Modal`/panel work
+touching no engine code. (1) The **command palette** (docs/07 §12, `command_palette.rs`):
+Ctrl/Cmd+Shift+P or Window → Command palette… opens a top-anchored modal with a focused
+search box over a fuzzy-ranked command list (subsequence match; a label hit outranks a
+keyword-only hit; earlier/contiguous matches rank higher — unit-tested). v1 covers the
+commands category (save, undo/redo, new composition, add layers, reset workspace, open
+Settings, colour-scheme and shape switches, export); the effects/comps/panels categories,
+recent-first ranking and taught shortcuts are later. It is explicitly **not** the deferred
+effects radial menu (Ctrl+Space, apply-to-clip) — that remains blocked on a from-scratch
+build (no egui 0.31-compatible `egui_pie_menu`/`egui_node_graph`). (2) The **Hierarchy
+panel** (`hierarchy.rs`, a new `Panel::Hierarchy` tabbed into the left group of the default
+layout): a read-only, recursion-guarded tree of the active composition — its layers, with
+precomp layers folding open to their nested composition's layers; clicking a row selects that
+layer and switches to its composition. It is the simple tree form of the AE composition
+flowchart; the full node-graph flowchart (the same deferred `egui_node_graph`-style view the
+radial menu wants) grows from it. Both count as modals/panels that suppress the active-panel
+focus edge while a modal is open, reusing the K-098 modal-gating.

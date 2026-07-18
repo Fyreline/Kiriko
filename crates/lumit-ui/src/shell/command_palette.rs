@@ -1,5 +1,5 @@
-//! The command palette (docs/07-UI-SPEC.md §13.1, K-006 references it): a
-//! searchable launcher for application commands, opened with Ctrl/Cmd+P.
+//! The command palette (docs/07-UI-SPEC.md §12): a searchable launcher for
+//! application commands, opened with Ctrl/Cmd+Shift+P.
 //!
 //! In plain terms: press one shortcut, start typing, and a short list of
 //! matching commands appears — run one with Enter or a click, without hunting

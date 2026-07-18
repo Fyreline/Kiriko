@@ -16,7 +16,8 @@ pub fn default_layout() -> egui_tiles::Tree<Panel> {
     let project = tiles.insert_pane(Panel::Project);
     let fx = tiles.insert_pane(Panel::EffectControls);
     let fxp = tiles.insert_pane(Panel::EffectsAndPresets);
-    let left = tiles.insert_tab_tile(vec![project, fx, fxp]);
+    let hierarchy = tiles.insert_pane(Panel::Hierarchy);
+    let left = tiles.insert_tab_tile(vec![project, fx, fxp, hierarchy]);
     let scopes = tiles.insert_pane(Panel::Scopes(ScopeKind::default()));
 
     // Upper band: the tool columns either side of the Viewer.
@@ -77,6 +78,7 @@ pub(crate) fn render_panel(
         Panel::EffectControls => effect_controls_panel(ui, theme, app),
         Panel::EffectsAndPresets => effects_panel(ui, theme),
         Panel::Scopes(kind) => scopes_panel(ui, theme, app, kind),
+        Panel::Hierarchy => hierarchy_panel(ui, theme, app),
     }
 }
 

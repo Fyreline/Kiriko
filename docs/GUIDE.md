@@ -869,6 +869,22 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   colours) are fixed and the same in light or dark mode, for the same reason the Viewer's
   surround is a fixed neutral grey — you cannot judge an image against a background that
   keeps changing brightness.
+- **The command palette** (`shell/command_palette.rs`, K-102) — press **Ctrl/Cmd+Shift+P**
+  (or Window → Command palette…) and a search box appears with a list of commands under it:
+  save, undo, new composition, add a layer, switch the colour scheme or panel shape, open
+  Settings, export. Start typing and the list narrows to what matches — you don't have to
+  type the words in full or in order, just the letters in sequence ("nc" finds "New
+  composition"). Arrow keys move the highlight, Enter or a click runs the highlighted one,
+  Escape closes. It is the fast way to reach anything without hunting through menus. It is
+  not the effects radial menu (that is a separate, still-to-come tool for dropping an effect
+  onto whatever is under the cursor) — this is the plain app-wide command list.
+- **The Hierarchy panel** (`shell/hierarchy.rs`, K-102) — a foldable outline of the
+  composition you are working on: its layers, and where a layer is itself another
+  composition (a precomp), a little triangle folds it open to show that composition's own
+  layers, and so on down. It is the map of a nested project — which composition is built
+  from which — and clicking any row jumps you to that layer. It only shows the structure, it
+  never changes it. It is the simple tree version of the fuller node-graph flowchart that
+  comes later.
 - The **Project panel** — AE-shaped (K-068): the selected item's details up top, the
   folder tree below, and drag-and-drop everywhere. Drag footage onto the Timeline or
   Viewer to make a layer; with no comp open yet, the composition dialogue appears

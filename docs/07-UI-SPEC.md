@@ -565,6 +565,21 @@ Export window. Export never blocks editing; the queue runs in the background.
 - The palette doubles as the discoverability layer: any command a user cannot find in the
   menus is one palette search away, with its shortcut taught in the result row.
 
+**Shipped (v1, K-102):** the palette exists — Ctrl/Cmd+Shift+P or Window → Command palette…,
+fuzzy search (subsequence; a label match outranks a keyword-only one), arrow keys navigate,
+Enter/click runs, Esc closes, drawn as a top-anchored `egui::Modal`. v1 covers the
+**commands** category (save, undo/redo, new composition, add layers, reset workspace, open
+Settings, colour scheme and shape switches, export). The effects/comps/panels categories,
+recent-first ranking, category badges and taught shortcuts fill in later.
+
+## 12.1 Composition hierarchy
+
+The **Hierarchy** panel (K-102) shows the active composition as an indented, foldable tree:
+its layers, each precomp layer expandable to reveal the layers of the composition it nests,
+recursion-guarded. Clicking a row selects that layer and switches to its composition. It is
+read-only — the simple tree form of the AE composition flowchart; the full node-graph
+flowchart (the deferred `egui_node_graph`-style view) grows from it.
+
 ---
 
 ## 13. Onboarding and empty states
