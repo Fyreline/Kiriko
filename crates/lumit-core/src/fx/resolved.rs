@@ -698,8 +698,16 @@ pub fn resolve_stack(
                 let master = e.float_at("aperture", lt).unwrap_or(8.0) as f32 / 8.0;
                 let near = e.float_at("near_aperture", lt).unwrap_or(8.0) as f32;
                 let far = e.float_at("far_aperture", lt).unwrap_or(8.0) as f32;
-                let near_aperture = (near * master * px_scale).max(0.0);
-                let far_aperture = (far * master * px_scale).max(0.0);
+                // Budget cap (docs/13, docs/14): the disc gather is O(coc²) taps
+                // per pixel, and the Aperture master MULTIPLIES the per-side radii
+                // (so Aperture 150 × Near 55 becomes a ~1000 px circle of
+                // confusion), which submits quadrillions of taps and hangs the
+                // GPU — freezing the preview that renders on the UI thread. Cap
+                // the effective per-side radius so the cost stays bounded;
+                // ordinary apertures (≤ the 40 px slider) sit far below it.
+                const MAX_APERTURE_PX: f32 = 128.0;
+                let near_aperture = (near * master * px_scale).clamp(0.0, MAX_APERTURE_PX);
+                let far_aperture = (far * master * px_scale).clamp(0.0, MAX_APERTURE_PX);
                 // Depth invert (a plain Bool; absent on pre-feature projects,
                 // where it reads false — the historical, unchanged behaviour).
                 let depth_invert = matches!(e.param("depth_invert"), Some(EffectValue::Bool(true)));

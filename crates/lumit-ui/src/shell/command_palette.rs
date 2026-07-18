@@ -68,6 +68,10 @@ impl Shell {
     }
 
     /// Open the palette: cleared query, first row selected, search focused.
+    // Only the non-macOS shortcut handler and the in-window Window menu call this;
+    // on macOS the palette is not yet wired into the native menu, so the method is
+    // (validly) unused there — annotate rather than fail the macOS clippy job.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub(crate) fn open_command_palette(&mut self) {
         self.palette_open = true;
         self.palette_query.clear();

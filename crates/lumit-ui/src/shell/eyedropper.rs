@@ -161,7 +161,9 @@ pub(crate) fn viewer_overlay(
     });
     let scroll = if dy.abs() >= dx.abs() { dy } else { dx };
     if shift && scroll.abs() > 0.5 {
-        let step = if scroll > 0.0 { 1 } else { -1 };
+        // Step by two so the region stays ODD (1×1, 3×3, 5×5, …) and the centre
+        // pixel stays centred (owner request); the default region is 1.
+        let step = if scroll > 0.0 { 2 } else { -2 };
         app.eyedropper_region =
             (app.eyedropper_region as i32 + step).clamp(1, MAX_REGION as i32) as u32;
     }
@@ -175,7 +177,21 @@ pub(crate) fn viewer_overlay(
     }
 
     if over_image {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        // Show a dropper cursor over the Viewer so the tool reads as active
+        // (owner request): hide the OS pointer and draw the eyedropper glyph with
+        // its tip at the sample point. egui has no dropper CursorIcon, so this is
+        // the closest to a real dropper cursor.
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        let g = 18.0;
+        let icon_rect =
+            egui::Rect::from_min_size(cursor + egui::vec2(-1.0, 1.0 - g), egui::vec2(g, g));
+        crate::icons::paint(
+            ui.painter(),
+            icon_rect,
+            crate::icons::Icon::Eyedropper,
+            theme.accent,
+            1.4,
+        );
     }
 
     let region = app.eyedropper_region;
@@ -298,6 +314,13 @@ fn commit_sample(app: &mut AppState, target: EyedropperTarget, sample: Sample) {
         return;
     }
     let mut effects = layer.effects.clone();
+    // Focus lives in the same space the effect compares depth in: when the
+    // effect inverts depth (DoF depth_invert), invert the picked value too, so
+    // the focus lands where the user clicked (owner-reported bug). Read before
+    // the mutable borrow of the params below.
+    let depth_invert = effects[target.effect]
+        .bool_of("depth_invert")
+        .unwrap_or(false);
     let params = &mut effects[target.effect].params;
     if target.param >= params.len() {
         return;
@@ -310,6 +333,7 @@ fn commit_sample(app: &mut AppState, target: EyedropperTarget, sample: Sample) {
             chs[2] = Property::fixed(rgb[2]);
         }
         (slot @ EffectValue::Float(_), Sample::Depth(d)) => {
+            let d = if depth_invert { 1.0 - d } else { d };
             *slot = EffectValue::Float(Property::fixed(d));
         }
         _ => return,
@@ -430,6 +454,12 @@ fn draw_magnifier(
     );
 
     let grid_min = panel.min + egui::vec2(pad, pad);
+    // Round the grid's four outer corner cells to match the panel's corner (owner
+    // request), concentric with the panel radius less the padding — so under the
+    // Round shape the pixel square's corners curve like the box, and under Sharp
+    // (radius 0) they stay square. Adaptable to any future radius token.
+    let outer = f32::from(theme.tokens.card_radius);
+    let corner = (outer - pad).clamp(0.0, CELL) as u8;
     for gy in 0..N {
         for gx in 0..N {
             let px = (cx - HALF + gx).clamp(0, w - 1);
@@ -440,7 +470,20 @@ fn draw_magnifier(
                 grid_min + egui::vec2(gx as f32 * CELL, gy as f32 * CELL),
                 egui::vec2(CELL, CELL),
             );
-            painter.rect_filled(cell, 0.0, col);
+            let mut round = egui::CornerRadius::ZERO;
+            if gx == 0 && gy == 0 {
+                round.nw = corner;
+            }
+            if gx == N - 1 && gy == 0 {
+                round.ne = corner;
+            }
+            if gx == 0 && gy == N - 1 {
+                round.sw = corner;
+            }
+            if gx == N - 1 && gy == N - 1 {
+                round.se = corner;
+            }
+            painter.rect_filled(cell, round, col);
         }
     }
 
