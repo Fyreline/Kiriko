@@ -205,6 +205,19 @@ pub(crate) fn viewer_overlay(
     // (a hidden depth layer never shows in the composite). None → the old
     // composite-luma fallback, so a not-yet-decoded reference still gives a value.
     let depth_src: Option<DepthSource> = ui.ctx().data(|d| d.get_temp(depth_pixels_id()));
+    // Whether the DoF effect this pick edits inverts its depth: Focus then lives
+    // in the inverted space, so the sampled value is inverted once here — the
+    // caption preview and the committed value stay in step (commit_sample no
+    // longer re-inverts).
+    let depth_invert = matches!(target.mode, crate::app_state::EyedropperMode::Depth) && {
+        let doc = app.store.snapshot();
+        app.preview_comp
+            .and_then(|c| doc.comp(c))
+            .and_then(|comp| comp.layers.iter().find(|l| l.id == target.layer))
+            .filter(|l| target.effect < l.effects.len())
+            .and_then(|l| l.effects[target.effect].bool_of("depth_invert"))
+            .unwrap_or(false)
+    };
 
     let mut sample: Option<Sample> = None;
     if over_image {
@@ -225,7 +238,12 @@ pub(crate) fn viewer_overlay(
                             let (dw, dh) = (p.0 as i32, p.1 as i32);
                             let dcx = ((u * dw as f32) as i32).clamp(0, dw - 1);
                             let dcy = ((v * dh as f32) as i32).clamp(0, dh - 1);
-                            average_depth(&p.2, dw, dh, dcx, dcy, region)
+                            let d = average_depth(&p.2, dw, dh, dcx, dcy, region);
+                            if depth_invert {
+                                1.0 - d
+                            } else {
+                                d
+                            }
                         });
                         draw_magnifier(
                             ui.painter(),
@@ -248,7 +266,14 @@ pub(crate) fn viewer_overlay(
                                 ),
                                 crate::app_state::EyedropperMode::Depth => {
                                     Sample::Depth(depth_at.unwrap_or_else(|| {
-                                        average_depth(&frame.rgba, w, h, cx, cy, region)
+                                        // Undecoded-reference fallback: still honour
+                                        // the invert so it matches the primary path.
+                                        let raw = average_depth(&frame.rgba, w, h, cx, cy, region);
+                                        if depth_invert {
+                                            1.0 - raw
+                                        } else {
+                                            raw
+                                        }
                                     }))
                                 }
                             });
@@ -314,13 +339,6 @@ fn commit_sample(app: &mut AppState, target: EyedropperTarget, sample: Sample) {
         return;
     }
     let mut effects = layer.effects.clone();
-    // Focus lives in the same space the effect compares depth in: when the
-    // effect inverts depth (DoF depth_invert), invert the picked value too, so
-    // the focus lands where the user clicked (owner-reported bug). Read before
-    // the mutable borrow of the params below.
-    let depth_invert = effects[target.effect]
-        .bool_of("depth_invert")
-        .unwrap_or(false);
     let params = &mut effects[target.effect].params;
     if target.param >= params.len() {
         return;
@@ -333,7 +351,8 @@ fn commit_sample(app: &mut AppState, target: EyedropperTarget, sample: Sample) {
             chs[2] = Property::fixed(rgb[2]);
         }
         (slot @ EffectValue::Float(_), Sample::Depth(d)) => {
-            let d = if depth_invert { 1.0 - d } else { d };
+            // `d` is already in Focus space (any DoF depth_invert was applied at
+            // sample time in viewer_overlay), so store it directly.
             *slot = EffectValue::Float(Property::fixed(d));
         }
         _ => return,
