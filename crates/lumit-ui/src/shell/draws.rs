@@ -246,12 +246,11 @@ pub(crate) fn build_comp_draws(
     // op. Each slot carries the referenced layer's SOURCE pixels (via the same
     // `pixels_for` a matte uses, so effects are not applied and a depth
     // reference can never recurse); an unset or dangling reference is None (a
-    // passthrough). The depth layer must be **visible and in-span**: the
-    // preview decode planner (app_state::collect_comp_jobs) only decodes those
-    // (plus matte sources), so gating here keeps preview and export identical
-    // (K-031) — export applies the same gate. Extending the planner to decode
-    // a hidden depth reference (as it already does for matte sources) is a
-    // recorded follow-up.
+    // passthrough). The depth layer does NOT need to be visible — a depth map
+    // is usually hidden so it doesn't render — only in-span; the decode
+    // planner (app_state::collect_comp_jobs) decodes layer-input references
+    // exactly like matte sources, and export applies the same in-span-only
+    // gate (K-031).
     let dof_inputs_for =
         |effects: &[lumit_core::model::EffectInstance]| -> Vec<Option<DofInputDraw>> {
             use lumit_core::model::EffectNamespace;
@@ -265,7 +264,7 @@ pub(crate) fn build_comp_draws(
                 .map(|e| {
                     let id = e.layer_ref("depth")?;
                     let src = comp.layers.iter().find(|l| l.id == id)?;
-                    if !src.switches.visible || !in_span(src) {
+                    if !in_span(src) {
                         return None;
                     }
                     let (rgba, tex_w, tex_h, _natural) = pixels_for(src)?;

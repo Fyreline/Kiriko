@@ -836,10 +836,11 @@ impl Renderer<'_> {
     /// is rendered SOURCE-ONLY (its own effect stack is not applied — the
     /// `prepare` result, before `apply_fx`), resampled into the consuming
     /// layer's raster `(w, h)` by the shared `render_layer_input` the preview
-    /// also calls (K-031). The depth layer must be **visible and in-span**, the
-    /// same gate the preview applies (its decode planner only decodes those),
-    /// so a hidden reference degrades to a passthrough in both. Unset, dangling
-    /// or undecodable references are `None` — a labelled no-op, never a fault.
+    /// also calls (K-031). The depth layer only needs to be **in-span** — a
+    /// depth map is usually hidden so it doesn't render, and both preview and
+    /// export accept a hidden reference (the preview decode planner decodes
+    /// layer-input references like matte sources). Unset, dangling or
+    /// undecodable references are `None` — a labelled no-op, never a fault.
     #[allow(clippy::too_many_arguments)]
     fn build_dof_inputs(
         &mut self,
@@ -859,11 +860,7 @@ impl Renderer<'_> {
         }) {
             let slot = match e.layer_ref("depth") {
                 Some(id) => match comp.layers.iter().find(|l| l.id == id) {
-                    Some(src)
-                        if src.switches.visible
-                            && t >= src.in_point.0.to_f64()
-                            && t < src.out_point.0.to_f64() =>
-                    {
+                    Some(src) if t >= src.in_point.0.to_f64() && t < src.out_point.0.to_f64() => {
                         // Render source-only (the pre-fx `prepare` result), so
                         // the depth matches the preview and cannot recurse.
                         match self.prepare(src, t, visited)? {

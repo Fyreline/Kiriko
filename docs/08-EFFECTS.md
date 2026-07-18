@@ -927,14 +927,12 @@ Focus/Range/Aperture/Mix. Deliberate v1 limitations (documented, follow-ups trac
 depth layer is rendered **source-only** (its own effect stack is not applied) and **resampled
 to the consuming layer's raster** to align with the pixels the blur runs on — a
 placement-aware or effects-aware depth is a follow-up; a depth layer built purely from
-effects (e.g. a gradient) is not yet supported. The depth layer must be **visible and
-in-span** in preview (the decode planner does not yet decode a hidden depth reference the way
-it already does a matte source — a recorded follow-up); a hidden reference degrades to a
-passthrough in both preview and export, so the two never disagree. The bokeh is a plain flat
-disc; shaped, bright-rimmed highlights are the planned "DOF PRO" second effect. The depth
-layer picker (the inspector arm for a `ParamKind::Layer`) and the op to set it are the
-owner's follow-up; until they land the effect resolves and threads correctly but reads as a
-no-op because no depth layer can be chosen.
+effects (e.g. a gradient) is not yet supported. The depth layer only needs to be **in-span**
+— it is expected to be *hidden* (a depth map should not render into the comp), and both the
+preview decode planner and export decode a hidden layer-input reference exactly as they do a
+matte source. The bokeh is a plain flat disc; shaped, bright-rimmed highlights are the
+planned "DOF PRO" second effect. The depth layer is chosen with the inspector's Layer picker
+(a dropdown of the comp's other layers); an unset or dangling reference is a no-op.
 
 ---
 
