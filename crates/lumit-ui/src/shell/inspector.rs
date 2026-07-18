@@ -537,20 +537,25 @@ pub(crate) struct RowCtx<'a> {
     /// True in graph mode (K-070): the outline half of every row still draws,
     /// but nothing is painted on the lane side — the curve owns that area.
     pub(crate) graph_mode: bool,
-    /// The currently highlighted property row (note 2.8.1), so each row can lift
-    /// its background when it is the selected one — and an effect title bar can
-    /// lift when one of its own params is selected (note 2.8.2).
+    /// The anchor of the property-row selection (note 2.8.1) — the most recently
+    /// clicked row, which a Shift-click ranges to and the graph follows.
     pub(crate) selected_prop: Option<crate::app_state::PropSel>,
+    /// The full highlighted set (note 2.6b): plain click picks one, Ctrl-click
+    /// toggles, Shift-click ranges. Every row in it lifts its background. Owned
+    /// (a cheap per-frame clone) so the row functions can still take `&mut app`.
+    pub(crate) selected_props: Vec<crate::app_state::PropSel>,
 }
 
 impl RowCtx<'_> {
-    /// Whether `row` on this row's layer is the highlighted property (2.8.1).
+    /// Whether `row` on this row's layer is highlighted (notes 2.8.1/2.6): it is
+    /// in the selection set, or it is the anchor (any code path that sets only
+    /// the anchor still highlights).
     pub(crate) fn is_selected(&self, row: crate::app_state::PropRow) -> bool {
-        self.selected_prop
-            == Some(crate::app_state::PropSel {
-                layer: self.layer.id,
-                row,
-            })
+        let ps = crate::app_state::PropSel {
+            layer: self.layer.id,
+            row,
+        };
+        self.selected_props.contains(&ps) || self.selected_prop == Some(ps)
     }
 }
 
@@ -561,6 +566,64 @@ impl RowCtx<'_> {
 /// never trips selection.
 pub(crate) fn row_click(ui: &egui::Ui, row_rect: egui::Rect) -> bool {
     ui.rect_contains_pointer(row_rect) && ui.input(|i| i.pointer.primary_clicked())
+}
+
+/// Record this property row in the frame's draw order and, when it is clicked,
+/// apply the usual list-select gestures to `selected_props` (note 2.6b): plain
+/// click picks just this row, Ctrl/Cmd-click toggles it, and Shift-click marks
+/// it as the range target (resolved after the whole row loop, since the rows
+/// below it aren't drawn yet). Returns whether a *plain* click landed, so the
+/// caller can also open the row's curve only on a plain click — a Ctrl/Shift
+/// row-select must not re-graph the channel. Drives the highlight; the graph
+/// still follows the anchor.
+pub(crate) fn prop_row_select(
+    app: &mut AppState,
+    ui: &egui::Ui,
+    row_rect: egui::Rect,
+    sel: crate::app_state::PropSel,
+) -> bool {
+    app.prop_row_order.push(sel);
+    if !row_click(ui, row_rect) {
+        return false;
+    }
+    let mods = ui.input(|i| i.modifiers);
+    if mods.command || mods.ctrl {
+        if let Some(i) = app.selected_props.iter().position(|s| *s == sel) {
+            app.selected_props.remove(i);
+        } else {
+            app.selected_props.push(sel);
+        }
+        app.selected_prop = Some(sel);
+        false
+    } else if mods.shift {
+        app.prop_range_target = Some(sel);
+        false
+    } else {
+        app.selected_prop = Some(sel);
+        app.selected_props = vec![sel];
+        true
+    }
+}
+
+/// The property rows a Shift-click selects (note 2.6b): the inclusive range, in
+/// draw order, from the `anchor` to the clicked `target`. When the anchor isn't
+/// in `order` (a first selection, or it sat on another layer's rows) fall back
+/// to just the target. Returns (the set, whether the target should also become
+/// the anchor). Pure, so the range maths is unit-tested.
+pub(crate) fn prop_range(
+    order: &[crate::app_state::PropSel],
+    anchor: Option<crate::app_state::PropSel>,
+    target: crate::app_state::PropSel,
+) -> (Vec<crate::app_state::PropSel>, bool) {
+    let ai = anchor.and_then(|a| order.iter().position(|s| *s == a));
+    let ti = order.iter().position(|s| *s == target);
+    match (ai, ti) {
+        (Some(ai), Some(ti)) => {
+            let (lo, hi) = (ai.min(ti), ai.max(ti));
+            (order[lo..=hi].to_vec(), false)
+        }
+        _ => (vec![target], true),
+    }
 }
 
 /// New (scale_x, scale_y) when the linked Scale control is dragged so x becomes
@@ -715,6 +778,7 @@ pub(crate) fn transform_property_rows(
         view_start,
         graph_mode: app.timeline_graph_mode,
         selected_prop: app.selected_prop,
+        selected_props: app.selected_props.clone(),
     };
 
     // Footage speed is a keyframable property too (K-072): its own row above
@@ -1437,12 +1501,15 @@ pub(crate) fn prop_row(
         && app.graph_prop == Some(prop);
     let sel_row = crate::app_state::PropRow::Transform(prop);
     let (row_rect, mut c) = row_frame(ui, ctx, is_graphed || ctx.is_selected(sel_row));
-    if row_click(ui, row_rect) {
-        app.selected_prop = Some(crate::app_state::PropSel {
+    prop_row_select(
+        app,
+        ui,
+        row_rect,
+        crate::app_state::PropSel {
             layer: ctx.layer.id,
             row: sel_row,
-        });
-    }
+        },
+    );
 
     if let Some(animation) = stopwatch(&mut c, ctx.theme, slot, ctx.lt) {
         *pending = Some(lumit_core::Op::SetTransformProperty {
@@ -1453,16 +1520,19 @@ pub(crate) fn prop_row(
         });
     }
     keyframe_nav(&mut c, app, ctx, prop, slot, pending);
-    if c.add(
-        egui::Label::new(egui::RichText::new(label).small().color(if is_graphed {
-            ctx.theme.accent
-        } else {
-            ctx.theme.text_muted
-        }))
-        .sense(egui::Sense::click()),
-    )
-    .clicked()
-    {
+    let name_clicked = c
+        .add(
+            egui::Label::new(egui::RichText::new(label).small().color(if is_graphed {
+                ctx.theme.accent
+            } else {
+                ctx.theme.text_muted
+            }))
+            .sense(egui::Sense::click()),
+        )
+        .clicked();
+    // A plain click on the name opens the curve; a Ctrl/Shift-click is a
+    // list-select gesture (handled above) and must not re-graph the channel.
+    if name_clicked && !ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl) {
         app.selected_layer = Some(ctx.layer.id);
         app.graph_prop = Some(prop);
         app.graph_retime = false; // switching to a transform property
@@ -1672,12 +1742,15 @@ pub(crate) fn combined_scale_row(
     // The linked Scale row selects as its x axis (both move together).
     let sel_row = crate::app_state::PropRow::Transform(TransformProp::ScaleX);
     let (row_rect, mut c) = row_frame(ui, ctx, is_graphed || ctx.is_selected(sel_row));
-    if row_click(ui, row_rect) {
-        app.selected_prop = Some(crate::app_state::PropSel {
+    prop_row_select(
+        app,
+        ui,
+        row_rect,
+        crate::app_state::PropSel {
             layer: ctx.layer.id,
             row: sel_row,
-        });
-    }
+        },
+    );
 
     // Stopwatch drives both axes together (drawn, like every other row).
     let animated = sx.is_animated() || sy.is_animated();
@@ -1708,16 +1781,17 @@ pub(crate) fn combined_scale_row(
     // The ◄ ◆ ► navigator, driving both axes (note-2.5 fix) — shown once the row
     // is animated, matching every other transform row.
     keyframe_nav_scale(&mut c, app, ctx, sx, sy, pending);
-    if c.add(
-        egui::Label::new(egui::RichText::new("Scale %").small().color(if is_graphed {
-            ctx.theme.accent
-        } else {
-            ctx.theme.text_muted
-        }))
-        .sense(egui::Sense::click()),
-    )
-    .clicked()
-    {
+    let name_clicked = c
+        .add(
+            egui::Label::new(egui::RichText::new("Scale %").small().color(if is_graphed {
+                ctx.theme.accent
+            } else {
+                ctx.theme.text_muted
+            }))
+            .sense(egui::Sense::click()),
+        )
+        .clicked();
+    if name_clicked && !ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl) {
         app.selected_layer = Some(ctx.layer.id);
         app.graph_prop = Some(TransformProp::ScaleX);
         app.graph_retime = false; // switching to a transform property
@@ -1835,12 +1909,15 @@ pub(crate) fn linked_pair_row(
     // The linked pair selects as its x channel (both share the row furniture).
     let sel_row = crate::app_state::PropRow::Transform(px);
     let (row_rect, mut c) = row_frame(ui, ctx, is_graphed || ctx.is_selected(sel_row));
-    if row_click(ui, row_rect) {
-        app.selected_prop = Some(crate::app_state::PropSel {
+    prop_row_select(
+        app,
+        ui,
+        row_rect,
+        crate::app_state::PropSel {
             layer: ctx.layer.id,
             row: sel_row,
-        });
-    }
+        },
+    );
 
     // Stopwatch drives both axes together as one undo step.
     let animated = sx.is_animated() || sy.is_animated();
@@ -1916,17 +1993,19 @@ pub(crate) fn linked_pair_row(
         }
     }
 
-    // The name graphs the x channel (like Scale graphs ScaleX).
-    if c.add(
-        egui::Label::new(egui::RichText::new(label).small().color(if is_graphed {
-            ctx.theme.accent
-        } else {
-            ctx.theme.text_muted
-        }))
-        .sense(egui::Sense::click()),
-    )
-    .clicked()
-    {
+    // The name graphs the x channel (like Scale graphs ScaleX) — plain click
+    // only; Ctrl/Shift-click is a list-select gesture handled above.
+    let name_clicked = c
+        .add(
+            egui::Label::new(egui::RichText::new(label).small().color(if is_graphed {
+                ctx.theme.accent
+            } else {
+                ctx.theme.text_muted
+            }))
+            .sense(egui::Sense::click()),
+        )
+        .clicked();
+    if name_clicked && !ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl) {
         app.selected_layer = Some(ctx.layer.id);
         app.graph_prop = Some(px);
         app.graph_retime = false; // switching to a transform property
@@ -3312,5 +3391,56 @@ mod lane_key_tests {
         lane_select_click(&mut s, sel(2.0), shift);
         lane_select_click(&mut s, sel(2.0), shift); // already in — no duplicate
         assert_eq!(s, vec![sel(1.0), sel(2.0)]);
+    }
+
+    fn psel(prop: TransformProp) -> crate::app_state::PropSel {
+        crate::app_state::PropSel {
+            layer: uuid::Uuid::nil(),
+            row: PropRow::Transform(prop),
+        }
+    }
+
+    // Shift-click ranges over the drawn order between anchor and target,
+    // inclusive, whichever way round they sit (note 2.6b).
+    #[test]
+    fn prop_range_covers_the_rows_between() {
+        let order = vec![
+            psel(TransformProp::AnchorX),
+            psel(TransformProp::PositionX),
+            psel(TransformProp::ScaleX),
+            psel(TransformProp::Rotation),
+            psel(TransformProp::Opacity),
+        ];
+        let (range, to_anchor) = prop_range(
+            &order,
+            Some(psel(TransformProp::PositionX)),
+            psel(TransformProp::Rotation),
+        );
+        assert!(!to_anchor);
+        assert_eq!(
+            range,
+            vec![
+                psel(TransformProp::PositionX),
+                psel(TransformProp::ScaleX),
+                psel(TransformProp::Rotation),
+            ]
+        );
+        // Reversed (target above the anchor) gives the same inclusive span.
+        let (range_rev, _) = prop_range(
+            &order,
+            Some(psel(TransformProp::Rotation)),
+            psel(TransformProp::PositionX),
+        );
+        assert_eq!(range_rev.len(), 3);
+        assert_eq!(range_rev.first(), Some(&psel(TransformProp::PositionX)));
+    }
+
+    // No usable anchor: Shift-click falls back to selecting just the target.
+    #[test]
+    fn prop_range_without_anchor_selects_target() {
+        let order = vec![psel(TransformProp::Rotation)];
+        let (range, to_anchor) = prop_range(&order, None, psel(TransformProp::Rotation));
+        assert!(to_anchor);
+        assert_eq!(range, vec![psel(TransformProp::Rotation)]);
     }
 }

@@ -1017,6 +1017,11 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   edit, so it is one undo step and the preview re-renders exactly as the export will. (A
   linked Position/Anchor/Scale row shows the union of both axes' keys as one diamond per time;
   dragging it moves *both* axes' keys at that time, keeping the pair in step.)
+  You can also **highlight several property rows at once** by their names, the usual list way
+  (note 2.6b): **Ctrl-click** a name to add or remove that one row, **Shift-click** to select
+  the whole run of rows between it and the last one you clicked. A plain click still picks a
+  single row and opens its curve; a Ctrl/Shift-click only changes the highlight and leaves the
+  graphed channel alone.
   (When the layer is twirled shut, the layer bar still shows a summary of all its keys.)
   Scale is special: by default x and y are locked together on a single "Scale %" row that
   keeps their ratio as you drag; the 🔓 button unlocks them into two separate rows for

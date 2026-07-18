@@ -1089,6 +1089,7 @@ pub(crate) fn effect_controls_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut 
         view_start: 0.0,
         graph_mode: true,
         selected_prop: app.selected_prop,
+        selected_props: app.selected_props.clone(),
     };
     let mut fx_edit = None;
     let mut select = None;
@@ -1124,6 +1125,7 @@ pub(crate) fn effect_controls_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut 
     // in this panel or the Timeline (both draw these rows).
     if let Some(sel) = select {
         app.selected_prop = Some(sel);
+        app.selected_props = vec![sel];
     }
     if let Some(op) = pending {
         app.commit(op);

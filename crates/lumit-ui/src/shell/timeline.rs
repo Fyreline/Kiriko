@@ -679,10 +679,12 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
             // above the ruler when a row is half-scrolled).
             let viewport = ui.clip_rect();
             ui.set_clip_rect(viewport.intersect(lane_area));
-            // Lane keyframe glyphs and the linked-pair register are rebuilt every
-            // frame: clear them before the rows repopulate them (notes 2.1/2.6).
+            // Lane keyframe glyphs, the linked-pair register and the property-row
+            // draw order are rebuilt every frame: clear them before the rows
+            // repopulate them (notes 2.1/2.6).
             app.lane_glyphs.clear();
             app.lane_linked.clear();
+            app.prop_row_order.clear();
             // Lane keyframe marquee (notes 2.1/2.6c): a press-drag on empty
             // timeline space rubber-bands a selection box. Added BEFORE the rows
             // so the layer bars and keyframe glyphs (drawn after, topmost) win
@@ -1736,6 +1738,7 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                             view_start,
                             graph_mode: app.timeline_graph_mode,
                             selected_prop: app.selected_prop,
+                            selected_props: app.selected_props.clone(),
                         };
                         let mut fx_nav_jump = None;
                         effects_rows(
@@ -1779,6 +1782,7 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                                 view_start,
                                 graph_mode: app.timeline_graph_mode,
                                 selected_prop: app.selected_prop,
+                                selected_props: app.selected_props.clone(),
                             };
                             flow_group_rows(ui, &flow_ctx, &mut pending);
                         }
@@ -2028,7 +2032,18 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
         app.fx_edit = fx_edit;
     }
     if let Some(sel) = fx_select {
+        // Clicking an effect row is a single-select: reset the multi-row set.
         app.selected_prop = Some(sel);
+        app.selected_props = vec![sel];
+    }
+    // A Shift-click on a property name ranges from the anchor over the rows drawn
+    // between (note 2.6b), resolved here now the whole draw order is known.
+    if let Some(target) = app.prop_range_target.take() {
+        let (range, anchor_to_target) = prop_range(&app.prop_row_order, app.selected_prop, target);
+        if anchor_to_target {
+            app.selected_prop = Some(target);
+        }
+        app.selected_props = range;
     }
     if let Some(op) = pending {
         follow_edit(app, &op); // the graph follows the key you just touched

@@ -1141,6 +1141,14 @@ pub struct AppState {
     /// at that time, while a standalone (unlinked) axis row moves only its own.
     /// Rebuilt each frame. Transient.
     pub lane_linked: Vec<(Uuid, lumit_core::model::TransformProp)>,
+    /// The property rows drawn this frame in visual (top-to-bottom) order, for
+    /// Shift range-select of property names (note 2.6b). Rebuilt each timeline
+    /// frame. Transient.
+    pub prop_row_order: Vec<PropSel>,
+    /// A Shift-click on a property name, resolved after the row loop against
+    /// `prop_row_order`: the range from the anchor (`selected_prop`) to this row
+    /// becomes `selected_props`. Transient.
+    pub prop_range_target: Option<PropSel>,
     /// In-flight speed-graph drag: (key index, provisional speed in
     /// value-units/second). Separate from `graph_edit` because the speed lens
     /// edits a keyframe's tangent (K-070), not its value or time.
@@ -1356,6 +1364,8 @@ impl Default for AppState {
             keyframe_clipboard: Vec::new(),
             lane_drag_commit: None,
             lane_linked: Vec::new(),
+            prop_row_order: Vec::new(),
+            prop_range_target: None,
             graph_speed_edit: None,
             graph_tangent_edit: None,
             graph_tangent_mode: None,
