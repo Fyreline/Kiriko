@@ -1894,7 +1894,7 @@ pub(crate) fn effects_rows(
     fx_edit: &mut Option<(uuid::Uuid, usize, usize, f64)>,
 ) {
     use lumit_core::fx::{self, ParamKind};
-    use lumit_core::model::EffectValue;
+    use lumit_core::model::{EffectValue, FileParam};
     let layer = ctx.layer;
     let commit =
         |effects: Vec<lumit_core::model::EffectInstance>| lumit_core::Op::SetLayerEffects {
@@ -2197,6 +2197,50 @@ pub(crate) fn effects_rows(
                                 *pending = Some(commit(effects));
                             }
                             c.data_mut(|d| d.remove::<f64>(id));
+                        }
+                    }
+                }
+                (
+                    EffectValue::File(fp),
+                    ParamKind::File {
+                        filter,
+                        filter_name,
+                    },
+                ) => {
+                    // The file's basename plus a dialog button. The path is
+                    // project data (the hold-keyed index picks it at this time);
+                    // choosing a file replaces the path set with the one pick.
+                    let (_row, mut c) = row_frame(ui, ctx, false);
+                    c.label(
+                        egui::RichText::new(ps.label)
+                            .small()
+                            .color(ctx.theme.text_muted),
+                    );
+                    let shown = fp
+                        .path_at(ctx.lt)
+                        .and_then(|p| std::path::Path::new(p).file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("No file");
+                    c.label(
+                        egui::RichText::new(shown)
+                            .small()
+                            .color(ctx.theme.text_secondary),
+                    )
+                    .on_hover_text(fp.path_at(ctx.lt).unwrap_or("No file selected"));
+                    if c.small_button(format!("Select {filter_name}\u{2026}"))
+                        .on_hover_text(format!("Choose a {filter_name} file"))
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(filter_name, filter)
+                            .pick_file()
+                        {
+                            if let Some(p) = path.to_str() {
+                                let mut effects = layer.effects.clone();
+                                effects[idx].params[pi].value =
+                                    EffectValue::File(FileParam::single(p.to_owned()));
+                                *pending = Some(commit(effects));
+                            }
                         }
                     }
                 }

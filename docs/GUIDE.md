@@ -796,6 +796,14 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   blending in between (a square key; the discrete choice a File param uses). Right-clicking a
   key still offers the same Easy ease / Linear / Hold / Delete. Whatever the handles, the
   curve always passes exactly through the keys.
+  **A file parameter** (K-111) — some effects need a *file* rather than a number, a colour LUT
+  being the first. Its row in Effect Controls shows the chosen file's name and a **Select…**
+  button that opens the usual file picker, filtered to the kind the effect wants (a LUT shows
+  only `.cube` files). Until you pick one the effect does nothing — a LUT with no file loaded
+  simply passes the picture through. A file can even be *animated*, but only as a **hold** step:
+  you keyframe which of a few files is showing when, and it switches at each key rather than
+  trying to cross-fade between two files (which would be meaningless) — it reuses the very same
+  hold keyframe described just above, so a file animates with the same tools as everything else.
   The **marquee works in both views**: drag a box over the speed view's background and the
   speed points inside it are selected, just like value keys.
   The **Retime channel's Velocity lens** can now edit *eased* ramps too: a ramp shaped with

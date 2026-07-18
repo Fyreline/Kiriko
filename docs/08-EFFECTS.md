@@ -43,6 +43,14 @@ effect's maths in a release invalidates stale cached frames rather than mixing g
   no-op is a bug unless the effect is inherently trigger-driven (Flash, Shake in
   beat-triggered mode).
 - **Reset** restores defaults per parameter and per effect.
+- **File-reference** parameters (K-111) hold a path chosen from a native file dialog, filtered
+  by the effect's declared extensions (e.g. `.cube` for a LUT). They animate only by
+  *stepping*: the stored value is a set of referenced paths plus a hold-keyframed index that
+  selects which one is live at a given time — two file paths cannot be blended, so only Hold
+  keyframes (§6.2 of [03-DATA-MODEL.md](03-DATA-MODEL.md)) apply; the common case is a single
+  path with a static index. An **unset** file resolves to identity: the effect is a no-op
+  until a file is chosen, the one sanctioned exception to the "no no-op default" rule above,
+  since a file the user must supply cannot have a tasteful default.
 
 ### 1.3 Traits
 

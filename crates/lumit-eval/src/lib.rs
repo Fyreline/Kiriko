@@ -214,6 +214,23 @@ fn feed_layer(
                     EffectValue::Choice(v) | EffectValue::Seed(v) => {
                         h.update(&v.to_le_bytes());
                     }
+                    EffectValue::File(f) => {
+                        // Which file is live at this time (the hold-keyed index
+                        // selects it); an unset param feeds a distinct 0 marker.
+                        // The path string is hashed (length-prefixed), not the
+                        // file's bytes — the same policy a footage source path
+                        // follows; the LUT loader re-reads by path + mtime.
+                        match f.path_at(lt) {
+                            Some(p) => {
+                                h.update(&[1]);
+                                h.update(&(p.len() as u64).to_le_bytes());
+                                h.update(p.as_bytes());
+                            }
+                            None => {
+                                h.update(&[0]);
+                            }
+                        }
+                    }
                 }
             }
             // A seeded effect (docs/08 §1.3 Randomness) draws from

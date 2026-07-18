@@ -16,7 +16,8 @@
 
 use crate::anim::{Animation, Property};
 use crate::model::{
-    Composition, EffectInstance, EffectKey, EffectNamespace, EffectParam, EffectValue, Layer,
+    Composition, EffectInstance, EffectKey, EffectNamespace, EffectParam, EffectValue, FileParam,
+    Layer,
 };
 
 /// Cost class (docs/08 §1.3) — consumed by degradation ordering and budgets.
@@ -94,6 +95,14 @@ pub enum ParamKind {
     /// drawn from the fresh instance id at instantiation, so two copies of
     /// a seeded effect never wobble in sync.
     Seed,
+    /// A file path chosen from a dialog (K-111), e.g. a `.cube` LUT. The
+    /// `filter` extensions (lower-case, no dot) and `filter_name` drive the
+    /// open dialog. The value carries a [`FileParam`]; it animates only by
+    /// stepping (hold keys), since two paths cannot be blended.
+    File {
+        filter: &'static [&'static str],
+        filter_name: &'static str,
+    },
 }
 
 /// The Add-effect menu's grouping (K-090): every schema declares one.
@@ -1610,6 +1619,7 @@ pub fn instantiate(match_name: &str) -> Option<EffectInstance> {
                         EffectValue::Colour(default.map(Property::fixed))
                     }
                     ParamKind::Seed => EffectValue::Seed(fresh_seed()),
+                    ParamKind::File { .. } => EffectValue::File(FileParam::empty()),
                 },
                 extra: serde_json::Map::new(),
             })

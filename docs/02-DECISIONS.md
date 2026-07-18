@@ -997,3 +997,22 @@ ULP on the dev RTX, partial-alpha pixels tested); Contrast 100 % and Mix 0 are b
 passthroughs. Resolve clamps `k` at `max(0.0)` to honour the schema's hard min; the kernel
 itself clamps nothing, staying continuous. Wired at the usual sites, built in an isolated
 worktree and merged.
+
+**K-111 · DECIDED · File-reference parameter kind, animated by stepping (K-109 skipped).**
+Effects can declare a `File` parameter (`ParamKind::File { filter, filter_name }`) whose value
+is a `FileParam { paths: Vec<String>, index: Property }` — a set of referenced file paths plus
+an f64 `index` selecting which is live at a given time. The inspector shows the file's basename
+and a "Select …" button opening a native dialog filtered by the effect's declared extensions;
+picking a file sets a single static path. It is animatable, but only by *stepping*: two paths
+cannot be blended, so the index carries **Hold keyframes only** (the discrete keyframe that
+landed just before this) and is rounded and clamped at evaluation, never landing between paths.
+This deliberately reuses the whole existing keyframe / graph / expression machinery for the
+index rather than adding a string-valued keyframe type; the common case is one path with a
+static index. An empty `paths` is the unset state and resolves to identity, so a File-param
+effect is a no-op until a file is chosen — a sanctioned exception to the no-no-op-default rule
+(§1.2), since a file the user must supply has no tasteful default. The path string joins the
+frame cache key (length-prefixed, the live path at the time), the same policy a footage source
+path follows; file *contents* are re-read by the consumer's own path+mtime cache, not this
+hash. First consumer is the coming LUT effect (§3.11). K-109 was reserved for this during
+parallel work but Contrast took K-110 first, so K-109 is intentionally skipped to keep this log
+ascending.

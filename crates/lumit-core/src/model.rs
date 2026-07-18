@@ -229,11 +229,56 @@ pub struct EffectKey {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A file-valued parameter: the set of file paths it references plus a
+/// hold-keyframed index that selects which one is live at a given time
+/// (K-111). Two file paths cannot be blended, so the index only ever *steps*
+/// (hold keyframes — see [`crate::anim::SideInterp::Hold`]); the common case is
+/// a single path with a static index. An empty `paths` means unset, and the
+/// consuming effect treats that as identity (a no-op) rather than erroring.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileParam {
+    /// The distinct file paths this parameter references (usually exactly one).
+    pub paths: Vec<String>,
+    /// f64-valued selector into `paths`, animated with hold keyframes only.
+    /// Rounded and clamped at evaluation, so it never lands between paths.
+    pub index: Property,
+}
+
+impl FileParam {
+    /// A single static path — the common, non-animated case.
+    pub fn single(path: impl Into<String>) -> Self {
+        Self {
+            paths: vec![path.into()],
+            index: Property::fixed(0.0),
+        }
+    }
+
+    /// The unset parameter (no file chosen yet).
+    pub fn empty() -> Self {
+        Self {
+            paths: Vec::new(),
+            index: Property::fixed(0.0),
+        }
+    }
+
+    /// The path live at layer time `lt` (seconds), or None when unset. The
+    /// index is rounded and clamped into range, so a hold-keyframed index steps
+    /// cleanly between paths and never selects a fraction of one.
+    pub fn path_at(&self, lt: f64) -> Option<&str> {
+        if self.paths.is_empty() {
+            return None;
+        }
+        let last = (self.paths.len() - 1) as f64;
+        let i = self.index.value_at(lt).round().clamp(0.0, last) as usize;
+        self.paths.get(i).map(String::as_str)
+    }
+}
+
 /// One effect parameter's value (docs/08-EFFECTS.md §1.2 types, v1 subset).
 /// Floats, angles and percentages are all `Float`; points animate per axis;
 /// colours animate per channel (scene-linear RGBA). Bool/Choice/Seed are
-/// static in v1 — the tier-1 staples don't keyframe them, and hold-keyframed
-/// discrete params are a recorded follow-up.
+/// static in v1 — the tier-1 staples don't keyframe them. `File` carries a
+/// path chosen from a dialog, animatable only by stepping (hold keys, K-111).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectValue {
     Float(Property),
@@ -242,6 +287,7 @@ pub enum EffectValue {
     Bool(bool),
     Choice(u32),
     Seed(u32),
+    File(FileParam),
 }
 
 /// One named parameter on an effect instance. `id` is the stable snake_case
@@ -294,6 +340,16 @@ impl EffectInstance {
                 ch[2].value_at(lt),
                 ch[3].value_at(lt),
             ]),
+            _ => None,
+        }
+    }
+
+    /// A file parameter's live path at layer time `lt` (the hold-keyframed
+    /// index selects it), or None when the parameter is absent, not a File, or
+    /// unset.
+    pub fn path_at(&self, id: &str, lt: f64) -> Option<&str> {
+        match self.param(id)? {
+            EffectValue::File(f) => f.path_at(lt),
             _ => None,
         }
     }
@@ -728,6 +784,62 @@ mod tests {
 
     fn secs(s: i64) -> CompTime {
         CompTime(Rational::new(s, 1).unwrap())
+    }
+
+    #[test]
+    fn file_param_steps_by_its_hold_keyed_index() {
+        use crate::anim::{Animation, Keyframe, SideInterp};
+
+        // Unset: no path.
+        assert_eq!(FileParam::empty().path_at(0.0), None);
+
+        // Single static path: always that path, at any time.
+        let one = FileParam::single("look.cube");
+        assert_eq!(one.path_at(0.0), Some("look.cube"));
+        assert_eq!(one.path_at(99.0), Some("look.cube"));
+
+        // Two paths, index hold-keyed 0 -> 1 at t = 2 s: the path holds until
+        // the key, then steps, and never lands between the two.
+        let hold = |t: i64, v: f64| Keyframe {
+            time: Rational::new(t, 1).unwrap(),
+            value: v,
+            interp_in: SideInterp::Hold,
+            interp_out: SideInterp::Hold,
+        };
+        let anim = FileParam {
+            paths: vec!["a.cube".into(), "b.cube".into()],
+            index: Property {
+                animation: Animation::Keyframed(vec![hold(0, 0.0), hold(2, 1.0)]),
+                extra: serde_json::Map::new(),
+            },
+        };
+        assert_eq!(anim.path_at(0.0), Some("a.cube"));
+        assert_eq!(anim.path_at(1.9), Some("a.cube")); // held right up to the key
+        assert_eq!(anim.path_at(2.0), Some("b.cube")); // steps exactly at the key
+        assert_eq!(anim.path_at(50.0), Some("b.cube")); // and stays
+
+        // A fractional or out-of-range index rounds to the nearest path and
+        // clamps into range — never an index panic.
+        let frac = |v: f64| FileParam {
+            paths: vec!["a.cube".into(), "b.cube".into()],
+            index: Property::fixed(v),
+        };
+        assert_eq!(frac(0.4).path_at(0.0), Some("a.cube"));
+        assert_eq!(frac(0.6).path_at(0.0), Some("b.cube"));
+        assert_eq!(frac(9.0).path_at(0.0), Some("b.cube")); // clamp above
+        assert_eq!(frac(-3.0).path_at(0.0), Some("a.cube")); // clamp below
+    }
+
+    #[test]
+    fn file_param_serde_round_trips() {
+        let fp = FileParam::single("C:/luts/teal-orange.cube");
+        let json = serde_json::to_string(&fp).unwrap();
+        assert_eq!(fp, serde_json::from_str::<FileParam>(&json).unwrap());
+
+        // And wrapped in an EffectValue (the shape projects save/load).
+        let ev = EffectValue::File(fp);
+        let ev_json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(ev, serde_json::from_str::<EffectValue>(&ev_json).unwrap());
     }
 
     fn comp_with_cameras() -> Composition {
