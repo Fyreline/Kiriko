@@ -407,6 +407,22 @@ pub fn run_ops(
                     },
                 );
             }
+            Resolved::Invert { mix } => {
+                tex = fx.invert(ctx, &tex, w, h, &lumit_gpu::fx::InvertOp { mix: *mix });
+            }
+            Resolved::Tint { black, white, mix } => {
+                tex = fx.tint(
+                    ctx,
+                    &tex,
+                    w,
+                    h,
+                    &lumit_gpu::fx::TintOp {
+                        black: *black,
+                        white: *white,
+                        mix: *mix,
+                    },
+                );
+            }
             Resolved::Transform {
                 anchor,
                 position,
@@ -631,7 +647,10 @@ pub fn run_ops(
             Resolved::Dof {
                 focus,
                 range,
-                aperture,
+                near_aperture,
+                far_aperture,
+                depth_invert,
+                display,
                 mix,
             } => {
                 // The k-th Dof op binds the k-th `layer_inputs` slot (docs/08
@@ -644,7 +663,20 @@ pub fn run_ops(
                 let depth = layer_inputs.get(dof_i).and_then(|o| o.as_ref());
                 dof_i += 1;
                 if let Some(depth) = depth {
-                    tex = fx.dof(ctx, &tex, w, h, depth, *focus, *range, *aperture, *mix);
+                    tex = fx.dof(
+                        ctx,
+                        &tex,
+                        w,
+                        h,
+                        depth,
+                        *focus,
+                        *range,
+                        *near_aperture,
+                        *far_aperture,
+                        *depth_invert,
+                        *display,
+                        *mix,
+                    );
                 }
             }
         }

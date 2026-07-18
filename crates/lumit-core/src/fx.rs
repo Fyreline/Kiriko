@@ -1023,6 +1023,16 @@ pub const BUILTINS: &[EffectSchema] = &[
                 kind: ParamKind::Bool { default: false },
             },
             ParamSchema {
+                // Invert the depth pass (d' = 1 - d) before the circle-of-
+                // confusion, swapping near and far — the owner's "tick to
+                // invert the depth" box (Frischluft / DOF PRO both offer it).
+                // Off (default) keeps the historical reading, so old projects
+                // are unchanged. Continuous, so the §1.6 ULP oracle still holds.
+                id: "depth_invert",
+                label: "Depth invert",
+                kind: ParamKind::Bool { default: false },
+            },
+            ParamSchema {
                 id: "focus",
                 label: "Focus distance",
                 // The in-focus depth, 0..1. Mid-depth by default so a typical
@@ -1047,14 +1057,58 @@ pub const BUILTINS: &[EffectSchema] = &[
             ParamSchema {
                 id: "aperture",
                 label: "Aperture",
-                // The maximum circle-of-confusion radius in px@comp (§2.3),
-                // reached at the farthest-from-focus depth. Clamped at zero
-                // below (a zero aperture is a passthrough), unbounded typing
-                // above the 40 px slider.
+                // The master maximum circle-of-confusion radius in px@comp
+                // (§2.3), reached at the farthest-from-focus depth. Scales both
+                // per-side radii about its default 8 (unity: `aperture / 8`), so
+                // a project saved before Near/Far existed — which has only this
+                // param — renders identically (Near/Far fall back to 8, and
+                // 8·aperture/8 = aperture on both sides). Clamped at zero below
+                // (a zero master is a passthrough), unbounded typing above the
+                // 40 px slider.
                 kind: ParamKind::Float {
                     default: 8.0,
                     slider: (0.0, 40.0),
                     hard: (Some(0.0), None),
+                },
+            },
+            ParamSchema {
+                // Per-side circle-of-confusion for the near side — depths in
+                // front of focus (`d < focus`). px@comp, scaled by the Aperture
+                // master. Owner's "adjust close/far blur separately". Absent on
+                // pre-feature projects, where it falls back to Aperture.
+                id: "near_aperture",
+                label: "Near blur",
+                kind: ParamKind::Float {
+                    default: 8.0,
+                    slider: (0.0, 40.0),
+                    hard: (Some(0.0), None),
+                },
+            },
+            ParamSchema {
+                // Per-side circle-of-confusion for the far side — depths behind
+                // focus (`d >= focus`). px@comp, scaled by the Aperture master.
+                // Absent on pre-feature projects, where it falls back to
+                // Aperture, keeping the old symmetric behaviour.
+                id: "far_aperture",
+                label: "Far blur",
+                kind: ParamKind::Float {
+                    default: 8.0,
+                    slider: (0.0, 40.0),
+                    hard: (Some(0.0), None),
+                },
+            },
+            ParamSchema {
+                // Diagnostic views (the realistic subset the reference plugins
+                // ship). Rendered is the normal blurred output; Depth map shows
+                // the post-invert depth as greyscale; Focus map is the smooth
+                // in-focus mask (white where sharp, darkening out of focus).
+                // Every mode is continuous, so the §1.6 ULP oracle holds across
+                // them. Absent on pre-feature projects → Rendered (default 0).
+                id: "display",
+                label: "Display",
+                kind: ParamKind::Choice {
+                    options: &["Rendered", "Depth map", "Focus map"],
+                    default: 0,
                 },
             },
             MIX_PARAM,
@@ -1767,6 +1821,77 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Invert (docs/08 §3.23, K-126): a simple colour inverse — out.rgb = 1 − in.rgb
+    // per channel, alpha kept. Because 1 − c is affine (not a pure scale) it does
+    // NOT commute with premultiplied alpha, so premultiplied: false: the host wraps
+    // unpremultiply → invert → re-premultiply (fused into the kernel and the CPU
+    // reference), exactly like Contrast and Gamma, so matte edges do not fringe.
+    // The inverse is taken in the compositor's scene-linear fp16 working space (the
+    // owner's "simple inverse"), so HDR values above 1 invert to honest negatives,
+    // never clipped (§2.1). Continuous everywhere, so the §1.6 oracle holds. There
+    // is no neutral no-op default — invert always inverts (§1.2) — so only Mix 0 is
+    // the identity. Category Colour, beside its grade siblings.
+    EffectSchema {
+        match_name: "invert",
+        label: "Invert",
+        version: 1,
+        category: FxCategory::Colour,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::Exact,
+            temporal: &[0],
+            premultiplied: false, // §2.2: 1 − c is affine, so it shifts matte edges
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[MIX_PARAM],
+    },
+    // Tint (docs/08 §3.24, K-127): a luminance duotone / gradient map. Two colour
+    // params — "Map black to" (default black) and "Map white to" (default white) —
+    // and out.rgb = black.rgb + (white.rgb − black.rgb) · luma(in.rgb) with Rec.709
+    // luma on the unpremultiplied linear colour, alpha kept. A luma-driven colour
+    // remap does not commute with premultiplied alpha, so premultiplied: false: the
+    // host wraps unpremultiply → map → re-premultiply (fused into the kernel and the
+    // CPU reference), exactly like Contrast and Gamma, so matte edges do not fringe.
+    // The default black→black / white→white maps every pixel to its own luma — a
+    // greyscale, a visible tasteful default (§1.2), not a no-op — so only Mix 0 is
+    // the identity. Continuous everywhere, so the §1.6 oracle holds. Category Colour,
+    // beside its grade siblings.
+    EffectSchema {
+        match_name: "tint",
+        label: "Tint",
+        version: 1,
+        category: FxCategory::Colour,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::Exact,
+            temporal: &[0],
+            premultiplied: false, // §2.2: a colour remap shifts matte edges
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "black",
+                label: "Map black to",
+                // Scene-linear RGBA (alpha ignored): the colour dark input maps to.
+                kind: ParamKind::Colour {
+                    default: [0.0, 0.0, 0.0, 1.0],
+                    range: (0.0, 4.0),
+                },
+            },
+            ParamSchema {
+                id: "white",
+                label: "Map white to",
+                // Scene-linear RGBA (alpha ignored): the colour bright input maps to.
+                kind: ParamKind::Colour {
+                    default: [1.0, 1.0, 1.0, 1.0],
+                    range: (0.0, 4.0),
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
 ];
 
 /// Look a schema up by its match name.
@@ -2121,6 +2246,25 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
+    /// Invert (docs/08 §3.23): the colour inverse `out.rgb = 1 − in.rgb` per RGB
+    /// channel on unpremultiplied colour, alpha untouched. No neutral value —
+    /// invert always inverts — so only Mix 0 is the identity.
+    Invert {
+        /// 0..1.
+        mix: f32,
+    },
+    /// Tint (docs/08 §3.24): a luminance duotone. `out.rgb = black + (white −
+    /// black)·luma(in)` with Rec.709 luma on the unpremultiplied colour, alpha
+    /// untouched. The two mapped colours resolve to scene-linear RGB at frame
+    /// time; Mix 0 is the identity.
+    Tint {
+        /// Scene-linear RGB the darkest input maps to.
+        black: [f32; 3],
+        /// Scene-linear RGB the brightest input maps to.
+        white: [f32; 3],
+        /// 0..1.
+        mix: f32,
+    },
     Transform {
         /// Anchor point, raster pixels (converted from px@comp, §2.3).
         anchor: [f32; 2],
@@ -2284,9 +2428,22 @@ pub enum Resolved {
         focus: f32,
         /// Half-width of the sharp band around `focus`, 0..1.
         range: f32,
-        /// Maximum circle-of-confusion radius in raster pixels (converted from
-        /// px@comp by the §2.3 preview factor).
-        aperture: f32,
+        /// Maximum circle-of-confusion radius for the **near** side (depths in
+        /// front of focus, `d < focus`), raster pixels — the per-side Near blur
+        /// already scaled by the Aperture master and the §2.3 preview factor.
+        near_aperture: f32,
+        /// Maximum circle-of-confusion radius for the **far** side (depths
+        /// behind focus, `d >= focus`), raster pixels — the Far blur already
+        /// scaled by the master and the preview factor.
+        far_aperture: f32,
+        /// When set, the per-pixel depth is inverted (`d' = 1 - d`) before the
+        /// circle-of-confusion, swapping near and far. A `Copy` scalar, so the
+        /// enum stays `Copy` and threads beside the depth texture unchanged.
+        depth_invert: bool,
+        /// Diagnostic view: 0 = Rendered (the blurred output), 1 = Depth map
+        /// (post-invert greyscale), 2 = Focus map (the smooth in-focus mask).
+        /// Modes 1/2 ignore the blur and Mix and write the view directly.
+        display: u32,
         /// 0..1.
         mix: f32,
     },
@@ -3034,6 +3191,25 @@ pub fn resolve_stack(
                     mix,
                 })
             }
+            "invert" => {
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::Invert { mix })
+            }
+            "tint" => {
+                // The two mapped colours resolve to scene-linear RGB at frame
+                // time (alpha ignored); the CPU reference and the WGSL kernel
+                // read the identical numbers.
+                let rgb = |id: &str, default: [f64; 4]| -> [f32; 3] {
+                    let c = e.colour_at(id, lt).unwrap_or(default);
+                    [c[0] as f32, c[1] as f32, c[2] as f32]
+                };
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::Tint {
+                    black: rgb("black", [0.0, 0.0, 0.0, 1.0]),
+                    white: rgb("white", [1.0, 1.0, 1.0, 1.0]),
+                    mix,
+                })
+            }
             "lut" => {
                 // Only Mix is Copy-carried; the `.cube` file's parsed cube is a
                 // 3D texture threaded beside the resolved op (the caller's LUT
@@ -3052,15 +3228,35 @@ pub fn resolve_stack(
                 // 1:1 and in order with the Dof ops — the threading contract.
                 let focus = (e.float_at("focus", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
                 let range = (e.float_at("range", lt).unwrap_or(0.1) as f32).clamp(0.0, 1.0);
-                // Aperture is px@comp (§2.3): scale by the preview factor so a
-                // Half preview blurs the same disc as Full, only softer.
-                let aperture =
-                    (e.float_at("aperture", lt).unwrap_or(8.0) as f32 * px_scale).max(0.0);
+                // Aperture is the px@comp master; Near/Far are the per-side
+                // radii it scales about its default 8 (unity). A pre-feature
+                // project has only `aperture` and lacks Near/Far, which then
+                // read their default 8, so each side resolves to
+                // 8·(aperture/8)·px_scale = aperture·px_scale — identical to the
+                // old single-aperture behaviour. px@comp is scaled by the §2.3
+                // preview factor so a Half preview blurs the same disc as Full.
+                let master = e.float_at("aperture", lt).unwrap_or(8.0) as f32 / 8.0;
+                let near = e.float_at("near_aperture", lt).unwrap_or(8.0) as f32;
+                let far = e.float_at("far_aperture", lt).unwrap_or(8.0) as f32;
+                let near_aperture = (near * master * px_scale).max(0.0);
+                let far_aperture = (far * master * px_scale).max(0.0);
+                // Depth invert (a plain Bool; absent on pre-feature projects,
+                // where it reads false — the historical, unchanged behaviour).
+                let depth_invert = matches!(e.param("depth_invert"), Some(EffectValue::Bool(true)));
+                // Diagnostic view (clamped to the shipped modes; absent on
+                // pre-feature projects → 0 Rendered, the normal output).
+                let display = match e.param("display") {
+                    Some(EffectValue::Choice(c)) => (*c).min(2),
+                    _ => 0,
+                };
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
                 Some(Resolved::Dof {
                     focus,
                     range,
-                    aperture,
+                    near_aperture,
+                    far_aperture,
+                    depth_invert,
+                    display,
                     mix,
                 })
             }
@@ -3322,6 +3518,8 @@ pub mod cpu {
                 gain_b,
                 mix,
             } => temperature(rgba, *gain_r, *gain_b, *mix),
+            Resolved::Invert { mix } => invert(rgba, *mix),
+            Resolved::Tint { black, white, mix } => tint(rgba, *black, *white, *mix),
             Resolved::Transform {
                 anchor,
                 position,
@@ -3758,6 +3956,55 @@ pub mod cpu {
             let sb = px[2] * gain_b;
             px[0] = px[0] * (1.0 - mix) + sr * mix;
             px[2] = px[2] * (1.0 - mix) + sb * mix;
+        }
+    }
+
+    /// Invert (docs/08 §3.23): the colour inverse `out.rgb = 1 − u` per RGB
+    /// channel in the compositor's scene-linear working space, on
+    /// unpremultiplied colour (§2.2), re-premultiplied on the way out — exactly
+    /// Contrast's and Gamma's premultiply handling. `1 − c` is affine, so it does
+    /// not commute with premultiplied alpha: the pixel is unpremultiplied,
+    /// inverted, then re-premultiplied, so matte edges do not fringe. The inverse
+    /// is a plain `1 − c` in scene-linear light — the owner's "simple inverse" —
+    /// so HDR values above 1 invert to honest negatives, never clipped (§2.1).
+    /// There is no neutral value (invert always inverts); Mix 0 is the bit-exact
+    /// identity (the `× (1 − mix) + · × mix` blend collapses to the input), and
+    /// the WGSL twin matches. Purely continuous, so it is safe under the §1.6
+    /// fp16 ULP oracle. Alpha is untouched.
+    pub fn invert(rgba: &mut [f32], mix: f32) {
+        for px in rgba.chunks_exact_mut(4) {
+            let a = px[3];
+            let u = unpremult(px);
+            for c in 0..3 {
+                let inverted = (1.0 - u[c]) * a;
+                px[c] = px[c] * (1.0 - mix) + inverted * mix;
+            }
+        }
+    }
+
+    /// Tint (docs/08 §3.24): a luminance duotone / gradient map
+    /// `out.rgb = black + (white − black)·luma(u)` per RGB channel, with Rec.709
+    /// `luma` on the unpremultiplied colour `u` (§2.2), re-premultiplied on the
+    /// way out — exactly Contrast's and Gamma's premultiply handling. A
+    /// luma-driven colour remap does not commute with premultiplied alpha, so the
+    /// pixel is unpremultiplied, mapped, then re-premultiplied, and matte edges do
+    /// not fringe. The lerp is written `black + (white − black)·luma` (not the
+    /// `black·(1 − luma) + white·luma` form) so the CPU reference and the WGSL
+    /// kernel reduce in the same order and the §1.6 oracle holds. The default
+    /// black→black / white→white maps every pixel to its own luma (a greyscale) —
+    /// a visible tasteful default, not a no-op; Mix 0 is the bit-exact identity
+    /// (the WGSL twin matches). Purely continuous, so it is safe under the §1.6
+    /// fp16 ULP oracle. Alpha is untouched.
+    pub fn tint(rgba: &mut [f32], black: [f32; 3], white: [f32; 3], mix: f32) {
+        for px in rgba.chunks_exact_mut(4) {
+            let a = px[3];
+            let u = unpremult(px);
+            let luma = u[0] * LUMA[0] + u[1] * LUMA[1] + u[2] * LUMA[2];
+            for c in 0..3 {
+                let mapped = black[c] + (white[c] - black[c]) * luma;
+                let graded = mapped * a;
+                px[c] = px[c] * (1.0 - mix) + graded * mix;
+            }
         }
     }
 
@@ -4647,11 +4894,21 @@ mod tests {
         assert_eq!(e.float_at("focus", 0.0), Some(0.5));
         assert_eq!(e.float_at("range", 0.0), Some(0.1));
         assert_eq!(e.float_at("aperture", 0.0), Some(8.0));
+        assert_eq!(e.float_at("near_aperture", 0.0), Some(8.0));
+        assert_eq!(e.float_at("far_aperture", 0.0), Some(8.0));
         assert_eq!(e.float_at("mix", 0.0), Some(100.0));
+        // Depth invert is off by default (the historical reading).
+        assert!(matches!(
+            e.param("depth_invert"),
+            Some(EffectValue::Bool(false))
+        ));
+        // Display defaults to Rendered (the normal blurred output).
+        assert!(matches!(e.param("display"), Some(EffectValue::Choice(0))));
 
         // resolve_stack carries only the scalars; the depth is threaded beside
-        // the op. Aperture is px@comp scaled by the §2.3 preview factor (here
-        // 0.5 → 4 raster px). A `dof` always resolves to exactly one
+        // the op. The default Aperture master (8) is unity, so each side
+        // resolves to its Near/Far radius (8) scaled by the §2.3 preview factor
+        // (here 0.5 → 4 raster px). A `dof` always resolves to exactly one
         // Resolved::Dof, so it stays 1:1 and in order with the depth-input list
         // even when the depth reference is unset.
         let r = resolve_stack(&[e], 0.0, 1000.0, 0.5, &MarkerContext::NONE);
@@ -4660,7 +4917,76 @@ mod tests {
             vec![Resolved::Dof {
                 focus: 0.5,
                 range: 0.1,
-                aperture: 4.0,
+                near_aperture: 4.0,
+                far_aperture: 4.0,
+                depth_invert: false,
+                display: 0,
+                mix: 1.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn dof_near_far_override_and_fall_back_to_the_aperture_master() {
+        // Near/Far override the per-side radii; the Aperture master scales both
+        // about its default 8. Set Aperture 16 (master 2×), Near 10, Far 4.
+        let mut e = instantiate("dof").unwrap();
+        for p in e.params.iter_mut() {
+            match p.id.as_str() {
+                "aperture" => p.value = EffectValue::Float(Property::fixed(16.0)),
+                "near_aperture" => p.value = EffectValue::Float(Property::fixed(10.0)),
+                "far_aperture" => p.value = EffectValue::Float(Property::fixed(4.0)),
+                _ => {}
+            }
+        }
+        let r = resolve_stack(
+            std::slice::from_ref(&e),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
+        assert_eq!(
+            r,
+            vec![Resolved::Dof {
+                focus: 0.5,
+                range: 0.1,
+                near_aperture: 20.0, // 10 · (16/8)
+                far_aperture: 8.0,   // 4 · (16/8)
+                depth_invert: false,
+                display: 0,
+                mix: 1.0,
+            }]
+        );
+
+        // A legacy instance saved before the Near/Far pair existed has only
+        // `aperture`; both sides then fall back to it, reproducing the old
+        // symmetric single-aperture behaviour exactly.
+        let mut legacy = instantiate("dof").unwrap();
+        for p in legacy.params.iter_mut() {
+            if p.id == "aperture" {
+                p.value = EffectValue::Float(Property::fixed(12.0));
+            }
+        }
+        legacy
+            .params
+            .retain(|p| p.id != "near_aperture" && p.id != "far_aperture");
+        let r = resolve_stack(
+            std::slice::from_ref(&legacy),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE,
+        );
+        assert_eq!(
+            r,
+            vec![Resolved::Dof {
+                focus: 0.5,
+                range: 0.1,
+                near_aperture: 12.0, // 8 (default) · (12/8)
+                far_aperture: 12.0,
+                depth_invert: false,
+                display: 0,
                 mix: 1.0,
             }]
         );
@@ -5635,6 +5961,101 @@ mod tests {
         let mut mixed = vec![0.4_f32, 0.5, 0.6, 1.0];
         cpu::temperature(&mut mixed, 1.5, 0.5, 0.0);
         assert_eq!(mixed, vec![0.4, 0.5, 0.6, 1.0]);
+    }
+
+    #[test]
+    fn invert_instantiates_resolves_and_inverts() {
+        let e = instantiate("invert").unwrap();
+        // The only parameter is Mix, defaulting to 100 %.
+        assert_eq!(e.float_at("mix", 0.0), Some(100.0));
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+        assert_eq!(r, vec![Resolved::Invert { mix: 1.0 }]);
+
+        // The CPU reference: an opaque pixel inverts as 1 − c, alpha untouched.
+        let mut opaque = vec![0.2_f32, 0.5, 0.9, 1.0];
+        cpu::invert(&mut opaque, 1.0);
+        for (v, want) in opaque.iter().zip([0.8_f32, 0.5, 0.1, 1.0]) {
+            assert!((v - want).abs() < 1e-6, "opaque invert: {v} vs {want}");
+        }
+        // Mix 0 is the identity at any input.
+        let mut m0 = vec![0.2_f32, 0.5, 0.9, 1.0];
+        cpu::invert(&mut m0, 0.0);
+        assert_eq!(m0, vec![0.2, 0.5, 0.9, 1.0]);
+
+        // Half-alpha pixel: invert runs on the unpremultiplied colour and is
+        // re-premultiplied — the round trip a naive invert of premultiplied
+        // colour gets wrong. Straight (0.4,0.6,0.8) at alpha 0.5 is stored
+        // premultiplied as (0.2,0.3,0.4); inverting the straight colour gives
+        // (0.6,0.4,0.2), re-premultiplied to (0.3,0.2,0.1); alpha untouched.
+        let mut half = vec![0.2_f32, 0.3, 0.4, 0.5];
+        cpu::invert(&mut half, 1.0);
+        for (v, want) in half.iter().zip([0.3_f32, 0.2, 0.1, 0.5]) {
+            assert!((v - want).abs() < 1e-6, "half-alpha invert: {v} vs {want}");
+        }
+
+        // Scene-linear HDR values above 1 invert to honest negatives (§2.1).
+        let mut hdr = vec![2.0_f32, 3.0, 0.5, 1.0];
+        cpu::invert(&mut hdr, 1.0);
+        for (v, want) in hdr.iter().zip([-1.0_f32, -2.0, 0.5, 1.0]) {
+            assert!((v - want).abs() < 1e-6, "hdr invert: {v} vs {want}");
+        }
+    }
+
+    #[test]
+    fn tint_instantiates_resolves_and_maps_luma() {
+        let e = instantiate("tint").unwrap();
+        assert_eq!(e.colour_at("black", 0.0), Some([0.0, 0.0, 0.0, 1.0]));
+        assert_eq!(e.colour_at("white", 0.0), Some([1.0, 1.0, 1.0, 1.0]));
+        // Defaults resolve to black→black, white→white (a greyscale mapping).
+        let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+        assert_eq!(
+            r,
+            vec![Resolved::Tint {
+                black: [0.0, 0.0, 0.0],
+                white: [1.0, 1.0, 1.0],
+                mix: 1.0
+            }]
+        );
+
+        // The CPU reference: default black→black / white→white maps every pixel
+        // to its own Rec.709 luma in all three channels (a greyscale).
+        let rgb = [0.8_f32, 0.2, 0.5];
+        let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+        let mut grey = vec![rgb[0], rgb[1], rgb[2], 1.0];
+        cpu::tint(&mut grey, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0);
+        for v in grey.iter().take(3) {
+            assert!((v - luma).abs() < 1e-6, "greyscale luma: {v} vs {luma}");
+        }
+        assert_eq!(grey[3], 1.0, "alpha untouched");
+
+        // A duotone: black→(0.1,0,0.2), white→(0.9,0.8,1.0). Each channel lerps
+        // by the pixel's luma. Mix 0 is the identity at any colours.
+        let black = [0.1_f32, 0.0, 0.2];
+        let white = [0.9_f32, 0.8, 1.0];
+        let mut duo = vec![rgb[0], rgb[1], rgb[2], 1.0];
+        cpu::tint(&mut duo, black, white, 1.0);
+        for c in 0..3 {
+            let want = black[c] + (white[c] - black[c]) * luma;
+            assert!(
+                (duo[c] - want).abs() < 1e-6,
+                "duotone ch{c}: {} vs {want}",
+                duo[c]
+            );
+        }
+        let mut m0 = vec![rgb[0], rgb[1], rgb[2], 1.0];
+        cpu::tint(&mut m0, black, white, 0.0);
+        assert_eq!(m0, vec![rgb[0], rgb[1], rgb[2], 1.0]);
+
+        // Half-alpha pixel: the map runs on the unpremultiplied colour and is
+        // re-premultiplied. Straight (0.8,0.2,0.5) at alpha 0.5 is stored
+        // premultiplied as (0.4,0.1,0.25); with defaults it maps to the straight
+        // luma in each channel, re-premultiplied to luma·0.5; alpha untouched.
+        let mut half = vec![0.4_f32, 0.1, 0.25, 0.5];
+        cpu::tint(&mut half, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0);
+        for v in half.iter().take(3) {
+            assert!((v - luma * 0.5).abs() < 1e-6, "half-alpha map: {v}");
+        }
+        assert_eq!(half[3], 0.5, "alpha untouched");
     }
 
     #[test]

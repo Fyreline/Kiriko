@@ -1259,3 +1259,49 @@ gained `depth_after_effects` (default false); `render_dof_inputs`/`build_dof_inp
 layer's stack before resampling, and the key folds it via `feed_effect_stack`'s Layer arm guarded
 by a one-level `allow_after_effects_refs` (a referenced layer's own layer-inputs stay source-only,
 matching the render where they render as passthrough).
+
+**K-126 · DECIDED · Invert ships as a single-frame colour effect (docs/08 §3.23).**
+A simple colour inverse — `out.rgb = 1 − in.rgb` per channel, alpha kept — with only the host
+Mix. Because `1 − c` is affine (not a pure scale) it does not commute with premultiplied alpha,
+so it declares `premultiplied: false` and the host wraps unpremultiply → invert → re-premultiply,
+exactly like Contrast and Gamma (§2.2), so matte edges do not fringe. The inverse is taken in the
+compositor's scene-linear working space as-is (the owner's "simple inverse"): values above 1.0
+invert to honest negatives, never clipped, and there is no display-referred round trip — a
+perceptual inversion is a possible later variant. Cheap cost, Exact ROI, `{0}` temporal, Colour
+category (beside the other grades). Continuous everywhere, so the §1.6 oracle holds to ≤ 2 fp16
+ULP (measured worst 1); there is no neutral no-op value (invert always inverts), and Mix 0 is the
+bit-exact identity, both pinned by test. Built in an isolated worktree; not pushed.
+
+**K-127 · DECIDED · Tint ships as a luminance-duotone colour effect (docs/08 §3.24).**
+A gradient map: two colour params, Map black to (default black) and Map white to (default white),
+and `out.rgb = black + (white − black)·luma(in)` with Rec.709 luma on the unpremultiplied colour,
+alpha kept — every pixel's brightness picks a colour on the two-colour gradient, recolouring the
+image while keeping its luminosity structure (the owner's "map all colours between two colours").
+A luma-driven remap does not commute with premultiplied alpha, so it declares `premultiplied:
+false` and the host wraps unpremultiply → map → re-premultiply, like Contrast and Gamma (§2.2).
+The lerp is written `black + (white − black)·luma` (not the `mix()` form) so the CPU reference and
+the WGSL kernel reduce in the same order. The default black→black / white→white maps every pixel
+to its own luma — a greyscale, a visible tasteful default (§1.2), not a no-op. Cheap cost, Exact
+ROI, `{0}` temporal, Colour category. Continuous everywhere, so the §1.6 oracle holds to ≤ 2 fp16
+ULP (measured worst 1); Mix 0 is the bit-exact identity, pinned by test. The two colours render
+through the inspector's existing `ParamKind::Colour` arm — no inspector change needed. The fuller
+shadows/mids/highlights Tritone is a Tier 2 follow-up (§4). Built in an isolated worktree; not
+pushed.
+**K-128 · DECIDED · Depth of field gains depth invert, separate near/far blur, and Display views
+(docs/08 §3.22).** Three owner-requested additions modelled on Frischluft / DOF PRO. (1) **Depth
+invert** (bool, default off): inverts the depth (`d' = 1 − d`) before the circle-of-confusion,
+swapping near and far. (2) **Near/Far blur** (px@comp, default 8, slider 0–40): per-side maximum
+circle-of-confusion — depths in front of focus (`d < focus`) use Near, the far side Far. The
+existing **Aperture** is retained as a **master** that scales both about its default 8 (unity:
+`radius · Aperture / 8`), so the near/far select flips only where the smoothstep `s` is zero (at
+`d = focus`) and the radius stays continuous. (3) **Display** (choice, default Rendered):
+diagnostic views — Rendered (the blur), Depth map (post-invert greyscale), Focus map (the smooth
+`1 − s` in-focus mask); Depth/Focus map short-circuit before the gather and ignore Mix. All three
+are threaded through `Resolved::Dof` (still `Copy`), the resolve arm, the CPU oracle, `DofParams`,
+`FxEngine::dof` and `fx_dof.wgsl`; the UI renders the new Bool/Float/Choice params automatically
+and the frame key hashes them via the effect-stack feed with no change. **Back-compat:** old
+`dof` instances lack the new params, so Depth invert reads off, Display reads Rendered, and
+Near/Far fall back to Aperture (both sides `8 · Aperture/8 = Aperture`), rendering identically.
+Every shipped mode is continuous, so the §1.6 ULP oracle covers invert on/off, asymmetric near/far,
+and each Display mode with no exclusion (worst 1 fp16 ULP on the RTX). Built in an isolated
+worktree.

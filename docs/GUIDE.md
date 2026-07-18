@@ -212,6 +212,23 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   kernel below, unchanged and still proven against its plain-Rust twin. One more piece the
   owner will add: the little dropdown in the effect controls that actually *picks* the depth
   layer — until that lands the effect is wired and correct but has no layer to point at yet.
+- **Depth of field grows three lens controls.** Three tick-and-slide additions, all borrowed
+  from the reference plugins. **Depth invert** is a tickbox that flips the depth map's reading
+  (`near` becomes `far` and back), so if your depth pass is the wrong way round you fix it with
+  one click instead of re-rendering it. **Near blur** and **Far blur** let you set *how much*
+  blur the close side and the far side get *separately* — a shallow foreground and a soft
+  distance, or the reverse — where before both sides shared one Aperture. Aperture now acts as a
+  **master**: it scales both sides together (its normal value, 8, means "leave Near and Far as
+  they are"), and turning it up or down blurs the whole picture more or less without touching the
+  balance between the two. Old projects saved before this — which only had the one Aperture —
+  open and look exactly the same, because Near and Far quietly start out matching it. **Display**
+  is a small dropdown of *what you're looking at*: normally **Rendered** (the finished blur), but
+  switch to **Depth map** to see the depth pass itself as a greyscale picture (handy for checking
+  it is the right way round), or **Focus map** to see a white-where-sharp mask that shows exactly
+  which parts of the frame are in focus. The two diagnostic views ignore the blur so you get a
+  clean look. As always, the graphics-card program and its plain-Rust twin were checked to agree
+  to the last bit across every one of these — invert on and off, lopsided near/far, and each
+  display mode.
 - **Depth-of-field, the foundation** — the first piece of a "lens blur" that keeps one
   distance sharp and softens everything nearer and farther, the way a real camera lens does.
   A photographic lens can only focus at one distance at a time; things off that plane spread
@@ -522,6 +539,22 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   edge pixels by their true colour and doesn't leave a fringe. Setting the Key colour is now a
   point-and-click job: use the **eyedropper** beside its swatch to sample the screen straight
   from the Viewer (see the colour picker and eyedropper note below).
+- **Invert (K-126).** The classic negative: every colour flips to its opposite — black becomes
+  white, blue becomes orange, and so on (each channel is replaced by "one minus itself"). There
+  are no dials except the shared **Mix**, so it always inverts; turn Mix down to blend the
+  negative part-way back toward the original. Like Contrast and Gamma it works on the picture's
+  *straight* colours (Lumit divides the alpha out, inverts, folds it back in) so soft edges don't
+  fringe. It flips in the compositor's own light space, which keeps it simple and truthful — very
+  bright (above-white) values honestly flip to negatives rather than being clipped, exactly as the
+  owner asked for a "simple inverse".
+- **Tint (K-127).** A two-colour recolour that keeps the *brightness* of the picture but swaps
+  its *palette*. You pick two colours — **Map black to** and **Map white to** — and Lumit reads
+  each pixel's brightness and places it on the gradient between those two: the darkest parts take
+  the first colour, the brightest take the second, everything in between blends across. Left at its
+  defaults (black→black, white→white) it turns the image black-and-white; set the two colours to,
+  say, deep teal and warm cream and you get a duotone poster look while the shading of the original
+  is preserved. Like the other colour tools it works on the straight colour under the alpha so
+  edges stay clean, and **Mix** dials the whole effect in or out.
 - **Matte: source or after-effects (K-125).** A track matte lets one layer borrow another's
   shape — its brightness or its transparency decides where the layer below shows through. Normally
   the matte reads the other layer's **raw picture**, ignoring any effects on it. But sometimes the

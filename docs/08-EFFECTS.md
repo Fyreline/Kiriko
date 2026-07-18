@@ -211,6 +211,8 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.20 | Temperature | stock CC pack white-balance | cheap | `{0}` |
 | 3.21 | Matte key | Keylight (basic) / stock chroma keyer | cheap | `{0}` |
 | 3.22 | Depth of field | Frischluft / Camera Lens Blur | moderate | `{0}` |
+| 3.23 | Invert | stock CC pack invert | cheap | `{0}` |
+| 3.24 | Tint | AE Tint / duotone | cheap | `{0}` |
 
 ### 3.1 Flow engine — optical-flow retime interpolation (Twixtor-class)
 
@@ -901,18 +903,32 @@ file. The GPU kernel and its §1.6 CPU oracle predate the wiring (`lumit_gpu::fx
 **Parameters:** Depth layer (a layer reference; unset until picked — a labelled no-op),
 Depth after effects (bool, default off — off reads the depth layer's source pixels, on runs the
 depth layer's own effect stack into the depth pass first, a graded/blurred depth map; K-125,
-same v1 temporal boundary as the after-effects matte), Focus distance (0–1, default 0.5, the
-in-focus depth), Focus range (0–1, default 0.1, the half-width of the sharp band around focus),
-Aperture (px@comp, default 8, slider 0–40, the maximum circle-of-confusion radius), Mix.
+same v1 temporal boundary as the after-effects matte), Depth invert (bool, default off — when on
+the depth is inverted, `d' = 1 − d`, before the circle-of-confusion, swapping near and far),
+Focus distance (0–1, default 0.5, the in-focus depth), Focus range (0–1, default 0.1, the
+half-width of the sharp band around focus), Aperture (px@comp, default 8, slider 0–40, the
+**master** maximum circle-of-confusion radius, scaling both per-side radii about its default 8),
+Near blur (px@comp, default 8, slider 0–40, the max circle-of-confusion on the **near** side,
+`d < focus`) and Far blur (px@comp, default 8, slider 0–40, the **far** side, `d ≥ focus`) — the
+owner's "adjust close/far blur separately", Display (choice, default Rendered — a diagnostic
+view: **Rendered** the normal blurred output, **Depth map** the post-invert depth as greyscale,
+**Focus map** the smooth in-focus mask, white where sharp), Mix.
 
 **Algorithm sketch.** Per output pixel, read the depth from the referenced layer's **red
 channel** (0..1; by convention 0 = near, 1 = far, though the effect is symmetric about
-Focus). Its distance from Focus, beyond the sharp band `range`, ramps by a smoothstep to a
-circle-of-confusion radius up to `Aperture` at the far extreme; a box-weighted integer disc
-of that radius is averaged from the source (edges clamped), then blended by Mix. Operates on
-**premultiplied** colour (the disc gathers the working premultiplied image, so coverage and
-colour blur together). `moderate` cost, ROI a padded gather (the static declaration covers
-the 40 px aperture at ≥ 1080p), `{0}` temporal. Category **Blur & sharpen**. `Aperture 0`, a
+Focus), and — when **Depth invert** is on — replace it with `1 − d` (swapping near and far).
+Its distance from Focus, beyond the sharp band `range`, ramps by a smoothstep `s` to a
+circle-of-confusion radius: `s ·` (**Near blur** where `d < focus`, else **Far blur**), each
+per-side radius already scaled by the **Aperture** master (`radius · Aperture / 8`). Because the
+near/far select flips only at `d = focus`, where `s = 0`, the radius is continuous, so the
+§1.6 ULP oracle still holds. A box-weighted integer disc of that radius is averaged from the
+source (edges clamped), then blended by Mix. The **Display** diagnostic modes (Depth map, Focus
+map) short-circuit before the gather and write their view directly, ignoring the blur and Mix;
+every shipped mode is continuous, so the §1.6 oracle covers them all (none excluded). Operates
+on **premultiplied** colour (the disc gathers the working premultiplied image, so coverage and
+colour blur together). `moderate`
+cost, ROI a padded gather (the static declaration covers the 40 px aperture at ≥ 1080p), `{0}`
+temporal. Category **Blur & sharpen**. A zero effective aperture (master or both sides at 0), a
 depth everywhere inside the sharp band, or `Mix 0` are all bit-exact passthroughs, pinned by
 the kernel oracle.
 
@@ -924,8 +940,10 @@ binds). Preview and export render the depth through **one shared helper**
 the referenced layer's source and transform (the same content a matte's key hashes), so
 editing the depth pass retires stale frames.
 
-**Status (v1, shipped, K-124):** the depth-driven disc blur above, with a depth layer +
-Focus/Range/Aperture/Mix. Deliberate v1 limitations (documented, follow-ups tracked): the
+**Status (v1, shipped, K-124; extended K-128):** the depth-driven disc blur above, with a depth
+layer + Focus/Range/Aperture/Mix, plus (K-128) Depth invert, separate Near/Far blur under the
+Aperture master, and the Rendered/Depth map/Focus map Display views. Deliberate v1 limitations
+(documented, follow-ups tracked): the
 depth layer is rendered **source-only** (its own effect stack is not applied) and **resampled
 to the consuming layer's raster** to align with the pixels the blur runs on — a
 placement-aware or effects-aware depth is a follow-up; a depth layer built purely from
@@ -935,6 +953,54 @@ preview decode planner and export decode a hidden layer-input reference exactly 
 matte source. The bokeh is a plain flat disc; shaped, bright-rimmed highlights are the
 planned "DOF PRO" second effect. The depth layer is chosen with the inspector's Layer picker
 (a dropdown of the comp's other layers); an unset or dangling reference is a no-op.
+
+### 3.23 Invert
+
+**Parameters:** Mix.
+
+**Algorithm sketch.** A simple colour inverse: `out.rgb = 1 − in.rgb` per channel, alpha
+untouched. Because `1 − c` is affine (a `1 −` offset, not a pure scale) it does **not**
+commute with premultiplied alpha, so — like Contrast and Gamma (§2.2) — it declares `alpha
+mode: unpremultiplied` and the host wraps it unpremultiply → invert → re-premultiply, so
+matte edges do not fringe. The inverse is taken in the compositor's **scene-linear working
+space** as-is (the deliberately simple choice, K-126): scene-linear values above 1.0 invert
+to honest negatives, never clipped (§2.1), and there is no display-referred round trip. There
+is no neutral no-op default — invert always inverts, so the "no no-op default" rule (§1.2) is
+satisfied trivially — and **Mix 0 is the bit-exact identity**. `cheap` cost, `Exact` ROI,
+`{0}` temporal. Category **Colour**, beside its grade siblings.
+
+**Status (v1, shipped, K-126):** the one-parameter inverse above. Continuous everywhere (a
+plain `1 − c`, no round/clamp/quantize), so the §1.6 oracle holds to ≤ 2 fp16 ULP, exercised
+on a corpus that includes partial-alpha pixels since the premultiply round trip is
+load-bearing here. The scene-linear space choice is the owner's "simple inverse"; a
+display-referred (perceptual) inversion is a possible later variant, not v1.
+
+### 3.24 Tint
+
+**Parameters:** Map black to (colour, default black `[0, 0, 0]`), Map white to (colour,
+default white `[1, 1, 1]`), Mix.
+
+**Algorithm sketch.** A luminance duotone / gradient map: `out.rgb = black + (white − black)
+· luma(in.rgb)` per channel, with `luma` the Rec. 709 weighting (0.2126·R + 0.7152·G +
+0.0722·B) on the **unpremultiplied** linear colour, alpha untouched. Every pixel's brightness
+picks a colour on the black-to-white gradient, so the image is recoloured while its luminosity
+structure is kept — the "select two colours, map everything between them" look. A luma-driven
+colour remap does not commute with premultiplied alpha, so — like Contrast and Gamma (§2.2) —
+it declares `alpha mode: unpremultiplied` and the host wraps it unpremultiply → map →
+re-premultiply, so matte edges do not fringe. The lerp is written `black + (white − black)
+· luma` (rather than `black·(1 − luma) + white·luma`) so the CPU reference and the WGSL kernel
+reduce in the same order and the §1.6 oracle holds. The **default black→black / white→white
+maps every pixel to its own luma — a greyscale**, a visible tasteful result (§1.2), not a
+no-op; **Mix 0 is the bit-exact identity**. `cheap` cost, `Exact` ROI, `{0}` temporal.
+Category **Colour**, beside its grade siblings.
+
+**Status (v1, shipped, K-127):** the two-colour luma map above. Continuous everywhere (a
+linear lerp of a luma), so the §1.6 oracle holds to ≤ 2 fp16 ULP, exercised on a corpus that
+includes partial-alpha pixels since the premultiply round trip is load-bearing here. The two
+colours render through the inspector's existing `ParamKind::Colour` arm — no inspector change
+was needed. Distinct from Colour balance's three-channel trackballs: a two-colour duotone that
+remaps by luma rather than grading in place. The fuller shadows/mids/highlights **Tritone**
+(three colour stops) is tracked as a Tier 2 follow-up (§4).
 
 ---
 
