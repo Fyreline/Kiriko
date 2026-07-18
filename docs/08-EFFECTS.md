@@ -195,6 +195,7 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.16 | Exposure | stock CC pack exposure/levels | cheap | `{0}` |
 | 3.17 | Hue shift | stock CC pack hue/saturation | cheap | `{0}` |
 | 3.18 | Contrast | stock CC pack contrast/levels | cheap | `{0}` |
+| 3.20 | Temperature | stock CC pack white-balance | cheap | `{0}` |
 
 ### 3.1 Flow engine — optical-flow retime interpolation (Twixtor-class)
 
@@ -760,6 +761,33 @@ trip is load-bearing here. Contrast 100 % (`k` 1.0) short-circuits to the input 
 plain mid-grey 0.5 rather than the 0.18 scene-linear mid-grey, so the control matches the
 familiar photo-editor contrast slider (symmetric about 50 %) rather than a light-meter grey
 card — an editing-desk feel over a colour-science one.
+
+### 3.20 Temperature
+
+**Parameters:** Temperature (a plain number, default 0, slider −100..+100, hard ±100), Mix.
+
+**Algorithm sketch.** A warm/cool white-balance shift as a per-channel gain in the
+compositor's scene-linear working space: with `k = Temperature ÷ 100`, red is scaled by
+`gain_r = 1 + 0.5·k` and blue by `gain_b = 1 − 0.5·k`, so warming (`+`) lifts red and drops
+blue and cooling (`−`) does the mirror; green and alpha are untouched. The two gains are
+computed host-side (in the resolve step) so the CPU reference and the WGSL kernel multiply by
+byte-identical `f32` factors — no arithmetic per pixel or per path beyond the multiply itself.
+**Premultiplied throughout**, exactly like Exposure (§3.16): a per-channel scalar scales
+premultiplied colour consistently (straight × gain, then × the unchanged alpha), so — unlike
+the affine Contrast and Saturation grades, whose `− pivot`/luma offset breaks that commutation
+(§2.2) — there is no unpremultiply round trip and matte edges do not shift. `cheap` cost,
+`Exact` ROI.
+
+**Status (v1, shipped, K-113):** the fifth one-knob grade, beside Exposure, Hue shift,
+Saturation and Contrast in the **Colour** category. Continuous everywhere (a linear
+per-channel scale, no round/clamp/quantize, highlights never clipped), so the §1.6 oracle
+holds to ≤ 2 fp16 ULP, exercised on a corpus that includes partial-alpha pixels to pin that
+the premultiplied multiply comes out identical on both paths. Temperature 0 resolves to gains
+exactly `(1.0, 1.0)` and short-circuits to the input on both paths (the bit-exact neutral
+point, pinned by test); Mix 0 is likewise the identity. This is the simple montage-grade
+warmth lever — a fixed ±0.5 R/B gain with green held — not the fuller white balance sketched
+for Tier 2 (§3.10: a Bradford-adapted CCT shift with a Tint axis); it is the common one-click
+warm/cool move, animatable like every other grade.
 
 ---
 

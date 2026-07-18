@@ -272,6 +272,23 @@ pub fn run_ops(
                     &lumit_gpu::fx::ContrastOp { k: *k, mix: *mix },
                 );
             }
+            Resolved::Temperature {
+                gain_r,
+                gain_b,
+                mix,
+            } => {
+                tex = fx.temperature(
+                    ctx,
+                    &tex,
+                    w,
+                    h,
+                    &lumit_gpu::fx::TemperatureOp {
+                        gain_r: *gain_r,
+                        gain_b: *gain_b,
+                        mix: *mix,
+                    },
+                );
+            }
             Resolved::Transform {
                 anchor,
                 position,

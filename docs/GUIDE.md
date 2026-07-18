@@ -431,6 +431,15 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   pixel — Lumit briefly divides the alpha back out, applies the contrast, then multiplies it
   back in, so soft edges keep their shape instead of fringing. Exposure does not need that
   step because a plain multiply already behaves the same with or without the alpha folded in.
+- **Temperature (K-113).** The warm/cool slider: drag it positive to warm the picture (more
+  red, less blue) or negative to cool it (more blue, less red), with green left alone. It is
+  a plain per-channel multiply — red and blue each get their own gain worked out once from the
+  slider (at +100, red is boosted by half and blue cut by half; 0 leaves the picture exactly
+  as it was) — so, like Exposure, it needs no alpha round trip and semi-transparent edges stay
+  clean. This is the quick one-knob warmth move, not a full colour-science white balance (that
+  fuller version, which shifts the picture along real colour-temperature lines and adds a
+  green/magenta Tint axis, is a later Tier-2 job); it is the everyday "make it feel warmer"
+  control, and it animates like every other grade.
 - `crates/lumit-core/src/lut.rs` — **reading a colour LUT (`.cube` file).** A LUT
   (look-up table) is a colour recipe a colourist bakes elsewhere: feed it a red/green/blue
   and it hands back a graded red/green/blue. The common `.cube` text format stores that as a

@@ -844,6 +844,46 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
+    // Temperature (docs/08 §3.20): a warm/cool white-balance shift as a
+    // per-channel gain in scene-linear light — the montage grade's warmth
+    // lever. `k = Temperature ÷ 100`; `gain_r = 1 + 0.5·k` boosts red as it
+    // warms, `gain_b = 1 − 0.5·k` cuts blue, green untouched. Premultiplied: a
+    // per-channel scalar scales premultiplied colour consistently (straight ×
+    // gain, then × the unchanged alpha), so no unpremultiply round trip and
+    // alpha is untouched — exactly like Exposure's pure multiply, and unlike
+    // the affine Contrast/Saturation grades (their − pivot offset breaks that
+    // commutation, §2.2). The two gains are computed host-side (in the resolve
+    // step) so the CPU reference and the kernel multiply by byte-identical
+    // factors. Temperature 0 is the neutral point (gains 1.0, bit-exact
+    // passthrough, pinned by test). Category Colour, beside its grade siblings.
+    EffectSchema {
+        match_name: "temperature",
+        label: "Temperature",
+        version: 1,
+        category: FxCategory::Colour,
+        traits: EffectTraits {
+            cost: CostClass::Cheap,
+            roi: Roi::Exact,
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "temperature",
+                label: "Temperature",
+                // A plain number: negative cools (blue up, red down), positive
+                // warms (red up, blue down). 0 is neutral. Hard ±100.
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-100.0, 100.0),
+                    hard: (Some(-100.0), Some(100.0)),
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
     // Transform (docs/08 §3.5, K-090): the layer transform group as a stack
     // entry — same parameter names, units and animatability. Its point is
     // adjustment layers: applied there, it transforms the composite of
@@ -1784,6 +1824,17 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
+    /// Temperature (docs/08 §3.20): a warm/cool white balance as a per-channel
+    /// R/B gain in scene-linear light, computed host-side, alpha untouched.
+    /// Gains `(1.0, 1.0)` (Temperature 0) are the neutral point.
+    Temperature {
+        /// Scene-linear red gain, `1 + 0.5·(temperature/100)`.
+        gain_r: f32,
+        /// Scene-linear blue gain, `1 − 0.5·(temperature/100)`.
+        gain_b: f32,
+        /// 0..1.
+        mix: f32,
+    },
     Transform {
         /// Anchor point, raster pixels (converted from px@comp, §2.3).
         anchor: [f32; 2],
@@ -2624,6 +2675,23 @@ pub fn resolve_stack(
                 let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
                 Some(Resolved::Contrast { k, mix })
             }
+            "temperature" => {
+                // k = Temperature / 100, clamped to the ±100 hard range. The
+                // two gains are computed here so the CPU reference and the WGSL
+                // kernel multiply by byte-identical f32 factors (§1.6);
+                // Temperature 0 → k 0 → gains exactly (1.0, 1.0), the neutral
+                // point.
+                let k =
+                    (e.float_at("temperature", lt).unwrap_or(0.0) as f32 / 100.0).clamp(-1.0, 1.0);
+                let gain_r = 1.0 + 0.5 * k;
+                let gain_b = 1.0 - 0.5 * k;
+                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+                Some(Resolved::Temperature {
+                    gain_r,
+                    gain_b,
+                    mix,
+                })
+            }
             "glow" => {
                 let radius_pct = e.float_at("radius", lt).unwrap_or(8.0) as f32;
                 let threshold = (e.float_at("threshold", lt).unwrap_or(1.0) as f32).max(0.0);
@@ -2869,6 +2937,11 @@ pub mod cpu {
             Resolved::Exposure { factor, mix } => exposure(rgba, *factor, *mix),
             Resolved::HueShift { m, mix } => hue_shift(rgba, *m, *mix),
             Resolved::Contrast { k, mix } => contrast(rgba, *k, *mix),
+            Resolved::Temperature {
+                gain_r,
+                gain_b,
+                mix,
+            } => temperature(rgba, *gain_r, *gain_b, *mix),
             Resolved::Transform {
                 anchor,
                 position,
@@ -3181,6 +3254,31 @@ pub mod cpu {
                 let graded = v * a;
                 px[c] = px[c] * (1.0 - mix) + graded * mix;
             }
+        }
+    }
+
+    /// Temperature (docs/08 §3.20): a warm/cool white-balance shift as a
+    /// per-channel gain in scene-linear light — red by `gain_r`, blue by
+    /// `gain_b`, green and alpha untouched. Like Exposure, a per-channel scalar
+    /// scales premultiplied colour consistently (straight × gain, then × the
+    /// unchanged alpha), so there is no unpremultiply round trip — unlike the
+    /// affine Contrast/Saturation grades, whose − pivot offset breaks that
+    /// commutation. The gains are computed host-side (in the resolve step) so
+    /// the CPU reference and the WGSL kernel multiply by the identical numbers
+    /// (§1.6). Gains `(1.0, 1.0)` (Temperature 0) short-circuit the whole
+    /// effect — the bit-exact neutral point (the WGSL twin matches); Mix 0 is
+    /// likewise the identity. Purely continuous (a linear per-channel scale),
+    /// so it is safe under the §1.6 fp16 ULP oracle; highlights are never
+    /// clipped (§2.1).
+    pub fn temperature(rgba: &mut [f32], gain_r: f32, gain_b: f32, mix: f32) {
+        if gain_r == 1.0 && gain_b == 1.0 {
+            return; // neutral: bit-exact identity (the WGSL twin matches)
+        }
+        for px in rgba.chunks_exact_mut(4) {
+            let sr = px[0] * gain_r;
+            let sb = px[2] * gain_b;
+            px[0] = px[0] * (1.0 - mix) + sr * mix;
+            px[2] = px[2] * (1.0 - mix) + sb * mix;
         }
     }
 
@@ -4915,6 +5013,64 @@ mod tests {
         let mut mixed = vec![0.2_f32, 0.3, 0.1, 1.0];
         cpu::exposure(&mut mixed, 3.0, 0.0);
         assert_eq!(mixed, vec![0.2, 0.3, 0.1, 1.0]);
+    }
+
+    #[test]
+    fn temperature_instantiates_resolves_and_warms_and_cools() {
+        let e = instantiate("temperature").unwrap();
+        assert_eq!(e.float_at("temperature", 0.0), Some(0.0));
+        // Temperature 0 resolves to neutral gains of exactly 1.0 each.
+        let r = resolve_stack(std::slice::from_ref(&e), 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+        assert_eq!(
+            r,
+            vec![Resolved::Temperature {
+                gain_r: 1.0,
+                gain_b: 1.0,
+                mix: 1.0
+            }]
+        );
+        // +100 resolves to gains (1.5, 0.5): red boosted, blue cut. −100 is the
+        // mirror (0.5, 1.5). The resolve step owns the gain formula.
+        let mut warm = e.clone();
+        for p in &mut warm.params {
+            if p.id == "temperature" {
+                p.value = EffectValue::Float(Property::fixed(100.0));
+            }
+        }
+        assert_eq!(
+            resolve_stack(&[warm], 0.0, 1000.0, 1.0, &MarkerContext::NONE),
+            vec![Resolved::Temperature {
+                gain_r: 1.5,
+                gain_b: 0.5,
+                mix: 1.0
+            }]
+        );
+        let mut cool = e;
+        for p in &mut cool.params {
+            if p.id == "temperature" {
+                p.value = EffectValue::Float(Property::fixed(-100.0));
+            }
+        }
+        assert_eq!(
+            resolve_stack(&[cool], 0.0, 1000.0, 1.0, &MarkerContext::NONE),
+            vec![Resolved::Temperature {
+                gain_r: 0.5,
+                gain_b: 1.5,
+                mix: 1.0
+            }]
+        );
+        // The CPU reference: neutral gains are the bit-exact identity; a warm
+        // shift (gains 1.5 / 0.5) boosts red and cuts blue, green and alpha
+        // untouched; Mix 0 is the identity at any gains.
+        let mut neutral = vec![0.4_f32, 0.5, 0.6, 1.0];
+        cpu::temperature(&mut neutral, 1.0, 1.0, 1.0);
+        assert_eq!(neutral, vec![0.4, 0.5, 0.6, 1.0]);
+        let mut hot = vec![0.5_f32, 0.5, 0.5, 0.8];
+        cpu::temperature(&mut hot, 1.5, 0.5, 1.0);
+        assert_eq!(hot, vec![0.75, 0.5, 0.25, 0.8]);
+        let mut mixed = vec![0.4_f32, 0.5, 0.6, 1.0];
+        cpu::temperature(&mut mixed, 1.5, 0.5, 0.0);
+        assert_eq!(mixed, vec![0.4, 0.5, 0.6, 1.0]);
     }
 
     #[test]
