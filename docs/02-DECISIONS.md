@@ -1016,3 +1016,31 @@ path follows; file *contents* are re-read by the consumer's own path+mtime cache
 hash. First consumer is the coming LUT effect (§3.11). K-109 was reserved for this during
 parallel work but Contrast took K-110 first, so K-109 is intentionally skipped to keep this log
 ascending.
+
+**K-112 · DECIDED · Gamma ships as a new single-frame grade effect (docs/08 §3.19).**
+The fifth one-knob Colour grade: a per-channel power curve `out = pow(max(in, 0), 1 ÷ gamma)` in
+scene-linear working space, alpha untouched. Float Gamma (default 1.0, slider 0.1–4.0, hard floor
+0.01 to keep `1 ÷ gamma` finite, no ceiling — Contrast's open-topped shape). The input is clamped
+to ≥ 0 before the power (scene-linear can dip negative and a power of a negative base is
+undefined); the clamp is byte-identical on CPU and GPU so the §1.6 oracle holds (≤ 1 fp16 ULP on
+the dev RTX). The exponent is `1 ÷ gamma`, so Gamma above 1 brightens mid-tones (the display-gamma
+reading), the opposite direction from Colour balance's per-channel Gamma — noted in §3.19 to avoid
+confusion. A power curve is non-linear, so it does not commute with premultiplied alpha:
+`premultiplied: false`, host-wrapped unpremultiply → curve → re-premultiply like Contrast and
+Saturation. Gamma 1.0 short-circuits to a bit-exact passthrough (not a reliance on `pow(x, 1)`
+being `x`) and Mix 0 likewise, both pinned by test. Built in an isolated worktree and merged.
+
+**K-113 · DECIDED · Temperature ships as a new single-frame grade effect (docs/08 §3.20).**
+The sixth one-knob Colour grade: a warm/cool white balance as a per-channel gain in scene-linear
+space, `gain_r = 1 + 0.5·k` and `gain_b = 1 − 0.5·k` for `k = Temperature ÷ 100` (green and alpha
+held). Float Temperature (default 0, slider −100..+100, hard ±100). The two gains are host-computed
+at resolve and passed as uniforms, so the CPU reference and the WGSL kernel multiply by
+byte-identical f32 factors. A per-channel multiply commutes with premultiplied alpha (scaling a
+premultiplied channel by a constant is exact, alpha untouched), so it declares `premultiplied:
+true` and applies straight through like Exposure — unlike the affine Contrast and Saturation
+grades, no unpremultiply round trip. Continuous everywhere (a linear scale, no round/clamp/quantize),
+so the §1.6 oracle holds (worst 1 fp16 ULP, partial-alpha tested); Temperature 0 gives gains
+exactly `(1.0, 1.0)` for a bit-exact identity, Mix 0 likewise, both pinned by test. REVIEW: the
+±0.5 R/B strength (so ±100 → red/blue gains 1.5/0.5, green held) is a taste choice for the montage
+warmth range, not a physical calibration; the fuller Bradford-adapted CCT white balance with a
+Tint axis remains a Tier-2 job (§3.10). Built in an isolated worktree and merged.
