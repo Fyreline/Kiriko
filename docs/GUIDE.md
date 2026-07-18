@@ -192,6 +192,27 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   on together, only whichever one is listed first in the effect stack gets its arrows this
   frame — the other quietly sits out, the same "missing data, do nothing" safety rule every
   temporal effect already follows.
+- **Depth-of-field, the foundation** — the first piece of a "lens blur" that keeps one
+  distance sharp and softens everything nearer and farther, the way a real camera lens does.
+  A photographic lens can only focus at one distance at a time; things off that plane spread
+  each point of light into a little disc — the bigger the disc, the blurrier it looks — and
+  the disc's size is called the *circle of confusion*. This kernel does exactly that: for
+  every pixel it looks up how *deep* that pixel is (a plain 0-to-1 "depth map", near to far),
+  works out how far that depth sits from the chosen focus distance, and from that picks a
+  blur-disc size — nothing at all inside a sharp band around focus (set by Focus distance and
+  Focus range), then easing up to a maximum (Aperture, the biggest disc in pixels) for the
+  most out-of-focus depths. It then averages a disc of the source image that size around the
+  pixel, so near-focus areas stay crisp and distant ones melt. Two honest limitations for
+  now, and they are the whole reason this landed as a *foundation* rather than a finished
+  effect: first, nothing in Lumit yet produces a real depth map — a proper version needs to
+  read depth from another layer, which is a much larger plumbing change (the same kind Motion
+  blur's motion-map needed), so for the moment the depth is something a test or a future
+  source hands in; second, the bokeh is a plain flat disc, not the shaped, bright-rimmed
+  highlights the eventual "DOF PRO" effect will add. What *is* finished and locked by a test
+  is the maths: the graphics-card program and a plain-Rust copy of it compute byte-for-byte
+  the same disc, tap for tap, so — exactly like every other effect — what the card draws
+  provably matches the reference, and a zero Aperture (or a subject sitting right on the
+  focus plane) leaves the picture untouched to the last bit.
 - **Blur gains a Radial mode** — the third and final mode of the §3.8 trio, alongside
   Gaussian and Directional. Drop a Centre point anywhere on the frame (as two percentages,
   Centre X and Centre Y, of the frame's width and height) and pick a Type: **Spin** streaks

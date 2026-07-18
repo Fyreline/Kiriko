@@ -597,6 +597,21 @@ struct DatamoshParams {
     _pad: [f32; 3],
 }
 
+/// One resolved depth-of-field pass (foundation for the planned DoF effects).
+/// The per-pixel depth arrives as its own single-channel texture (see
+/// [`upload_depth_map`] and [`FxEngine::dof`]); this uniform carries only the
+/// scalars the kernel turns a depth into a circle-of-confusion radius with,
+/// plus the host Mix. `aperture == 0` (or every pixel inside the sharp band)
+/// is a bit-exact passthrough. A neat 16 bytes — no padding.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DofParams {
+    focus: f32,
+    range: f32,
+    aperture: f32,
+    mix_amt: f32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct AdjustParams {
@@ -658,6 +673,11 @@ pub struct FxEngine {
     /// the cube as a fifth binding — a 3D texture, the first effect to need
     /// one.
     lut: wgpu::ComputePipeline,
+    /// Depth-of-field lens blur (foundation for the planned DoF effects).
+    /// Shares [`Self::mb_layout`]/`mb_pl` with Motion blur and Datamosh —
+    /// its three sampled inputs (source, unprocessed original, depth field)
+    /// plus a storage output and a uniform fit the same shape.
+    dof: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     /// The adjustment blend's own layout: three sampled inputs (below,
     /// processed, coverage) where every effect kernel takes two.
@@ -878,6 +898,7 @@ impl FxEngine {
         let echo_mod = module(include_str!("fx_echo.wgsl"), "fx-echo");
         let motion_blur_mod = module(include_str!("fx_motionblur.wgsl"), "fx-motion-blur");
         let datamosh_mod = module(include_str!("fx_datamosh.wgsl"), "fx-datamosh");
+        let dof_mod = module(include_str!("fx_dof.wgsl"), "fx-dof");
         let adjust_mod = module(include_str!("fx_adjust.wgsl"), "fx-adjust");
         let lut_mod = module(include_str!("fx_lut.wgsl"), "fx-lut");
         let blur = pipeline(&blur_mod, "fx-blur", "blur_pass");
@@ -928,6 +949,16 @@ impl FxEngine {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let dof = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("fx-dof"),
+                layout: Some(&mb_pl),
+                module: &dof_mod,
+                entry_point: Some("dof"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let adjust = ctx
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -975,6 +1006,7 @@ impl FxEngine {
             echo_mix,
             motion_blur,
             datamosh,
+            dof,
             adjust,
             lut,
             layout,
@@ -1199,6 +1231,94 @@ impl FxEngine {
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.datamosh);
+            cpass.set_bind_group(0, &bind, &[]);
+            cpass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+        }
+        ctx.queue.submit([enc.finish()]);
+        out
+    }
+
+    /// Apply one depth-of-field lens blur to a linear working texture,
+    /// returning a new texture of the same size. The foundation for the
+    /// planned DoF effects: one pass where each output pixel reads its depth
+    /// from `depth` (a single-channel field the same size as `src`, exact
+    /// f32, values in `[0, 1]` by convention), turns it into a circle-of-
+    /// confusion radius — zero inside `range` of `focus`, ramping smoothstep
+    /// to `aperture` raster pixels at the far depth extreme — and averages a
+    /// box-weighted integer disc of that radius from `src`, edges clamped,
+    /// then blends against the input by the host Mix. `depth` is consumed
+    /// exactly as `dof_reference` (the §1.6 CPU oracle) reads it and the tap
+    /// disc is byte-identical, so the two agree. Shares [`Self::mb_layout`]
+    /// with Motion blur — the depth field is the one extra sampled input over
+    /// the two-input convention. `aperture == 0`, or a Mix of 0, is a
+    /// bit-exact passthrough.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dof(
+        &self,
+        ctx: &GpuContext,
+        src: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        depth: &wgpu::Texture,
+        focus: f32,
+        range: f32,
+        aperture: f32,
+        mix: f32,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+        let out = work_texture(ctx, w, h, "fx-dof-out");
+        let ubuf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-dof-params"),
+                contents: bytemuck::bytes_of(&DofParams {
+                    focus,
+                    range,
+                    aperture,
+                    mix_amt: mix,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let view = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx-dof-bind"),
+            layout: &self.mb_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view(src)),
+                },
+                // orig-for-mix: a single pass, so the unprocessed original is
+                // the source itself.
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view(src)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&view(depth)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&view(&out)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: ubuf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fx-dof-enc"),
+            });
+        {
+            let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fx-dof-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.dof);
             cpass.set_bind_group(0, &bind, &[]);
             cpass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
         }
@@ -2344,6 +2464,54 @@ pub fn upload_flow_field(ctx: &GpuContext, u: &[f32], v: &[f32], w: u32, h: u32)
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(w * 8),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    tex
+}
+
+/// Upload a per-pixel depth map (one value per pixel, row-major, `w × h`) as a
+/// single-channel `r32float` texture for [`FxEngine::dof`]. r32float, not the
+/// working fp16 format, so the kernel reads the exact f32 depths the CPU oracle
+/// turns into circle-of-confusion radii — the only fp16 rounding is then the
+/// colour taps, matching the flow-field and other tap-based kernels. Values are
+/// depth in `[0, 1]` by convention (near..far), but the kernel clamps its ramp
+/// so any finite input is defined. `textureLoad` in the kernel reads `.x`;
+/// `bytes_per_row = w*4`.
+pub fn upload_depth_map(ctx: &GpuContext, depth: &[f32], w: u32, h: u32) -> wgpu::Texture {
+    let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fx-depth-map"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let n = (w * h) as usize;
+    let mut data = vec![0f32; n];
+    data[..n.min(depth.len())].copy_from_slice(&depth[..n.min(depth.len())]);
+    ctx.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&data),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
             rows_per_image: Some(h),
         },
         wgpu::Extent3d {
@@ -4385,5 +4553,149 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The CPU oracle for [`FxEngine::dof`]: byte-for-byte the WGSL kernel's
+    /// maths (the same CoC ramp with explicit min/max/mul, the same integer
+    /// disc taps in the same row-major order, box weighted, edges clamped,
+    /// the same `o*(1-mix)+v*mix` final blend). Consumes the fp16-quantised
+    /// image and the exact-f32 depth the GPU reads, so the two agree.
+    #[allow(clippy::too_many_arguments)]
+    fn dof_reference(
+        img: &[f32],
+        depth: &[f32],
+        w: u32,
+        h: u32,
+        focus: f32,
+        range: f32,
+        aperture: f32,
+        mix: f32,
+    ) -> Vec<f32> {
+        let wi = w as i32;
+        let hi = h as i32;
+        let mut out = vec![0.0f32; img.len()];
+        for y in 0..hi {
+            for x in 0..wi {
+                let pi = (y * wi + x) as usize;
+                let d = depth[pi];
+                let dist = (d - focus).abs();
+                let denom = (1.0f32 - range).max(1e-4);
+                // clamp(0,1) is bit-identical to the shader's min(max(·,0),1)
+                // for every finite input (the ±0 corner collapses to the same
+                // smoothstep zero and coincides in fp16), so parity holds.
+                let e = ((dist - range) / denom).clamp(0.0, 1.0);
+                let s = e * e * (3.0 - 2.0 * e);
+                let coc = aperture * s;
+                let coc2 = coc * coc;
+                let ri = coc.ceil() as i32;
+                let mut acc = [0.0f32; 4];
+                let mut wsum = 0.0f32;
+                for dy in -ri..=ri {
+                    for dx in -ri..=ri {
+                        let r2 = (dx * dx + dy * dy) as f32;
+                        if r2 <= coc2 {
+                            let sx = (x + dx).clamp(0, wi - 1);
+                            let sy = (y + dy).clamp(0, hi - 1);
+                            let si = ((sy * wi + sx) * 4) as usize;
+                            acc[0] += img[si];
+                            acc[1] += img[si + 1];
+                            acc[2] += img[si + 2];
+                            acc[3] += img[si + 3];
+                            wsum += 1.0;
+                        }
+                    }
+                }
+                let oi = pi * 4;
+                for c in 0..4 {
+                    let v = acc[c] / wsum;
+                    let o = img[oi + c];
+                    out[oi + c] = o * (1.0 - mix) + v * mix;
+                }
+            }
+        }
+        out
+    }
+
+    /// The §1.6 oracle for the depth-of-field lens blur (foundation for the
+    /// planned DoF effects): the WGSL variable-radius disc blur matches
+    /// [`dof_reference`] over a depth ramp and several focus/aperture/mix
+    /// settings. A tap-summing gather like Motion blur, reading exact
+    /// (r32float) depth and the same fp16 source, so it holds to the cheap-
+    /// class ≤ 2 fp16 ULP bound; the GPU is bit-stable (§2.4); Mix 0, a zero
+    /// aperture, and a depth that sits everywhere inside the sharp band are
+    /// all bit-exact passthroughs.
+    #[test]
+    fn wgsl_dof_matches_the_cpu_oracle() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping WGSL parity test");
+            return;
+        };
+        let fx = FxEngine::new(&ctx);
+        let (w, h) = (32u32, 24u32);
+        let img = corpus(w, h);
+        let src = upload_linear_f32(&ctx, &img, w, h);
+        let n = (w * h) as usize;
+
+        // A left-to-right depth ramp: 0 at the left edge, 1 at the right, so
+        // the CoC sweeps its whole range across the frame. r32float, uploaded
+        // exact — the depth is not fp16-quantised.
+        let mut ramp = vec![0f32; n];
+        for y in 0..h {
+            for x in 0..w {
+                ramp[(y * w + x) as usize] = x as f32 / (w - 1) as f32;
+            }
+        }
+        let depth_t = upload_depth_map(&ctx, &ramp, w, h);
+
+        // (focus, range, aperture, mix, name)
+        let cases = [
+            (0.5f32, 0.1f32, 6.0f32, 1.0f32, "centre-focus"),
+            (0.0, 0.05, 8.0, 1.0, "near-focus"),
+            (0.5, 0.1, 6.0, 0.5, "partial mix"),
+            (0.5, 0.2, 10.0, 1.0, "wide aperture"),
+        ];
+        for (focus, range, aperture, mix, name) in cases {
+            let cpu = dof_reference(&img, &ramp, w, h, focus, range, aperture, mix);
+            let out = fx.dof(&ctx, &src, w, h, &depth_t, focus, range, aperture, mix);
+            let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
+            let worst = worst_f16_ulp(&cpu, &gpu);
+            eprintln!("dof {name}: worst {worst} ulp");
+            assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
+            // Determinism (§2.4): a second run is bit-identical to the first.
+            let out2 = fx.dof(&ctx, &src, w, h, &depth_t, focus, range, aperture, mix);
+            assert_eq!(
+                gpu,
+                readback_linear_f32(&ctx, &out2, w, h).unwrap(),
+                "{name}: GPU DoF must be bit-stable"
+            );
+        }
+
+        // Mix 0 is the bit-exact input regardless of depth or aperture.
+        let out = fx.dof(&ctx, &src, w, h, &depth_t, 0.5, 0.1, 10.0, 0.0);
+        assert_eq!(
+            readback_linear_f32(&ctx, &out, w, h).unwrap(),
+            img,
+            "Mix 0 must be the bit-exact input"
+        );
+
+        // A zero aperture collapses every disc to the centre tap — a bit-exact
+        // passthrough at full Mix, whatever the depth.
+        let out = fx.dof(&ctx, &src, w, h, &depth_t, 0.5, 0.1, 0.0, 1.0);
+        assert_eq!(
+            readback_linear_f32(&ctx, &out, w, h).unwrap(),
+            img,
+            "a zero aperture must be a bit-exact passthrough"
+        );
+
+        // A depth that sits everywhere inside the sharp band leaves the CoC at
+        // zero for every pixel — also a bit-exact passthrough at full Mix,
+        // even with a large aperture.
+        let flat = upload_depth_map(&ctx, &vec![0.5f32; n], w, h);
+        let out = fx.dof(&ctx, &src, w, h, &flat, 0.5, 0.1, 10.0, 1.0);
+        assert_eq!(
+            readback_linear_f32(&ctx, &out, w, h).unwrap(),
+            img,
+            "an in-band depth must be a bit-exact passthrough"
+        );
     }
 }
