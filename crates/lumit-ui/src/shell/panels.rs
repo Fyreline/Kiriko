@@ -1092,12 +1092,26 @@ pub(crate) fn effect_controls_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut 
     };
     let mut fx_edit = None;
     let mut select = None;
+    let mut nav_jump = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .id_salt("effect-controls-scroll")
         .show(ui, |ui| {
-            effects_rows(ui, &ctx, &mut pending, &mut fx_edit, &mut select);
+            effects_rows(
+                ui,
+                &ctx,
+                &mut pending,
+                &mut fx_edit,
+                &mut select,
+                &mut nav_jump,
+            );
         });
+    // A navigator arrow jumps the playhead to the neighbouring effect key.
+    if let Some(kt) = nav_jump {
+        app.preview_frame = ((kt + ctx.off) * fps).round().max(0.0) as usize;
+        #[cfg(feature = "media")]
+        app.refresh_preview();
+    }
     // Live preview while an effect value is dragged. Only WRITE when this panel
     // has an active drag — the Timeline draws the same effect rows in the same
     // frame, and an unconditional `= None` here would clobber its drag (or vice

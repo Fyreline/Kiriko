@@ -1565,7 +1565,21 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                             graph_mode: app.timeline_graph_mode,
                             selected_prop: app.selected_prop,
                         };
-                        effects_rows(ui, &fx_ctx, &mut pending, &mut fx_edit, &mut fx_select);
+                        let mut fx_nav_jump = None;
+                        effects_rows(
+                            ui,
+                            &fx_ctx,
+                            &mut pending,
+                            &mut fx_edit,
+                            &mut fx_select,
+                            &mut fx_nav_jump,
+                        );
+                        if let Some(kt) = fx_nav_jump {
+                            app.preview_frame =
+                                ((kt + fx_ctx.off) * fx_ctx.fps).round().max(0.0) as usize;
+                            #[cfg(feature = "media")]
+                            app.refresh_preview();
+                        }
                     }
                     // Flow group (K-088): present only while the option is on.
                     if matches!(

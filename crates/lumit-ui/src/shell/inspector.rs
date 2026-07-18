@@ -2156,6 +2156,100 @@ pub(crate) fn speed_property_row(
     }
 }
 
+/// The keyframe navigator for an animated Float effect parameter — the effect
+/// twin of [`keyframe_nav`], which drives a transform property. Shown once the
+/// param is animated, right after its stopwatch: ◄ / ► jump the playhead to the
+/// previous / next key (routed out through `nav_jump` as a layer-local time,
+/// since `effects_rows` carries no `AppState`), and the diamond adds a key at
+/// the playhead or removes the one already there. Each commits one whole-stack
+/// `SetLayerEffects` (never `SetTransformProperty` — the keys live on the effect
+/// instance), so every step is one undo. Without this an animated effect
+/// parameter showed a stopwatch but no way to step or add/remove its keys from
+/// the row (the owner-reported defect).
+pub(crate) fn effect_param_nav(
+    c: &mut egui::Ui,
+    ctx: &RowCtx,
+    idx: usize,
+    pi: usize,
+    prop: &lumit_core::anim::Property,
+    pending: &mut Option<lumit_core::Op>,
+    nav_jump: &mut Option<f64>,
+) {
+    use lumit_core::anim::Animation;
+    use lumit_core::model::EffectValue;
+    let Animation::Keyframed(keys) = &prop.animation else {
+        return;
+    };
+    let tol = 0.5 / ctx.fps.max(1.0); // within half a frame counts as "on" it
+    let small = |i: Icon| egui::Button::new(crate::icons::text(i, 11.0)).frame(false);
+    // One whole-stack op writing this param's new animation.
+    let write = |ctx: &RowCtx, animation: Animation| -> lumit_core::Op {
+        let mut effects = ctx.layer.effects.clone();
+        effects[idx].params[pi].value = EffectValue::Float(lumit_core::anim::Property {
+            animation,
+            extra: serde_json::Map::new(),
+        });
+        lumit_core::Op::SetLayerEffects {
+            comp: ctx.comp_id,
+            layer: ctx.layer.id,
+            effects,
+        }
+    };
+
+    let has_prev = keys.iter().any(|k| k.time.to_f64() < ctx.lt - tol);
+    if c.add_enabled(has_prev, small(Icon::PrevKeyframe))
+        .on_hover_text("Previous keyframe")
+        .clicked()
+    {
+        *nav_jump = keys
+            .iter()
+            .rev()
+            .find(|k| k.time.to_f64() < ctx.lt - tol)
+            .map(|k| k.time.to_f64());
+    }
+
+    let on_key = keys.iter().any(|k| (k.time.to_f64() - ctx.lt).abs() < tol);
+    if c.add(small(if on_key {
+        Icon::KeyframeFilled
+    } else {
+        Icon::Keyframe
+    }))
+    .on_hover_text(if on_key {
+        "Remove keyframe here"
+    } else {
+        "Add keyframe here"
+    })
+    .clicked()
+    {
+        let animation = if on_key {
+            let kept: Vec<_> = keys
+                .iter()
+                .filter(|k| (k.time.to_f64() - ctx.lt).abs() >= tol)
+                .cloned()
+                .collect();
+            if kept.is_empty() {
+                Animation::Static(prop.value_at(ctx.lt))
+            } else {
+                Animation::Keyframed(kept)
+            }
+        } else {
+            Animation::Keyframed(upsert_key(prop, ctx.lt, prop.value_at(ctx.lt)))
+        };
+        *pending = Some(write(ctx, animation));
+    }
+
+    let has_next = keys.iter().any(|k| k.time.to_f64() > ctx.lt + tol);
+    if c.add_enabled(has_next, small(Icon::NextKeyframe))
+        .on_hover_text("Next keyframe")
+        .clicked()
+    {
+        *nav_jump = keys
+            .iter()
+            .find(|k| k.time.to_f64() > ctx.lt + tol)
+            .map(|k| k.time.to_f64());
+    }
+}
+
 /// The Effects group's rows (docs/08): an "Add effect" menu, then one block
 /// per effect — bypass / name / remove on its title row, one row per
 /// parameter beneath. Float parameters are fully animatable (stopwatch +
@@ -2172,6 +2266,10 @@ pub(crate) fn effects_rows(
     // Set to the clicked row when an effect param row is clicked (note 2.8.1),
     // for the caller to apply to `AppState::selected_prop`.
     select: &mut Option<crate::app_state::PropSel>,
+    // Set to a layer-local time when the effect-parameter navigator's prev/next
+    // arrow is clicked: `effects_rows` has no `AppState`, so the caller jumps the
+    // playhead (both the Timeline and the Effect Controls panel do this).
+    nav_jump: &mut Option<f64>,
 ) {
     use lumit_core::fx::{self, ParamKind};
     use lumit_core::model::{EffectValue, FileParam};
@@ -2389,6 +2487,10 @@ pub(crate) fn effects_rows(
                             });
                         *pending = Some(commit(effects));
                     }
+                    // The ◄ ◆ ► navigator, once the param is animated — the effect
+                    // twin of the transform rows' `keyframe_nav` (the reported bug:
+                    // effect params had a stopwatch but no navigator).
+                    effect_param_nav(&mut c, ctx, idx, pi, prop, pending, nav_jump);
                     c.label(
                         egui::RichText::new(ps.label)
                             .small()
