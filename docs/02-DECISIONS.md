@@ -1044,3 +1044,16 @@ exactly `(1.0, 1.0)` for a bit-exact identity, Mix 0 likewise, both pinned by te
 ±0.5 R/B strength (so ±100 → red/blue gains 1.5/0.5, green held) is a taste choice for the montage
 warmth range, not a physical calibration; the fuller Bradford-adapted CCT white balance with a
 Tint axis remains a Tier-2 job (§3.10). Built in an isolated worktree and merged.
+
+**K-115 · DECIDED · The Performance page gains a Background fill toggle (K-109, K-114
+skipped/reserved).** Closes the last named row of K-100's remaining list. `PerformanceSettings`
+gains `background_fill: bool` (default `true`, matching today's unconditional behaviour) with a
+struct-level `#[serde(default)]` so an older saved workspace missing the field falls back to the
+default rather than failing to deserialize (the existing three fields relied only on the
+field-level default on `Shell::settings`, which only covers a wholly-absent `settings` key, not
+a `PerformanceSettings` missing one new field — this closes that latent gap for future fields
+too). The Cache group's idle-fill loop (`shell/mod.rs`, the "Idle: fill the work area around the
+playhead" block) is gated on the new flag alongside its existing playing/interacting/in-flight
+checks; off means zero background decode/render work while idle, trading a colder cache for a
+quieter machine. K-114 is reserved for the in-flight LUT effect and intentionally skipped here to
+keep the log ascending without colliding with that session's work.

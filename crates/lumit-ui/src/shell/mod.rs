@@ -1190,7 +1190,8 @@ impl Shell {
             // Idle: fill the work area around the playhead, one frame at a
             // time (any real request supersedes the fill mid-flight). Paused
             // while scrubbing/dragging so fills don't fight the interaction.
-            if !self.app.is_playing()
+            if self.settings.background_fill
+                && !self.app.is_playing()
                 && !self.app.is_interacting()
                 && self.app.fill_in_flight.is_none()
             {

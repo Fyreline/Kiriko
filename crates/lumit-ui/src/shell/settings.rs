@@ -49,6 +49,7 @@ impl SettingsPage {
 /// budgets exactly, so an existing install is unchanged until the user moves
 /// a slider.
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct PerformanceSettings {
     /// RAM frame-cache budget, in mebibytes (the `comp_frame_cache` LRU).
     pub ram_cache_mb: u32,
@@ -57,6 +58,10 @@ pub(crate) struct PerformanceSettings {
     /// Video-memory (VRAM) frame-cache budget, in mebibytes (the GPU
     /// display-texture tier, `GpuViewer::vram`, docs/06 §5).
     pub vram_cache_mb: u32,
+    /// Whether Lumit fills the frame cache around the playhead while idle
+    /// (docs/06 §5.4). On by default; off trades a colder cache for zero
+    /// background decode/render work when the machine is busy elsewhere.
+    pub background_fill: bool,
 }
 
 /// Autosave settings (Settings → General; docs/07-UI-SPEC §15). Persisted
@@ -88,6 +93,8 @@ impl Default for PerformanceSettings {
             disk_cache_mb: 50 * 1024,
             // Matches `gpu::VRAM_TIER_CAP` (512 MiB).
             vram_cache_mb: 512,
+            // Matches today's unconditional idle-fill behaviour.
+            background_fill: true,
         }
     }
 }
@@ -411,6 +418,18 @@ impl Shell {
                     }
                 },
             );
+            settings_divider(ui, theme);
+            settings_row(
+                ui,
+                theme,
+                "Background fill",
+                Some(
+                    "Decode ahead around the playhead while idle, so scrubbing hits a warm cache.",
+                ),
+                |ui| {
+                    ui.checkbox(&mut self.settings.background_fill, "");
+                },
+            );
         });
     }
 
@@ -553,6 +572,7 @@ mod tests {
         assert_eq!(p.disk_cache_mb, 50 * 1024);
         // Matches `gpu::VRAM_TIER_CAP`.
         assert_eq!(p.vram_cache_mb, 512);
+        assert!(p.background_fill);
     }
 
     #[test]

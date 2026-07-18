@@ -1162,9 +1162,13 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   what Lumit used before the page existed, so nothing changes until you move a slider. A
   **Clear cache** button underneath empties the memory and video-memory caches straight away
   (handy after a big edit, or if you just want a clean start) — the on-disk cache is left
-  alone since clearing it would mean re-decoding footage from scratch. (More performance
-  controls — CUDA acceleration, worker counts — arrive on this page as those systems gain
-  their knobs.)
+  alone since clearing it would mean re-decoding footage from scratch. Beside it, a
+  **Background fill** switch controls whether Lumit spends its idle moments quietly decoding
+  the frames around wherever the playhead sits, so scrubbing nearby feels instant — switch it
+  off and Lumit does nothing until you actually ask for a frame, trading that warm cache for a
+  quieter machine when you're doing something else at the same time. On by default, matching
+  what Lumit always did. (More performance controls — CUDA acceleration, worker counts —
+  arrive on this page as those systems gain their knobs.)
   The **General** page holds an **Autosave** group: how often Lumit quietly saves a spare copy
   of a saved project (in minutes) and how many timestamped copies it keeps, so a crash or a
   mistake never costs more than the interval. The defaults are the same 5 minutes / 5 copies
