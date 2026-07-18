@@ -205,6 +205,26 @@ pub(crate) fn vram_evict_count(entry_bytes: &[u64], total: u64, incoming: u64, c
     n
 }
 
+/// The GPU primitives that turn a comp draw list into a linear texture,
+/// borrowed from whichever owner is compositing — the preview's [`GpuViewer`]
+/// or the export renderer (`crate::export`). Factoring the realise logic behind
+/// one borrowed handle is what lets the preview and export share a single
+/// re-render path (`render_below_at`, docs/impl/temporal-rerender.md): both
+/// drive the identical compositor, so a comp realises the same in the viewport
+/// and the file (K-031).
+#[cfg(feature = "media")]
+pub(crate) struct Realiser<'a> {
+    /// Owned handle (a cheap Arc-backed clone via [`lumit_gpu::GpuContext::
+    /// from_parts`]) so the moved realise code keeps passing `&self.ctx`
+    /// unchanged; the engines below cannot be cloned, so they stay borrowed.
+    pub ctx: lumit_gpu::GpuContext,
+    pub engine: &'a lumit_gpu::ColourEngine,
+    pub compositor: &'a lumit_gpu::Compositor,
+    pub fx: &'a lumit_gpu::fx::FxEngine,
+    pub lut_cache:
+        &'a std::cell::RefCell<std::collections::HashMap<String, crate::fxops::LoadedLut>>,
+}
+
 #[cfg(feature = "media")]
 impl GpuViewer {
     pub fn new(render_state: egui_wgpu::RenderState) -> Self {
@@ -229,6 +249,45 @@ impl GpuViewer {
         }
     }
 
+    /// A second handle to the shared device for the export thread.
+    pub fn export_context(&self) -> lumit_gpu::GpuContext {
+        lumit_gpu::GpuContext::from_parts(self.ctx.device.clone(), self.ctx.queue.clone())
+    }
+
+    /// Borrow this viewer's GPU primitives as a [`Realiser`] — the shared
+    /// draw-list compositor both the preview (here) and export
+    /// (`render_comp_linear`) drive, so a comp realises identically in the
+    /// viewport and the file (K-031).
+    fn realiser(&self) -> Realiser<'_> {
+        Realiser {
+            ctx: lumit_gpu::GpuContext::from_parts(
+                self.ctx.device.clone(),
+                self.ctx.queue.clone(),
+            ),
+            engine: &self.engine,
+            compositor: &self.compositor,
+            fx: &self.fx,
+            lut_cache: &self.lut_cache,
+        }
+    }
+
+    /// Realise a draw list into a linear comp texture — delegates to the shared
+    /// [`Realiser`].
+    fn realise(
+        &self,
+        camera: Option<lumit_core::model::CameraPose>,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        layers: &[CompLayerDraw],
+    ) -> egui_wgpu::wgpu::Texture {
+        self.realiser()
+            .realise(camera, width, height, background, layers)
+    }
+}
+
+#[cfg(feature = "media")]
+impl Realiser<'_> {
     /// Turn a layer's ordered `lut_files` into the parallel `luts` list
     /// `run_ops` binds (docs/08 §3.11): each `Some(path)` is parsed and
     /// uploaded once (cached by path), a 1D or unreadable/absent file yields a
@@ -265,11 +324,6 @@ impl GpuViewer {
                 cache.get(path).cloned()
             })
             .collect()
-    }
-
-    /// A second handle to the shared device for the export thread.
-    pub fn export_context(&self) -> lumit_gpu::GpuContext {
-        lumit_gpu::GpuContext::from_parts(self.ctx.device.clone(), self.ctx.queue.clone())
     }
 
     /// Realise a draw list into a linear comp texture (recursive for
@@ -309,7 +363,7 @@ impl GpuViewer {
                 } else {
                     let luts = self.load_luts(&d.lut_files);
                     crate::fxops::run_ops(
-                        &self.fx,
+                        self.fx,
                         &self.ctx,
                         linear,
                         d.tex_w,
@@ -322,7 +376,7 @@ impl GpuViewer {
                     )
                 };
                 Some(crate::fxops::render_layer_input(
-                    &self.compositor,
+                    self.compositor,
                     &self.ctx,
                     w,
                     h,
@@ -334,7 +388,7 @@ impl GpuViewer {
             .collect()
     }
 
-    fn realise(
+    pub(crate) fn realise(
         &self,
         camera: Option<lumit_core::model::CameraPose>,
         width: u32,
@@ -360,7 +414,7 @@ impl GpuViewer {
             let luts = self.load_luts(&l.lut_files);
             let layer_inputs = self.render_dof_inputs(&l.dof_inputs, width, height);
             let processed = crate::fxops::run_ops(
-                &self.fx,
+                self.fx,
                 &self.ctx,
                 below.clone(),
                 width,
@@ -495,7 +549,7 @@ impl GpuViewer {
                 // (§3.22); the same render export runs (K-031).
                 let layer_inputs = self.render_dof_inputs(&l.dof_inputs, w, h);
                 crate::fxops::run_ops(
-                    &self.fx,
+                    self.fx,
                     &self.ctx,
                     tex,
                     w,
@@ -563,7 +617,7 @@ impl GpuViewer {
                     } else {
                         let luts = self.load_luts(&m.lut_files);
                         crate::fxops::run_ops(
-                            &self.fx,
+                            self.fx,
                             &self.ctx,
                             linear,
                             m.tex_w,
@@ -665,7 +719,10 @@ impl GpuViewer {
             seed.as_ref(),
         )
     }
+}
 
+#[cfg(feature = "media")]
+impl GpuViewer {
     /// Realise a comp frame straight to display-ready sRGB bytes (Kura's
     /// cache-fill path — nothing is registered for painting).
     pub(crate) fn realise_to_bytes(
