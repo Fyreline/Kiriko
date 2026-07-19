@@ -199,10 +199,10 @@ parallel pass left several not-quite-right). No migration burden (pre-release).
 - [ ] A5 When a layer's last keyframe is removed, the stopwatch should switch off and the ◄ ◆ ► buttons disappear.
 
 ## Effect Controls layout (EC — ref screenshot 144)
-- [ ] EC1 Divider line below each property row (not header rows) to separate props/values.
-- [ ] EC2 The × (remove effect) moves to the right side of the panel.
-- [ ] EC3 Value boxes vertically aligned on the right of the panel's middle (truncate text when narrow).
-- [ ] EC4 A reset icon left of the × on the right side.
+- [x] EC1 Hairline under each property row (drawn in the shared `row_frame`, only across the outline column, so header rows stay undivided). Also gives TL1's row treatment.
+- [x] EC2 The × (remove effect) is now right-aligned on the effect header (right-to-left layout).
+- [ ] EC3 Value boxes right-aligned — REMAINING (the invasive one: every param arm — Float/Bool/Choice/Colour/Seed/File/Layer + the X/Y row + channel picker — needs its value wrapped in a right-aligned sub-layout). Best done with the panel visible.
+- [x] EC4 Reset icon (new `Icon::Reset` = Iconoir "refresh-double") left of the ×; resets every param on the effect to its schema default via `instantiate`.
 
 ## Timeline layout (TL — ref screenshot 145, AE-style columns)
 - [ ] TL1 Similar row treatment to Effect Controls (dividers, aligned values).

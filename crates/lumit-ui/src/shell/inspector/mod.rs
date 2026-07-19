@@ -159,6 +159,19 @@ pub(crate) fn row_frame(
             ctx.theme.surface_2,
         );
     }
+    // A hairline under each property row (EC1 / TL1): separates the stacked
+    // prop/value rows, drawn only across the outline column so it never crosses
+    // the lanes. Header rows don't call `row_frame`, so they stay undivided.
+    {
+        let mut dp = ui.painter().clone();
+        dp.set_clip_rect(ctx.viewport);
+        let right = (ctx.track_left - 6.0).max(row_rect.left());
+        dp.hline(
+            row_rect.left()..=right,
+            row_rect.bottom() - 0.5_f32,
+            egui::Stroke::new(1.0_f32, ctx.theme.hairline),
+        );
+    }
     let left_rect = egui::Rect::from_min_max(
         egui::pos2(row_rect.left() + 24.0, row_rect.top()),
         egui::pos2(

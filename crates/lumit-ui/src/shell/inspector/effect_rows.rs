@@ -558,14 +558,38 @@ pub(crate) fn effects_rows(
                 app.selected_prop = rows.first().copied();
                 app.selected_layer = Some(layer.id);
             }
-            if c.small_button("\u{00d7}")
-                .on_hover_text("Remove this effect")
-                .clicked()
-            {
-                let mut effects = layer.effects.clone();
-                effects.remove(idx);
-                *pending = Some(commit(effects));
-            }
+            // Remove (×) and reset, right-aligned on the header (EC2/EC4).
+            // Right-to-left, so × sits at the far right and the reset arrow just
+            // to its left.
+            c.with_layout(egui::Layout::right_to_left(egui::Align::Center), |c| {
+                if c.small_button("\u{00d7}")
+                    .on_hover_text("Remove this effect")
+                    .clicked()
+                {
+                    let mut effects = layer.effects.clone();
+                    effects.remove(idx);
+                    *pending = Some(commit(effects));
+                }
+                // Reset every parameter on this effect to its schema default.
+                let (rr, rresp) =
+                    c.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                let rcol = if rresp.hovered() {
+                    ctx.theme.text_primary
+                } else {
+                    ctx.theme.text_secondary
+                };
+                crate::icons::paint(c.painter(), rr, Icon::Reset, rcol, 1.3);
+                if rresp
+                    .on_hover_text("Reset this effect to its defaults")
+                    .clicked()
+                {
+                    if let Some(fresh) = lumit_core::fx::instantiate(&e.effect.match_name) {
+                        let mut effects = layer.effects.clone();
+                        effects[idx].params = fresh.params;
+                        *pending = Some(commit(effects));
+                    }
+                }
+            });
         }
         // One row per parameter, driven by the schema.
         let Some(schema) = schema else { continue };

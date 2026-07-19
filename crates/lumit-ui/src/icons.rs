@@ -101,11 +101,13 @@ pub enum Icon {
     Magnet,
     /// Sample a colour from the Viewer: an eyedropper/pipette.
     Eyedropper,
+    /// Reset a control to its default (EC4): a circular refresh arrow.
+    Reset,
 }
 
 impl Icon {
     /// Every variant, for exhaustive iteration (tests, palettes).
-    pub const ALL: [Icon; 40] = [
+    pub const ALL: [Icon; 41] = [
         Icon::Pointer,
         Icon::Move,
         Icon::Rectangle,
@@ -146,6 +148,7 @@ impl Icon {
         Icon::Cube3d,
         Icon::Magnet,
         Icon::Eyedropper,
+        Icon::Reset,
     ];
 
     /// The Iconoir icon this variant renders.
@@ -191,6 +194,7 @@ impl Icon {
             Icon::Cube3d => "cube",
             Icon::Magnet => "magnet",
             Icon::Eyedropper => "color-picker",
+            Icon::Reset => "refresh-double",
         }
     }
 
