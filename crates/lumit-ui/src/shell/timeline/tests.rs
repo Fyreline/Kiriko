@@ -268,6 +268,90 @@ mod lane_drag_tests {
         assert_eq!(linked_partner(TransformProp::Rotation), None);
         assert_eq!(linked_partner(TransformProp::ScaleY), None);
     }
+
+    /// A footage layer whose Time-remap has one interior value key at comp-time
+    /// 5s (source curve 0→2→10 over 0→5→10s), on a 10s comp.
+    fn comp_footage_retime() -> (Composition, Uuid) {
+        let lid = Uuid::now_v7();
+        let r = |n: i64| Rational::new(n, 1).unwrap();
+        let vk = [(r(0), r(0)), (r(5), r(2)), (r(10), r(10))];
+        let layer = Layer {
+            id: lid,
+            name: "F".into(),
+            kind: LayerKind::Footage {
+                item: Uuid::nil(),
+                retime: lumit_core::retime::Retime::from_value_keyframes(&vk),
+            },
+            in_point: CompTime(Rational::ZERO),
+            out_point: CompTime(r(10)),
+            start_offset: CompTime(Rational::ZERO),
+            transform: TransformGroup::default(),
+            matte: None,
+            parent: None,
+            blend: BlendMode::Normal,
+            masks: Vec::new(),
+            effects: Vec::new(),
+            switches: Switches::default(),
+            extra: serde_json::Map::new(),
+        };
+        let comp = Composition {
+            id: Uuid::now_v7(),
+            name: "C".into(),
+            width: 100,
+            height: 100,
+            frame_rate: FrameRate::new(30, 1).unwrap(),
+            duration: Duration(r(10)),
+            background: LinearColour([0.0; 4]),
+            work_area: None,
+            layers: vec![layer],
+            markers: Vec::new(),
+            motion_blur: Default::default(),
+            extra: serde_json::Map::new(),
+        };
+        (comp, lid)
+    }
+
+    /// A4: a lane drag on a Retime Time (value) key slides that interior key's
+    /// screen time; the [0, dur] endpoints stay put.
+    #[test]
+    fn retime_time_key_drags_the_interior_value_key() {
+        let (comp, lid) = comp_footage_retime();
+        let sel = [LaneKeySel {
+            layer: lid,
+            row: PropRow::Retime,
+            time: rational_at(5.0),
+        }];
+        let op = build_lane_drag_op(&comp, &sel, &[], 1.0, 30.0).unwrap();
+        let lumit_core::Op::SetLayerRetime {
+            retime: Some(rt), ..
+        } = op
+        else {
+            panic!("expected SetLayerRetime, got {op:?}");
+        };
+        let vk = rt.value_keyframes();
+        // Endpoints unchanged; the interior key moved from 5s to ~6s.
+        assert_eq!(vk.first().unwrap().0.to_f64(), 0.0);
+        assert_eq!(vk.last().unwrap().0.to_f64(), 10.0);
+        assert!(
+            (vk[1].0.to_f64() - 6.0).abs() < 0.05,
+            "interior key moved to ~6s: {:?}",
+            vk[1].0.to_f64()
+        );
+    }
+
+    /// A4: dragging a Retime ENDPOINT does nothing — the structural [0, dur]
+    /// keys are protected (only interior keys move).
+    #[test]
+    fn retime_endpoint_key_does_not_move() {
+        let (comp, lid) = comp_footage_retime();
+        let sel = [LaneKeySel {
+            layer: lid,
+            row: PropRow::Retime,
+            time: rational_at(0.0), // the start endpoint
+        }];
+        // No interior key selected, so nothing moves → no op.
+        assert!(build_lane_drag_op(&comp, &sel, &[], 1.0, 30.0).is_none());
+    }
 }
 
 #[cfg(test)]

@@ -48,6 +48,8 @@ pub(crate) fn build_lane_drag_op(
     let mut tf: Vec<TfShift> = Vec::new();
     // layer -> (effect index, param index, local time) shifts.
     let mut fx: Vec<FxShift> = Vec::new();
+    // layer -> the Retime (Time lens) value-key local times to shift (A4).
+    let mut rt: Vec<(uuid::Uuid, Vec<lumit_core::Rational>)> = Vec::new();
     {
         let mut add_tf = |layer: uuid::Uuid, prop: TransformProp, t: lumit_core::Rational| match tf
             .iter_mut()
@@ -64,6 +66,13 @@ pub(crate) fn build_lane_drag_op(
                 Some((_, v)) => v.push((effect, param, t)),
                 None => fx.push((layer, vec![(effect, param, t)])),
             };
+        let mut add_rt = |layer: uuid::Uuid, t: lumit_core::Rational| match rt
+            .iter_mut()
+            .find(|(l, _)| *l == layer)
+        {
+            Some((_, ts)) => ts.push(t),
+            None => rt.push((layer, vec![t])),
+        };
         for s in selection {
             match s.row {
                 PropRow::Transform(prop) => {
@@ -75,9 +84,9 @@ pub(crate) fn build_lane_drag_op(
                     }
                 }
                 PropRow::Effect { effect, param } => add_fx(s.layer, effect, param, s.time),
-                // The Retime channel has no draggable lane glyphs, so it never
-                // appears in a lane selection.
-                PropRow::Retime => {}
+                // The Retime channel's Time (value) keys drag like any other
+                // lane key now (A4); the speed/velocity lens is still read-only.
+                PropRow::Retime => add_rt(s.layer, s.time),
             }
         }
     }
@@ -135,6 +144,53 @@ pub(crate) fn build_lane_drag_op(
                 layer: *layer_id,
                 effects,
             });
+        }
+    }
+
+    // Retime Time-lens value keys (A4): slide the selected INTERIOR value keys'
+    // screen times by `delta`, clamped strictly between their original
+    // neighbours (min one frame apart) so the structural [0, dur] endpoints stay
+    // put and `from_value_keyframes` accepts the result. Rebuilding from the
+    // moved (local time → source time) pairs re-times when that source frame
+    // shows, exactly as dragging the Time value box does.
+    for (layer_id, times) in &rt {
+        let Some(layer) = comp.layers.iter().find(|l| l.id == *layer_id) else {
+            continue;
+        };
+        let lumit_core::model::LayerKind::Footage {
+            retime: Some(retime),
+            ..
+        } = &layer.kind
+        else {
+            continue;
+        };
+        let mut vk = retime.value_keyframes();
+        let n = vk.len();
+        if n < 3 {
+            continue; // only interior keys move; nothing between the endpoints
+        }
+        let tol = 0.5 / fps.max(1.0);
+        let gap = 1.0 / fps.max(1.0); // keep at least a frame between keys
+        let orig: Vec<f64> = vk.iter().map(|(t, _)| t.to_f64()).collect();
+        let mut moved = false;
+        for i in 1..n - 1 {
+            if times.iter().any(|t| (t.to_f64() - orig[i]).abs() < tol) {
+                let lo = orig[i - 1] + gap;
+                let hi = orig[i + 1] - gap;
+                if lo <= hi {
+                    vk[i].0 = rational_at((orig[i] + delta).clamp(lo, hi));
+                    moved = true;
+                }
+            }
+        }
+        if moved {
+            if let Some(new_rt) = lumit_core::retime::Retime::from_value_keyframes(&vk) {
+                ops.push(lumit_core::Op::SetLayerRetime {
+                    comp: comp.id,
+                    layer: *layer_id,
+                    retime: Some(new_rt),
+                });
+            }
         }
     }
 

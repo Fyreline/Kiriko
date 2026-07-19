@@ -413,6 +413,25 @@ pub(crate) fn speed_property_row(
                 interp_out: lumit_core::anim::SideInterp::Linear,
             })
             .collect();
-        draw_key_diamonds(ui, ctx, row_rect, &kf);
+        if speed_lens {
+            // Speed (Velocity) lens: read-only diamonds for now. Its own
+            // interactive editing — the Vegas-style velocity handles — lands
+            // later (owner), so the lane glyphs stay non-interactive here.
+            draw_key_diamonds(ui, ctx, row_rect, &kf);
+        } else {
+            // Time (value) lens: full parity with every other lane row (A4) —
+            // the keys select on click, join a marquee, and drag in time like a
+            // transform or effect key. The drag commit (`build_lane_drag_op`)
+            // moves the value keys' screen time, protecting the structural
+            // [0, dur] endpoints.
+            lane_keys(
+                ui,
+                app,
+                ctx,
+                row_rect,
+                crate::app_state::PropRow::Retime,
+                &kf,
+            );
+        }
     }
 }
