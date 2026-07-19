@@ -280,23 +280,27 @@ impl TransformGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LayerInputSource {
     /// Raw source pixels only — no masks, no effects.
-    #[default]
     None,
     /// Source plus its own masks, but not its effects.
     Masks,
     /// Source with its effects and masks (K-125's `after_effects = true`).
+    /// The default (owner K-142 follow-up): the most complete source is what a
+    /// new matte/depth input should sample unless the user narrows it.
+    #[default]
     EffectsAndMasks,
 }
 
 impl LayerInputSource {
     /// Migrate K-125's boolean: `true` (after effects) → `EffectsAndMasks`;
-    /// `false`/absent (source-only) → `None`. The historical source-only path
-    /// read raw source pixels, so it maps to `None`.
+    /// `false` → `Masks`. The historical source-only path (`after_effects =
+    /// false`) already applied the source's masks, so `Masks` — not `None` — is
+    /// its faithful mapping. A matte with neither field migrates to the default
+    /// (`EffectsAndMasks`) via [`MatteRefRepr`], not through this function.
     pub fn from_after_effects(after_effects: bool) -> Self {
         if after_effects {
             Self::EffectsAndMasks
         } else {
-            Self::None
+            Self::Masks
         }
     }
 
@@ -348,7 +352,8 @@ pub struct MatteRef {
     /// source + masks (`Masks`), or the source's processed picture
     /// (`EffectsAndMasks` — a keyed or blurred matte). Replaces K-125's
     /// `after_effects` bool; old projects migrate through [`MatteRefRepr`]
-    /// (`after_effects: true` → `EffectsAndMasks`, else `None`).
+    /// (`true` → `EffectsAndMasks`, `false` → `Masks`). New inputs default to
+    /// `EffectsAndMasks`.
     #[serde(default)]
     pub source: LayerInputSource,
 }
@@ -356,8 +361,9 @@ pub struct MatteRef {
 /// Deserialisation shim for [`MatteRef`] that accepts both the current
 /// `source: LayerInputSource` field and K-125's legacy `after_effects: bool`,
 /// so saved projects still load (K-142). When `source` is present it wins;
-/// otherwise the legacy bool is migrated (`true` → `EffectsAndMasks`, else
-/// `None`). New projects always serialise `source`.
+/// otherwise the legacy bool is migrated (`true` → `EffectsAndMasks`, `false`
+/// → `Masks`); a matte with neither field takes the default. New projects
+/// always serialise `source`.
 #[derive(Deserialize)]
 struct MatteRefRepr {
     layer: Uuid,
@@ -372,9 +378,12 @@ struct MatteRefRepr {
 
 impl From<MatteRefRepr> for MatteRef {
     fn from(r: MatteRefRepr) -> Self {
-        let source = r.source.unwrap_or_else(|| {
-            LayerInputSource::from_after_effects(r.after_effects.unwrap_or(false))
-        });
+        // `source` wins; else migrate the legacy bool; else the default
+        // (`EffectsAndMasks`) for a matte that predates both fields.
+        let source = r
+            .source
+            .or_else(|| r.after_effects.map(LayerInputSource::from_after_effects))
+            .unwrap_or_default();
         MatteRef {
             layer: r.layer,
             channel: r.channel,
@@ -584,7 +593,8 @@ impl EffectInstance {
     /// How a Layer-reference parameter `id` samples its source (K-142): the
     /// `<id>_source` Choice param if present (the current form, written by the
     /// inspector combobox), else the legacy `<id>_after_effects` bool (K-125:
-    /// `true` → `EffectsAndMasks`, `false` → `None`), else the default. Reading
+    /// `true` → `EffectsAndMasks`, `false` → `Masks`), else the default
+    /// (`EffectsAndMasks`). Reading
     /// the legacy bool lets a project saved with the old checkbox keep its
     /// behaviour without a migration pass over the effect stack.
     pub fn layer_source(&self, id: &str) -> LayerInputSource {
@@ -1068,18 +1078,19 @@ mod tests {
         let m: MatteRef = serde_json::from_value(with_true).unwrap();
         assert_eq!(m.source, LayerInputSource::EffectsAndMasks);
 
-        // Legacy `after_effects: false` → None (raw source).
+        // Legacy `after_effects: false` → Masks (source-only historically still
+        // applied the source's masks, so Masks is its faithful mapping).
         let mut with_false = base.clone();
         with_false
             .as_object_mut()
             .unwrap()
             .insert("after_effects".into(), serde_json::json!(false));
         let m: MatteRef = serde_json::from_value(with_false).unwrap();
-        assert_eq!(m.source, LayerInputSource::None);
+        assert_eq!(m.source, LayerInputSource::Masks);
 
-        // Absent entirely (pre-K-125) → None as well.
+        // Absent entirely (pre-K-125) → the default, Effects and masks.
         let m: MatteRef = serde_json::from_value(base.clone()).unwrap();
-        assert_eq!(m.source, LayerInputSource::None);
+        assert_eq!(m.source, LayerInputSource::EffectsAndMasks);
 
         // The current form round-trips through `source`, and never re-emits the
         // legacy bool.
@@ -1100,8 +1111,9 @@ mod tests {
         // K-142: `layer_source` prefers the `<id>_source` Choice, falls back to
         // the legacy `<id>_after_effects` bool, then the default.
         let mut e = crate::fx::instantiate("dof").unwrap();
-        // Fresh instance carries neither sibling, so it is the default (None).
-        assert_eq!(e.layer_source("depth"), LayerInputSource::None);
+        // Fresh instance carries neither sibling, so it is the default
+        // (Effects and masks — owner K-142 follow-up).
+        assert_eq!(e.layer_source("depth"), LayerInputSource::EffectsAndMasks);
 
         // A legacy bool is honoured (true → EffectsAndMasks).
         e.params.push(EffectParam {
@@ -1150,8 +1162,9 @@ mod tests {
             ],
             [0, 1, 2]
         );
-        // The default is None (matches the migrated `after_effects = false`).
-        assert_eq!(LayerInputSource::default(), None);
+        // The default is Effects and masks (owner K-142 follow-up): a new
+        // matte/depth input samples the most complete source unless narrowed.
+        assert_eq!(LayerInputSource::default(), EffectsAndMasks);
     }
 
     #[test]

@@ -190,7 +190,13 @@ pub(crate) fn viewer_overlay(
             egui::Order::Foreground,
             egui::Id::new("eyedropper-cursor"),
         ));
-        crate::icons::paint(&fg, icon_rect, crate::icons::Icon::Eyedropper, theme.accent, 1.4);
+        crate::icons::paint(
+            &fg,
+            icon_rect,
+            crate::icons::Icon::Eyedropper,
+            theme.accent,
+            1.4,
+        );
     }
 
     let region = app.eyedropper_region;

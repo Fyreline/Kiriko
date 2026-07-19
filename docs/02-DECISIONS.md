@@ -1573,20 +1573,18 @@ source with its masks **cleared** (a masks-stripped clone through the same `pixe
 the preview and export already share, so preview == export, K-031); `Masks` and `Effects and
 masks` reuse the existing source-only and after-effects paths. Storage: the matte carries
 `MatteRef::source` (replacing `after_effects`), migrated on load by a serde shim
-(`after_effects: true` → `EffectsAndMasks`, `false`/absent → `None`); a layer-input effect
+(`after_effects: true` → `EffectsAndMasks`, `false` → `Masks`, absent → the default); a layer-input effect
 carries a sibling `<id>_source` Choice, read by `EffectInstance::layer_source`, which falls back
 to the legacy `<id>_after_effects` bool so old DoF projects still key and render correctly
 (the removed `depth_after_effects` schema param). The frame key hashes the mode discriminant in
 place of the old bool byte (0/1/2), so switching modes retires stale frames, and still folds the
-source stack only for `EffectsAndMasks`. **Migration note / open question:** the historical
-source-only path (`after_effects = false`) already applied the referenced layer's *masks* (via
-the shared `pixels_for`), so `false → None` **drops masks** from any matte/depth source that had
-them (the common unmasked case is pixel-identical; a *masked* matte/depth source in source-only
-mode renders without its masks after migration). This follows the task's stated mapping and the
-docs' "raw source pixels" framing; if the owner prefers behaviour-preserving migration, flip
-`LayerInputSource::from_after_effects(false)` and the default to `Masks` (a one-line change).
-The v1 temporal boundary is unchanged (echo/flow on the source still degrade to a still). Built
-in an isolated worktree; not pushed — another agent may also claim K-142, renumber on merge if so.
+source stack only for `EffectsAndMasks`. **Default and migration (owner-decided):** a new
+matte/depth input defaults to **Effects and masks** — the most complete source is the sensible
+default. Because the historical source-only path (`after_effects = false`) already applied the
+referenced layer's *masks* (via the shared `pixels_for`), the faithful migration of the old bool
+is `true → EffectsAndMasks`, `false → Masks` (so no masks are dropped); a matte predating both
+fields takes the default. The v1 temporal boundary is unchanged (echo/flow on the source still
+degrade to a still).
 
 **K-143 · DECIDED · A reusable three-colour channel picker, and RGB split gains per-channel
 amounts.** From the owner (2026-07-19), the P2 + FX-9 channel-split work.

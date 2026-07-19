@@ -8,9 +8,8 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
 ## Reusable primitives (build first — several items depend on these)
 
 - [x] **P1 — Matte/depth-input combobox.** (done, K-142) None / Masks / Effects and masks on
-  track matte + DoF depth; old bool migrated (true→Effects and masks, false→None). NOTE: the old
-  source-only path already applied masks, so false→None strips masks from a *masked* source —
-  flip to false→Masks if you'd rather preserve old behaviour (one-liner).
+  track matte + DoF depth; old bool migrated (true→Effects and masks, false→None). Owner follow-up: default is now
+  **Effects and masks**; old `true`→Effects and masks, `false`→Masks (faithful, no mask loss).
 - [x] **P2 — Channel-colour picker.** (done, K-143) reusable `channel_picker` widget keyed by
   `channel_colour_1/2/3` ids; chromatic aberration is the first adopter.
 - [x] **P3 — Edges mode enum.** (done, K-145) Transparent / Repeat / Mirror, reusable wherever edges
