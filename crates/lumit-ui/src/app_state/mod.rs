@@ -498,6 +498,9 @@ pub enum PropRow {
     Transform(lumit_core::model::TransformProp),
     /// One effect parameter: the effect's index in the stack and the param index.
     Effect { effect: usize, param: usize },
+    /// The footage Retime channel — the "Time"/"Velocity" speed row (K-072/K-075).
+    /// One per layer (it wears two lenses but is a single channel), so no fields.
+    Retime,
 }
 
 /// A single keyframe picked out in the timeline lane/layer view (note 2.1). The

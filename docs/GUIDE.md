@@ -1278,7 +1278,13 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   (note 2.6b): **Ctrl-click** a name to add or remove that one row, **Shift-click** to select
   the whole run of rows between it and the last one you clicked. A plain click still picks a
   single row and opens its curve; a Ctrl/Shift-click only changes the highlight and leaves the
-  graphed channel alone.
+  graphed channel alone. This works the **same for every kind of row** (UI-6): transform
+  properties, effect parameters and a footage layer's Retime "Time"/"Velocity" row all select
+  and multi-select alike, and one selection can mix all three (a plain click on an effect or
+  Retime row single-selects it, exactly like a transform row). Once you have a set highlighted,
+  the command palette's **Key selected properties** adds a keyframe to every one of them at the
+  playhead in a single undo step — so you can key several channels at the same point at once,
+  each holding its current value.
   **Copy and paste keyframes (note 2.2).** With keys selected, **Ctrl/Cmd+C** copies them —
   bezier handles and all — remembering each key's time relative to the earliest one in the
   set. Move the playhead and **Ctrl/Cmd+V** drops them back down at the playhead, keeping their

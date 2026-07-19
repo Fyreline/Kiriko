@@ -131,7 +131,20 @@ pub(crate) fn speed_property_row(
         |pct: f64| Rational::from_f64_on_grid(pct / 100.0, 1000).unwrap_or(Rational::ONE);
 
     let is_graphed = app.selected_layer == Some(ctx.layer.id) && app.graph_retime;
-    let (row_rect, mut c) = row_frame(ui, ctx, is_graphed);
+    // The Retime channel is one selectable row like any other (UI-6): highlight
+    // when graphed or picked, and route a click through the shared multi-select
+    // gestures so it joins transform and effect rows in `selected_props`.
+    let sel_row = crate::app_state::PropRow::Retime;
+    let (row_rect, mut c) = row_frame(ui, ctx, is_graphed || ctx.is_selected(sel_row));
+    prop_row_select(
+        app,
+        ui,
+        row_rect,
+        crate::app_state::PropSel {
+            layer: ctx.layer.id,
+            row: sel_row,
+        },
+    );
 
     // The Retime channel wears two lenses (K-076). The Velocity lens keyframes
     // speed (percentages); the Time lens keyframes the source time on screen (a
@@ -306,20 +319,23 @@ pub(crate) fn speed_property_row(
 
     // "Time" in the value lens, "Velocity" in the derivative lens (K-076).
     let channel_name = if speed_lens { "Velocity" } else { "Time" };
-    if c.add(
-        egui::Label::new(
-            egui::RichText::new(channel_name)
-                .small()
-                .color(if is_graphed {
-                    ctx.theme.accent
-                } else {
-                    ctx.theme.text_muted
-                }),
+    let name_clicked = c
+        .add(
+            egui::Label::new(
+                egui::RichText::new(channel_name)
+                    .small()
+                    .color(if is_graphed {
+                        ctx.theme.accent
+                    } else {
+                        ctx.theme.text_muted
+                    }),
+            )
+            .sense(egui::Sense::click()),
         )
-        .sense(egui::Sense::click()),
-    )
-    .clicked()
-    {
+        .clicked();
+    // A plain click graphs the Retime channel; a Ctrl/Shift-click is a
+    // list-select gesture (handled above) and must not re-graph it.
+    if name_clicked && !ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl) {
         app.selected_layer = Some(ctx.layer.id);
         app.graph_retime = true; // graph the Retime channel (K-075)
         app.graph_reset_fit(); // a fresh channel starts fitted

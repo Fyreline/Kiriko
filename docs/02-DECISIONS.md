@@ -1866,3 +1866,26 @@ Top / Bottom crop amounts). None is required for "properly key footage" — the 
 (screen matte + clips + despill + views) is — so they are ordered after it and tracked here.
 When they land, each keeps the K-031 preview==export and §1.6 oracle guarantees. Numbered
 K-155, alongside K-154; renumber on merge if another agent also claims it.
+
+**K-158 · DECIDED · Every property row in the layer area — transform, effect and Retime —
+shares one selection, keying and navigator model (owner parity rule: transform and effect
+properties look and behave the same unless specified otherwise).** Four threads land together:
+(1) **UI-1 — linked pair rows no longer clip their value boxes.** The Anchor/Position/Scale
+rows carry a chain-link control plus one or two value boxes in the narrow outline column; the
+boxes were shaved at the column's right edge. The fix caps each pair value box at a fixed
+width (`PAIR_VALUE_W`) and tightens the row's inter-widget gap and button padding
+(`pair_row_tighten`), so `[x][link][y]` fits without clipping; single-axis rows keep their
+full-width box. Pixel-layout only, no model change. (2) **UI-6 — effect parameter rows and the
+footage Retime "Time"/"Velocity" row join the transform rows' multi-select model.** All three
+route their name/row click through one shared gesture (`prop_click_select`): a plain click
+single-selects (and, for transform/Retime, opens the curve), Ctrl/Cmd toggles, Shift ranges
+over the frame's draw order — which now records transform, Retime and effect rows alike, so a
+range or a mixed set can span all three. A new `PropRow::Retime` variant names the single
+per-layer Retime channel. The Effect Controls panel builds and resolves its own draw order each
+frame, mirroring the Timeline, so the two panels never tread on each other's range resolution.
+(3) A command-palette action **"Key selected properties"** (`AppState::key_selected_props`)
+keys every selected row at the playhead in one undo step, each holding its current value —
+transforms as `SetTransformProperty`, effects folded per layer into one `SetLayerEffects`, and
+the Retime channel as a velocity-lens speed key (lens-independent and media-free, so a mixed
+keying is deterministic). Backwards compatibility is not required (pre-release). Built in an
+isolated worktree; not pushed — renumber on merge if another agent also claims K-158.
