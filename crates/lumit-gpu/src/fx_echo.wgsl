@@ -16,13 +16,57 @@
 struct Params {
     // Accumulate: the tap's intensity. Mix: the host Mix amount.
     weight: f32,
-    // Accumulate combine: 0 = Add (sum light), 1 = Behind (accumulator over
-    // the neighbour), 2 = Max (per-channel lighten). Unused by echo_mix.
+    // Accumulate combine (FX-17/K-149), mirroring cpu::echo_blend op-for-op:
+    // 0 = Add, 1 = Behind, 2 = Max, 3 = Screen, 4 = Normal, 5 = Multiply,
+    // 6 = Overlay, 7 = Soft light, 8 = Hard light, 9 = Darken. Unused by
+    // echo_mix.
     mode: u32,
     _pad0: f32,
     _pad1: f32,
 }
 @group(0) @binding(3) var<uniform> params: Params;
+
+// W3C soft-light D(d) helper (== the compositor's `soft_light_d`).
+fn echo_soft_light_d(d: vec4<f32>) -> vec4<f32> {
+    let poly = ((16.0 * d - 12.0) * d + 4.0) * d;
+    return select(sqrt(d), poly, d <= vec4<f32>(0.25));
+}
+
+// Fold the weighted neighbour tap `n` into the accumulator `a` (both
+// premultiplied linear RGBA), per channel — the exact arithmetic order
+// cpu::echo_blend uses, so the two agree bit-for-bit (§1.6).
+fn echo_blend(mode: u32, a: vec4<f32>, n: vec4<f32>) -> vec4<f32> {
+    let one = vec4<f32>(1.0);
+    if (mode == 0u) {
+        return a + n; // Add
+    } else if (mode == 1u) {
+        return a + n * (1.0 - a.a); // Behind: accumulator over the echo
+    } else if (mode == 2u) {
+        return max(a, n); // Max: per-channel lighten
+    } else if (mode == 3u) {
+        return a + n - a * n; // Screen
+    } else if (mode == 4u) {
+        return n + a * (1.0 - n.a); // Normal: the echo over the accumulator
+    } else if (mode == 5u) {
+        return a * n; // Multiply
+    } else if (mode == 6u) {
+        // Overlay = hard light with the accumulator as the switch.
+        let lo = 2.0 * a * n;
+        let hi = one - 2.0 * (one - a) * (one - n);
+        return select(hi, lo, a <= vec4<f32>(0.5));
+    } else if (mode == 7u) {
+        // Soft light (W3C), s = n, d = a.
+        let darkened = a - (one - 2.0 * n) * a * (one - a);
+        let lightened = a + (2.0 * n - one) * (echo_soft_light_d(a) - a);
+        return select(lightened, darkened, n <= vec4<f32>(0.5));
+    } else if (mode == 8u) {
+        // Hard light: the echo is the switch.
+        let lo = 2.0 * a * n;
+        let hi = one - 2.0 * (one - a) * (one - n);
+        return select(hi, lo, n <= vec4<f32>(0.5));
+    }
+    return min(a, n); // Darken
+}
 
 @compute @workgroup_size(8, 8)
 fn echo_accumulate(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -33,15 +77,7 @@ fn echo_accumulate(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = vec2<i32>(i32(gid.x), i32(gid.y));
     let a = textureLoad(src, p, 0);
     let n = textureLoad(other, p, 0) * params.weight;
-    var o: vec4<f32>;
-    if (params.mode == 0u) {
-        o = a + n; // Add: echoes sum light behind the leading frame
-    } else if (params.mode == 1u) {
-        o = a + n * (1.0 - a.a); // Behind: the accumulator composited over the echo
-    } else {
-        o = max(a, n); // Max: per-channel lighten
-    }
-    textureStore(dst, p, o);
+    textureStore(dst, p, echo_blend(params.mode, a, n));
 }
 
 @compute @workgroup_size(8, 8)

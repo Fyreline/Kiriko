@@ -389,10 +389,12 @@ pub enum Resolved {
     },
     /// Echo / trails (docs/08 §3.13). `weights[i]` is the intensity of the
     /// echo at frame offset `-(i+1)` (0 = no echo there); the render supplies
-    /// the neighbour frame at each live offset. `mode`: 0 = Add, 1 = Behind,
-    /// 2 = Max.
+    /// the neighbour frame at each live offset. `mode` is the combine blend
+    /// (FX-17/K-149): 0 = Add, 1 = Behind, 2 = Max, 3 = Screen, 4 = Normal,
+    /// 5 = Multiply, 6 = Overlay, 7 = Soft light, 8 = Hard light, 9 = Darken.
+    /// Up to 16 echoes (the raised static window).
     Echo {
-        weights: [f32; 8],
+        weights: [f32; 16],
         mode: u32,
         /// 0..1.
         mix: f32,
@@ -1062,15 +1064,18 @@ fn resolve_one(
             // Echoes k = 1..count sit at offset -k with intensity
             // decay^k (v1 fixed one-frame spacing); the render supplies
             // the neighbour frame at each offset. weights[i] is the echo
-            // at offset -(i+1).
-            let count = (e.float_at("echoes", lt).unwrap_or(4.0).round() as i32).clamp(1, 8);
+            // at offset -(i+1). Up to 16 echoes (FX-17/K-149).
+            let count = (e.float_at("echoes", lt).unwrap_or(4.0).round() as i32).clamp(1, 16);
             let decay = (e.float_at("decay", lt).unwrap_or(0.6) as f32).clamp(0.0, 1.0);
+            // Combine blend mode; the default when the param is absent matches
+            // the schema default (Screen, index 3). Clamped to the 0..9 range
+            // the CPU oracle and WGSL kernel branch over.
             let mode = match e.param("mode") {
-                Some(EffectValue::Choice(c)) => (*c).min(2),
-                _ => 1,
+                Some(EffectValue::Choice(c)) => (*c).min(9),
+                _ => 3,
             };
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-            let mut weights = [0.0f32; 8];
+            let mut weights = [0.0f32; 16];
             for (i, w) in weights.iter_mut().enumerate() {
                 if (i as i32) < count {
                     *w = decay.powi(i as i32 + 1);

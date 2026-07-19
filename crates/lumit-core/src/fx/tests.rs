@@ -1000,6 +1000,70 @@ fn cpu_datamosh_streak_scales_the_flow_reach() {
 }
 
 #[test]
+fn echo_defaults_to_screen_caps_at_16_and_migrates_legacy_modes() {
+    // FX-17/K-149: the default blend mode is Screen (index 3), Echoes clamps
+    // to the raised 16-frame window, and the legacy mode indices 0/1/2 still
+    // resolve to Add/Behind/Max so old projects load unchanged.
+    let e = instantiate("echo").unwrap();
+    assert!(matches!(e.param("mode"), Some(EffectValue::Choice(3))));
+
+    // Echoes 20 clamps to 16 non-zero geometric weights (decay^k).
+    let mut over = e.clone();
+    for p in &mut over.params {
+        if p.id == "echoes" {
+            p.value = EffectValue::Float(Property::fixed(20.0));
+        }
+        if p.id == "decay" {
+            p.value = EffectValue::Float(Property::fixed(0.5));
+        }
+    }
+    let r = resolve_stack(&[over], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    let Resolved::Echo { weights, mode, .. } = r[0] else {
+        panic!("expected an echo op");
+    };
+    assert_eq!(mode, 3, "default mode is Screen");
+    assert!(weights.iter().all(|w| *w > 0.0), "all 16 taps are live");
+    assert!((weights[0] - 0.5).abs() < 1e-6 && (weights[15] - 0.5f32.powi(16)).abs() < 1e-9);
+
+    // Legacy modes: index 1 (Behind) and index 2 (Max) resolve unchanged.
+    for legacy_mode in [0u32, 1, 2] {
+        let mut old = e.clone();
+        for p in &mut old.params {
+            if p.id == "mode" {
+                p.value = EffectValue::Choice(legacy_mode);
+            }
+        }
+        let r = resolve_stack(&[old], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+        let Resolved::Echo { mode, .. } = r[0] else {
+            panic!("expected an echo op");
+        };
+        assert_eq!(mode, legacy_mode, "legacy mode index preserved");
+    }
+}
+
+#[test]
+fn cpu_echo_blend_modes_combine_a_single_tap() {
+    // One opaque grey pixel echoed by one darker opaque neighbour, weight 1,
+    // Mix 1 (so the output is the pure combine). Values chosen to be exact in
+    // f32: 0.5 and 0.25. Screen brightens, Multiply darkens, Darken takes the
+    // min — the standard blend maths mirrored into Echo (FX-17/K-149).
+    let current = [0.5f32, 0.5, 0.5, 1.0];
+    let neighbour = [0.25f32, 0.25, 0.25, 1.0];
+    let mut weights = [0.0f32; 16];
+    weights[0] = 1.0;
+    let run = |mode: u32| cpu::echo(&current, &[(-1, &neighbour)], weights, mode, 1.0);
+
+    // Screen (3): 0.5 + 0.25 − 0.5×0.25 = 0.625; alpha 1 + 1 − 1 = 1.
+    assert_eq!(run(3), vec![0.625, 0.625, 0.625, 1.0]);
+    // Multiply (5): 0.5 × 0.25 = 0.125.
+    assert_eq!(run(5), vec![0.125, 0.125, 0.125, 1.0]);
+    // Darken (9): min(0.5, 0.25) = 0.25.
+    assert_eq!(run(9), vec![0.25, 0.25, 0.25, 1.0]);
+    // Max (2): max(0.5, 0.25) = 0.5 — the leading frame wins.
+    assert_eq!(run(2), vec![0.5, 0.5, 0.5, 1.0]);
+}
+
+#[test]
 fn cpu_blur_identity_energy_and_mix() {
     // A 9x9 with one bright premultiplied pixel in the middle.
     let (w, h) = (9u32, 9u32);

@@ -1721,3 +1721,25 @@ intensity). The `match_name` and label stay "datamosh" for now; a rename is want
 unchosen (candidate names proposed to the owner). Spec: [08-EFFECTS.md](08-EFFECTS.md) §3.12.
 Built in an isolated worktree; not pushed — another agent may also claim K-148, renumber on
 merge if so.
+
+**K-149 · DECIDED · Echo gains the standard blend modes (default Screen) and a 16-echo cap
+(FX-17).** The Echo effect (§3.13) previously offered three combine modes (Add / Behind / Max)
+and reached at most 8 frames back. Two changes: (1) **Mode** now mirrors the comp blend set —
+Normal, Add, Multiply, Screen, Overlay, Soft light, Hard light, Lighten (the legacy Max),
+Darken — plus the echo-specific **Behind** (ghosting), with the **default changed to Screen**.
+Each mode folds the weighted echo tap into the trail **per channel in the working linear
+premultiplied space** — not the compositor's perceptual sRGB domain, because Echo composites
+light trails (linear is correct there) and a single arithmetic domain keeps the CPU oracle
+(`cpu::echo_blend`) and the WGSL `echo_accumulate` bit-for-bit identical. The legacy Choice
+indices 0/1/2 (Add/Behind/Max) are held and the new modes appended, so a project saved before
+FX-17 loads unchanged; only new instances default to Screen. (2) The **echo-count cap rises
+8 → 16**: the static `temporal` window and the resolved/kernel weight arrays grow to 16
+(`[f32; 16]`), so up to 16 neighbour frames are decoded when Echo is live — a Spacing control
+and a dynamic window (the eventual 1–32 of the spec's parameter line) remain later
+refinements. The schema bumps version 1 → 2. CPU/GPU parity and the §1.6 oracle hold: the
+oracle sweeps every mode (the additive trio two-tap at ≤4 fp16 ULP, the
+multiplicative/perceptual modes single-tap at ≤8, the looser bound justified by their local
+slope amplifying the fp16 quantisation of the current frame against HDR neighbours — still
+orders of magnitude tighter than any formula error). Spec: [08-EFFECTS.md](08-EFFECTS.md)
+§3.13. Built in an isolated worktree; not pushed — another agent may also claim K-149,
+renumber on merge if so.

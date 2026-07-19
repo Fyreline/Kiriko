@@ -1792,24 +1792,27 @@ pub const BUILTINS: &[EffectSchema] = &[
     // the render decodes the layer's source at those offsets). v1 status,
     // pinned here: echoes are spaced one comp frame apart (a Spacing control
     // is a later refinement), so the window reaches back Echoes frames, up to
-    // 8 (the static trait cap). Each echo k is at offset -k with intensity
-    // Decay^k, a geometric trail. Mode chooses how the echoes combine with
-    // the leading frame — Add sums light (bright trails), Behind lays them
-    // under it (ghosting), Max lightens per channel. Cheap and full-frame
-    // (it reads whole neighbour frames). Operates on the layer's *source*
-    // frames, not the upstream stack's output at those times (full temporal
-    // stacking is later) — so it echoes the footage, placed by the layer's
-    // own transform like any effect output.
+    // 16 (the static trait cap, raised from 8 by FX-17/K-149). Each echo k is
+    // at offset -k with intensity Decay^k, a geometric trail. Mode chooses how
+    // each echo combines into the trail — the standard compositing blend modes
+    // (default Screen, FX-17/K-149) plus the echo-specific Behind (ghosting)
+    // and Max (lighten). Cheap and full-frame (it reads whole neighbour
+    // frames). Operates on the layer's *source* frames, not the upstream
+    // stack's output at those times (full temporal stacking is later) — so it
+    // echoes the footage, placed by the layer's own transform like any effect
+    // output.
     EffectSchema {
         groups: &[],
         match_name: "echo",
         label: "Echo",
-        version: 1,
+        version: 2,
         category: FxCategory::Temporal,
         traits: EffectTraits {
             cost: CostClass::Cheap,
             roi: Roi::FullFrame,
-            temporal: &[0, -1, -2, -3, -4, -5, -6, -7, -8],
+            temporal: &[
+                0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16,
+            ],
             premultiplied: true,
             seeded: false,
             beat_input: false,
@@ -1819,11 +1822,12 @@ pub const BUILTINS: &[EffectSchema] = &[
                 id: "echoes",
                 label: "Echoes",
                 // Count of trailing frames; each is one comp frame further
-                // back (v1 fixed spacing). Capped at the 8-frame window.
+                // back (v1 fixed spacing). Capped at the 16-frame window
+                // (FX-17/K-149, raised from 8).
                 kind: ParamKind::Float {
                     default: 4.0,
-                    slider: (1.0, 8.0),
-                    hard: (Some(1.0), Some(8.0)),
+                    slider: (1.0, 16.0),
+                    hard: (Some(1.0), Some(16.0)),
                 },
             },
             ParamSchema {
@@ -1839,9 +1843,26 @@ pub const BUILTINS: &[EffectSchema] = &[
             ParamSchema {
                 id: "mode",
                 label: "Mode",
+                // The standard compositing blend modes mirroring the comp
+                // set (Normal, Add, Multiply, Screen, Overlay, Soft light,
+                // Hard light, Lighten [= Max], Darken), plus the echo-specific
+                // Behind (ghosting). The legacy indices 0/1/2 (Add/Behind/Max)
+                // are held so old projects load unchanged; the new modes are
+                // appended and the default is Screen (index 3, FX-17/K-149).
                 kind: ParamKind::Choice {
-                    options: &["Add", "Behind", "Max"],
-                    default: 1,
+                    options: &[
+                        "Add",
+                        "Behind",
+                        "Max",
+                        "Screen",
+                        "Normal",
+                        "Multiply",
+                        "Overlay",
+                        "Soft light",
+                        "Hard light",
+                        "Darken",
+                    ],
+                    default: 3,
                 },
             },
             MIX_PARAM,

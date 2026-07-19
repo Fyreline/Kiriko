@@ -636,19 +636,23 @@ pub fn flash(rgba: &mut [f32], strength: f32, colour: [f32; 4], mix: f32) {
     }
 }
 
-/// The §1.6 oracle for Echo (docs/08 §3.13): the CPU twin of `fx_echo.wgsl`,
-/// op-for-op. `current` is the leading (this-frame) linear premultiplied
-/// RGBA; `neighbours` are the layer's decoded source frames keyed by their
-/// frame offset (all the same length as `current`). `weights[i]` is the
-/// tap intensity for the echo at offset `-(i+1)`; a zero weight or a
-/// missing neighbour is skipped. `mode` is 0 = Add, 1 = Behind (the
-/// accumulator over the echo), 2 = Max. Finally the trail is blended
-/// toward `current` by `mix`. Working colour is premultiplied, so a tap
-/// scales all four channels together — the correct premultiplied fade.
+/// The §1.6 oracle for Echo (docs/08 §3.13; blend modes + 16-echo cap since
+/// FX-17/K-149): the CPU twin of `fx_echo.wgsl`, op-for-op. `current` is the
+/// leading (this-frame) linear premultiplied RGBA; `neighbours` are the
+/// layer's decoded source frames keyed by their frame offset (all the same
+/// length as `current`). `weights[i]` is the tap intensity for the echo at
+/// offset `-(i+1)`; a zero weight or a missing neighbour is skipped. `mode`
+/// is the combine blend applied per tap (see [`echo_blend`]): 0 = Add,
+/// 1 = Behind (the accumulator over the echo), 2 = Max, 3 = Screen,
+/// 4 = Normal, 5 = Multiply, 6 = Overlay, 7 = Soft light, 8 = Hard light,
+/// 9 = Darken. Finally the trail is blended toward `current` by `mix`.
+/// Working colour is premultiplied linear, and every mode runs per channel on
+/// all four (the correct premultiplied fade for a light trail — Echo does not
+/// re-encode to the compositor's perceptual domain).
 pub fn echo(
     current: &[f32],
     neighbours: &[(i32, &[f32])],
-    weights: [f32; 8],
+    weights: [f32; 16],
     mode: u32,
     mix: f32,
 ) -> Vec<f32> {
@@ -675,30 +679,109 @@ pub fn echo(
                 buf[base + 2] * weight,
                 buf[base + 3] * weight,
             ];
-            acc = match mode {
-                0 => [acc[0] + n[0], acc[1] + n[1], acc[2] + n[2], acc[3] + n[3]],
-                1 => {
-                    let k = 1.0 - acc[3];
-                    [
-                        acc[0] + n[0] * k,
-                        acc[1] + n[1] * k,
-                        acc[2] + n[2] * k,
-                        acc[3] + n[3] * k,
-                    ]
-                }
-                _ => [
-                    acc[0].max(n[0]),
-                    acc[1].max(n[1]),
-                    acc[2].max(n[2]),
-                    acc[3].max(n[3]),
-                ],
-            };
+            acc = echo_blend(mode, acc, n);
         }
         for c in 0..4 {
             o[c] = current[px_idx * 4 + c] * (1.0 - mix) + acc[c] * mix;
         }
     }
     out
+}
+
+/// One Echo combine mode (docs/08 §3.13, FX-17/K-149): fold the weighted
+/// neighbour tap `n` into the running accumulator `a`, both premultiplied
+/// linear RGBA. Written per channel with the exact arithmetic order the WGSL
+/// `echo_accumulate` twin uses, so the two agree bit-for-bit (§1.6). Modes
+/// 0/1/2 (Add/Behind/Max) are the historical set; 3–9 mirror the comp blend
+/// modes (Screen/Normal/Multiply/Overlay/Soft light/Hard light/Darken), each
+/// applied to all four channels in the working linear space (not the
+/// compositor's perceptual sRGB domain — Echo composites light trails, so it
+/// stays linear and premultiplied, and this keeps CPU/GPU parity exact).
+fn echo_blend(mode: u32, a: [f32; 4], n: [f32; 4]) -> [f32; 4] {
+    let mut o = [0.0f32; 4];
+    match mode {
+        0 => {
+            // Add: echoes sum light behind the leading frame.
+            for c in 0..4 {
+                o[c] = a[c] + n[c];
+            }
+        }
+        1 => {
+            // Behind: the accumulator composited over the echo (ghosting).
+            let k = 1.0 - a[3];
+            for c in 0..4 {
+                o[c] = a[c] + n[c] * k;
+            }
+        }
+        2 => {
+            // Max: per-channel lighten.
+            for c in 0..4 {
+                o[c] = a[c].max(n[c]);
+            }
+        }
+        3 => {
+            // Screen.
+            for c in 0..4 {
+                o[c] = a[c] + n[c] - a[c] * n[c];
+            }
+        }
+        4 => {
+            // Normal: the echo composited over the accumulator.
+            let k = 1.0 - n[3];
+            for c in 0..4 {
+                o[c] = n[c] + a[c] * k;
+            }
+        }
+        5 => {
+            // Multiply.
+            for c in 0..4 {
+                o[c] = a[c] * n[c];
+            }
+        }
+        6 => {
+            // Overlay = hard light with the accumulator as the switch.
+            for c in 0..4 {
+                o[c] = if a[c] <= 0.5 {
+                    2.0 * a[c] * n[c]
+                } else {
+                    1.0 - 2.0 * (1.0 - a[c]) * (1.0 - n[c])
+                };
+            }
+        }
+        7 => {
+            // Soft light (W3C), s = n, d = a.
+            for c in 0..4 {
+                let d = a[c];
+                let dd = if d <= 0.25 {
+                    ((16.0 * d - 12.0) * d + 4.0) * d
+                } else {
+                    d.sqrt()
+                };
+                o[c] = if n[c] <= 0.5 {
+                    d - (1.0 - 2.0 * n[c]) * d * (1.0 - d)
+                } else {
+                    d + (2.0 * n[c] - 1.0) * (dd - d)
+                };
+            }
+        }
+        8 => {
+            // Hard light: the echo is the switch.
+            for c in 0..4 {
+                o[c] = if n[c] <= 0.5 {
+                    2.0 * a[c] * n[c]
+                } else {
+                    1.0 - 2.0 * (1.0 - a[c]) * (1.0 - n[c])
+                };
+            }
+        }
+        _ => {
+            // Darken: per-channel min.
+            for c in 0..4 {
+                o[c] = a[c].min(n[c]);
+            }
+        }
+    }
+    o
 }
 
 /// The §1.6 oracle for Fast motion blur (docs/08 §3.2): the CPU twin of

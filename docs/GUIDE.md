@@ -121,12 +121,16 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   slightly different spot — a random-looking but fully repeatable jump, plus an optional
   colour-channel split and a "slice repeat" look where a thin strip of the block tiles
   instead of showing a plain shifted read. **Scanlines** darkens alternating bands of rows
-  (Line period, Darkness), optionally rolling them over time and alternating which half of
+  (Line period), optionally rolling them over time and alternating which half of
   each band darkens every other cycle for an interlaced-video feel — it has no hash and no
   Seed of its own, since it just reads straight down from each row rather than jumping
   around like Block glitch does. Each effect has its own Intensity dial that turns its own
   look up or down, and at 0 each is a guaranteed no-op — checked by a test — whatever Mix is
-  set to. The interesting engineering wrinkle, in Block glitch: which block "moves" and by
+  set to. (Scanlines used to have *two* darken dials — Intensity and a separate Darkness —
+  that multiplied together to do one job; they were merged into the single Intensity, which
+  now simply means "how dark the dark lines get", 0 nothing and 1 fully black. An old project
+  that still has the separate Darkness folds it into the one dial on load, so it looks the
+  same.) The interesting engineering wrinkle, in Block glitch: which block "moves" and by
   how much has to be decided freshly for every pixel, on the GPU, from nothing but (seed,
   that block's row/column, a coarse time-step) — there's no way to precompute a lookup table
   for it up front, because a busy frame can have thousands of blocks. That means the effect
@@ -151,10 +155,15 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   at exactly those moments (following the retiming, same as the frame you're on), and both the
   live preview and the export do it the identical way so they still match. The picture cache
   learned about it too: an echo frame's identity now includes the neighbours it's built from,
-  so — like the flow fix earlier — you never get a stale, frozen trail. In this first version
-  Echo reaches back up to eight frames one frame apart, fades each by a Decay you set, and
-  offers three ways to stack the trail (Add for bright streaks, Behind for ghosting, Max for a
-  lighten-only look); wider/looser trails are a follow-up, and the other effects that want
+  so — like the flow fix earlier — you never get a stale, frozen trail. Echo now reaches back
+  up to sixteen frames one frame apart (it was eight), fades each by a Decay you set, and
+  offers the full set of stacking modes — the same blend modes a layer has (Screen, Add,
+  Multiply, Overlay and so on, with Screen the default for bright glowing trails) plus the
+  echo-only Behind (ghosting) and Max (lighten). One nuance worth knowing: these blends run in
+  the same "linear light" the compositor adds light in, on the see-through-aware (premultiplied)
+  trail — the right space for stacking glowing copies, and it keeps the CPU and graphics-card
+  versions matching to the last bit. Old projects keep whichever mode they had. Wider/looser
+  trails (a Spacing control) are still a follow-up, and the other effects that want
   neighbouring frames — motion blur that follows real motion, and the datamosh look — build on
   this same machinery (both explained further down).
 - **Fast motion blur — blur that follows real motion** — a temporal effect (called **Fast
@@ -193,7 +202,15 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   just measured one frame earlier), then paints each pixel of *this* frame by looking up
   where that arrow says its content used to be, back in the previous frame — a single lookup
   per pixel, not Motion blur's multi-step smear along the arrow. Intensity fades between the
-  ordinary frame and the moshed one. It started life as a toggle inside Glitch, off by
+  ordinary frame and the moshed one — and it now goes *above* full, past the moshed frame, for
+  a harder tear when you want it (the effect used to be too subtle). A new **Streak length**
+  dial says how many frames of motion that single lookup reaches along: at 1 it predicts one
+  frame ahead (the old behaviour), higher and it reaches further, so more smearing piles up —
+  the way a long run of "reused" frames drifts further and further from the last clean one
+  before a real codec inserts a fresh frame. The "clean frame" reset here happens naturally
+  wherever there's no motion to follow (a still, a cut), which is exactly where a codec would
+  put one; a fixed every-N-frames reset would need the effect to know the frame number, which
+  it does not today, so that is left for later. It started life as a toggle inside Glitch, off by
   default, because turning it on meant fetching an extra frame and running the motion-arrow
   calculation, unlike Glitch's other two sections which were always on; when Glitch split
   into three separate effects, Datamosh kept that same shape as its own effect — you simply

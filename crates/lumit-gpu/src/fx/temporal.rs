@@ -5,12 +5,15 @@ use crate::GpuContext;
 
 use super::{work_texture, FxEngine};
 
-/// One resolved echo (docs/08 §3.13). The neighbour frames arrive as
-/// textures keyed by offset; `weights[i]` is the tap intensity for the echo
-/// at offset `-(i+1)` (0 = skip). `mode`: 0 = Add, 1 = Behind, 2 = Max.
+/// One resolved echo (docs/08 §3.13; blend modes + 16-echo cap since
+/// FX-17/K-149). The neighbour frames arrive as textures keyed by offset;
+/// `weights[i]` is the tap intensity for the echo at offset `-(i+1)`
+/// (0 = skip). `mode` is the combine blend: 0 = Add, 1 = Behind, 2 = Max,
+/// 3 = Screen, 4 = Normal, 5 = Multiply, 6 = Overlay, 7 = Soft light,
+/// 8 = Hard light, 9 = Darken.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EchoOp {
-    pub weights: [f32; 8],
+    pub weights: [f32; 16],
     pub mode: u32,
     /// 0..1, blended against the leading (current) frame.
     pub mix: f32,

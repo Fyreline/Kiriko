@@ -1858,13 +1858,18 @@ fn adjust_blend_lerps_by_coverage_times_opacity() {
     );
 }
 
-/// The §1.6 oracle for Echo (docs/08 §3.13): the GPU chain (an
-/// `echo_accumulate` per tap plus a final `echo_mix`) matches
-/// `lumit_core::fx::cpu::echo` across the three combine modes. Each
-/// accumulate stores an fp16 intermediate where the CPU keeps f32, so a
-/// two-tap sum can drift a little past the pointwise ≤2 ULP — the bound
-/// is stated at 4 ULP with that reason (measured well under it). The GPU
-/// is bit-stable (§2.4); no taps with Mix 1 is a bit-exact passthrough.
+/// The §1.6 oracle for Echo (docs/08 §3.13; blend modes + 16-echo cap since
+/// FX-17/K-149): the GPU chain (an `echo_accumulate` per tap plus a final
+/// `echo_mix`) matches `lumit_core::fx::cpu::echo` across every combine mode.
+/// Each accumulate stores an fp16 intermediate where the CPU keeps f32, so a
+/// two-tap sum can drift a little past the pointwise ≤2 ULP — the historical
+/// additive modes are held to 4 ULP with that reason (measured well under it).
+/// The multiplicative/perceptual modes (Screen, Multiply, Overlay, Soft/Hard
+/// light) additionally amplify the ≤½-ULP gap between the fp16-uploaded
+/// current frame and the CPU's f32 corpus by their local slope against the
+/// HDR neighbours, so they run single-tap under a looser 8-ULP bound — still
+/// orders of magnitude tighter than any formula mismatch. The GPU is
+/// bit-stable (§2.4); no taps with Mix 1 is a bit-exact passthrough.
 #[test]
 fn wgsl_echo_matches_the_cpu_oracle() {
     let Ok(ctx) = GpuContext::headless() else {
@@ -1896,10 +1901,32 @@ fn wgsl_echo_matches_the_cpu_oracle() {
     let gpu_neighbours: [(i32, &wgpu::Texture); 2] = [(-1, &n1_t), (-2, &n2_t)];
     let cpu_neighbours: [(i32, &[f32]); 2] = [(-1, &n1), (-2, &n2)];
 
-    for (weights, mode, mix) in [
-        ([0.6f32, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0u32, 1.0f32),
-        ([0.7, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 1, 0.8),
-        ([0.9, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2, 1.0),
+    let two_tap = |a: f32, b: f32| {
+        let mut w = [0.0f32; 16];
+        w[0] = a;
+        w[1] = b;
+        w
+    };
+    let one_tap = |a: f32| {
+        let mut w = [0.0f32; 16];
+        w[0] = a;
+        w
+    };
+
+    // The historical additive modes (Add/Behind/Max), two-tap, ≤4 ULP.
+    for (weights, mode, mix, bound) in [
+        (two_tap(0.6, 0.3), 0u32, 1.0f32, 4i32),
+        (two_tap(0.7, 0.4), 1, 0.8, 4),
+        (two_tap(0.9, 0.5), 2, 1.0, 4),
+        // The new modes (FX-17/K-149), single-tap, ≤8 ULP: Screen, Normal,
+        // Multiply, Overlay, Soft light, Hard light, Darken.
+        (one_tap(0.6), 3, 1.0, 8),
+        (one_tap(0.5), 4, 0.9, 8),
+        (one_tap(0.7), 5, 1.0, 8),
+        (one_tap(0.6), 6, 1.0, 8),
+        (one_tap(0.5), 7, 1.0, 8),
+        (one_tap(0.8), 8, 1.0, 8),
+        (one_tap(0.6), 9, 1.0, 8),
     ] {
         let cpu = lumit_core::fx::cpu::echo(&current, &cpu_neighbours, weights, mode, mix);
         let op = EchoOp { weights, mode, mix };
@@ -1907,7 +1934,10 @@ fn wgsl_echo_matches_the_cpu_oracle() {
         let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
         let worst = worst_f16_ulp(&cpu, &gpu);
         eprintln!("echo mode={mode} mix={mix}: worst {worst} ulp");
-        assert!(worst <= 4, "mode {mode} mix {mix}: worst {worst} fp16 ULP");
+        assert!(
+            worst <= bound,
+            "mode {mode} mix {mix}: worst {worst} fp16 ULP (bound {bound})"
+        );
         let out2 = fx.echo(&ctx, &cur_t, &gpu_neighbours, w, h, &op);
         assert_eq!(
             gpu,
@@ -1924,7 +1954,7 @@ fn wgsl_echo_matches_the_cpu_oracle() {
         w,
         h,
         &EchoOp {
-            weights: [0.0; 8],
+            weights: [0.0; 16],
             mode: 0,
             mix: 1.0,
         },
