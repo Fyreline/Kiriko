@@ -89,14 +89,15 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
   Built the reusable **P3** `EdgesMode` enum + **P4** twirl `ParamGroup` (K-145) for other effects.
 - [x] **FX-12** Block glitch: Seed should always be the second-last property, before Mix.
   — done: Seed moved to second-last in the schema (read by id, so resolve/GPU unaffected).
-- [ ] **FX-13** Scanlines: collapse to a single Intensity/Darkness property (the two
-  currently do the same thing).
-- [ ] **FX-14** Datamosh: allow intensity > 1; rename it; add control over streak
-  duration (imitating I-frame cadence) — currently works but is not noticeable enough.
+- [x] **FX-13** (K-147) Scanlines collapsed to a single Intensity; old darkness folded in on load.
+- [x] **FX-14** (K-148) Datamosh: intensity cap lifted (>1 extrapolates), new **Streak length**
+  (frames) scales the flow reach for heavier smear. No rename (per owner). NOTE: streak is
+  reach-based, not a fixed I-frame-interval reset (clean frames still fall at stills/cuts); a
+  strict interval was deferred. Default streak 4 makes existing instances look stronger.
 - [ ] **FX-15** Flash feels off; blocked on audio fixes before it can be tested.
 - [x] **FX-16** Glow (K-135): default threshold 0.8, knee label → Softness, radius px 0..inf.
-- [ ] **FX-17** Echo: default mode Screen (needs adding), add the other blend modes, allow
-  more than 8 echoes.
+- [x] **FX-17** (K-149) Echo defaults to Screen, gains the standard blend modes, cap raised
+  8→16 (bounded for decode cost; higher is a later dynamic-window refinement).
 - [x] **FX-18** (K-139) Renamed **Motion blur**; added **Force on all layers** (forces per-layer
   transform MB on every layer during the sample renders, comp unmutated). Note: it blurs
   transform-animated motion; footage-playback motion is held by design (adjustment-scope), which
