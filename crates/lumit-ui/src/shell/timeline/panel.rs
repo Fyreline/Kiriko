@@ -644,6 +644,7 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                 place(ui, td_r, &mut |ui| {
                     three_d_control(ui, theme, comp_id, layer, &mut pending)
                 });
+                let is_precomp = matches!(layer.kind, lumit_core::model::LayerKind::Precomp { .. });
                 if is_footage {
                     place(ui, vol_r, &mut |ui| {
                         mute_control(ui, theme, comp_id, layer, &mut pending)
@@ -651,15 +652,22 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                     place(ui, flow_r, &mut |ui| {
                         flow_control(ui, theme, comp_id, layer, &mut pending)
                     });
-                } else if matches!(layer.kind, lumit_core::model::LayerKind::Precomp { .. }) {
-                    // Precomp layers have no audio; their slot carries the
-                    // collapse switch (docs/06 §1.4) instead.
+                } else if is_precomp {
+                    // Precomp layers have no audio; their far-right slot carries
+                    // the collapse switch (docs/06 §1.4) instead.
                     let clt = app.preview_frame as f64 / comp.frame_rate.fps().max(1.0)
                         - layer.start_offset.0.to_f64();
                     place(ui, mute_r, &mut |ui| {
                         collapse_control(ui, theme, &doc, comp, comp_id, layer, clt, &mut pending)
                     });
                 }
+                // Per-layer motion blur (K-120): the far-right slot for every
+                // layer, except a Precomp — whose far-right slot holds its
+                // collapse switch — where it takes the (unused) flow slot instead.
+                let mb_slot = if is_precomp { flow_r } else { mute_r };
+                place(ui, mb_slot, &mut |ui| {
+                    motion_blur_control(ui, theme, comp_id, layer, &mut pending)
+                });
                 if select_this {
                     app.selected_layer = Some(layer.id);
                 }

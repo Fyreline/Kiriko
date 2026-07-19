@@ -877,7 +877,9 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   physics predicts. This is the beginning of the evaluator: the thing that will one day
   render whole comps with effects.
   **Per-layer motion blur** lives here too (`motion_blur_average`). Turn the composition's
-  motion-blur master on and flip a layer's motion-blur switch, and that layer is drawn not
+  motion-blur master on and flip a layer's motion-blur switch — the **MB** toggle in the
+  layer's switch cluster on the right of its Timeline row (or the "Motion blur" line in its
+  right-click menu) — and that layer is drawn not
   once but many times — its *same* picture, nudged to where the layer sat at a spread of
   instants across the "shutter" (a slice of the frame, 180° = half a frame by default) —
   and those copies are averaged. A still layer averages back to itself exactly; a

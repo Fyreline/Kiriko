@@ -184,3 +184,107 @@ mod lane_key_tests {
         assert_eq!(range, vec![psel(TransformProp::Rotation)]);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod motion_blur_switch_tests {
+    use super::*;
+    use crate::theme::{ColorScheme, ThemeShape};
+    use lumit_core::model::Layer;
+    use uuid::Uuid;
+
+    /// Click the motion-blur switch (drawn into a known slot) and return the op it
+    /// commits, if any.
+    fn click_motion_blur(comp_id: Uuid, layer: &Layer) -> Option<lumit_core::Op> {
+        let ctx = egui::Context::default();
+        let theme = Theme::for_scheme(ColorScheme::ALL[0], ThemeShape::Sharp);
+        let pending: std::cell::RefCell<Option<lumit_core::Op>> = std::cell::RefCell::new(None);
+        let slot = egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(40.0, 16.0));
+        let run = |events: Vec<egui::Event>| {
+            let ri = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(200.0, 200.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(ri, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(slot)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    motion_blur_control(
+                        &mut child,
+                        &theme,
+                        comp_id,
+                        layer,
+                        &mut pending.borrow_mut(),
+                    );
+                });
+            });
+        };
+        let c = slot.center();
+        run(vec![]); // lay out
+        run(vec![egui::Event::PointerMoved(c)]);
+        run(vec![egui::Event::PointerButton {
+            pos: c,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        }]);
+        run(vec![egui::Event::PointerButton {
+            pos: c,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }]);
+        pending.into_inner()
+    }
+
+    /// UI-12 regression: the per-layer motion-blur switch must draw and, when
+    /// clicked, flip the layer's `motion_blur` flag (committing through
+    /// `SetLayerMotionBlur`, so it persists). Driving it end-to-end through
+    /// `AppState` also proves the op reaches the document.
+    #[test]
+    fn clicking_the_switch_toggles_the_layers_motion_blur_flag() {
+        let mut app = AppState::default();
+        app.new_composition();
+        app.confirm_comp_dialog();
+        app.add_solid_layer();
+        let comp_id = app.selected_comp.unwrap();
+        let layer = app.store.snapshot().comp(comp_id).unwrap().layers[0].clone();
+        assert!(
+            !layer.switches.motion_blur,
+            "a fresh layer starts with motion blur off"
+        );
+
+        // Off -> the click commits an op turning it on.
+        let op = click_motion_blur(comp_id, &layer).expect("the switch must emit an op");
+        assert!(matches!(
+            op,
+            lumit_core::Op::SetLayerMotionBlur {
+                motion_blur: true,
+                ..
+            }
+        ));
+        app.commit(op);
+        let after = app.store.snapshot().comp(comp_id).unwrap().layers[0].clone();
+        assert!(
+            after.switches.motion_blur,
+            "committing the switch op must set the flag"
+        );
+
+        // On -> clicking again turns it back off.
+        let op = click_motion_blur(comp_id, &after).expect("the switch must emit an op");
+        assert!(matches!(
+            op,
+            lumit_core::Op::SetLayerMotionBlur {
+                motion_blur: false,
+                ..
+            }
+        ));
+    }
+}

@@ -248,6 +248,51 @@ pub(crate) fn three_d_control(
     }
 }
 
+/// Per-layer motion-blur subcolumn (K-120, docs/06 §4): a compact "MB" toggle in
+/// the layer's far-right switch slot. Accent when on, secondary otherwise, and
+/// bright under the cursor like the other switches. The hover note reminds that
+/// it only shows once the comp's motion-blur master is on.
+///
+/// No Iconoir glyph in the [`Icon`] set means "motion blur", and the only
+/// motion-adjacent one (Flow's wind) is already the flow column's icon — reusing
+/// it would put two identical wind glyphs on the same footage row — so this reads
+/// as a short label, like the Matte and Blend text switches.
+pub(crate) fn motion_blur_control(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    comp_id: uuid::Uuid,
+    layer: &lumit_core::model::Layer,
+    pending: &mut Option<lumit_core::Op>,
+) {
+    let on = layer.switches.motion_blur;
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::click());
+    let col = if on || resp.hovered() {
+        theme.accent
+    } else {
+        theme.text_secondary
+    };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "MB",
+        egui::FontId::proportional(10.0),
+        col,
+    );
+    if resp
+        .on_hover_text(
+            "Motion blur: smear this layer along its own motion (needs the comp's motion blur on)",
+        )
+        .clicked()
+    {
+        *pending = Some(lumit_core::Op::SetLayerMotionBlur {
+            comp: comp_id,
+            layer: layer.id,
+            motion_blur: !on,
+        });
+    }
+}
+
 /// Collapse-transformations subcolumn (Precomp layers only, docs/06 §1.4).
 /// Accent when active; dimmed when the switch is set but a mask, blend,
 /// opacity or matte use forces an intermediate anyway (the spec's required
