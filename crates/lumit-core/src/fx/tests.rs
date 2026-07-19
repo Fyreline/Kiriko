@@ -1228,6 +1228,32 @@ fn saturation_instantiates_and_resolves_neutral() {
             mix: 1.0
         }]
     );
+
+    // K-135: the hard ceiling is open, so a heavy 400 % resolves to 4.0 —
+    // no clamp to 200 — and the schema declares the open range.
+    let s = schema("saturation").unwrap();
+    let sat = s.params.iter().find(|p| p.id == "saturation").unwrap();
+    assert!(matches!(
+        sat.kind,
+        ParamKind::Float {
+            slider: (0.0, 400.0),
+            hard: (Some(0.0), None),
+            ..
+        }
+    ));
+    let mut heavy = e;
+    for p in &mut heavy.params {
+        if p.id == "saturation" {
+            p.value = EffectValue::Float(Property::fixed(400.0));
+        }
+    }
+    assert_eq!(
+        resolve_stack(&[heavy], 0.0, 1000.0, 1.0, &MarkerContext::NONE),
+        vec![Resolved::Saturation {
+            saturation: 4.0,
+            mix: 1.0
+        }]
+    );
 }
 
 #[test]
@@ -1304,8 +1330,20 @@ fn temperature_instantiates_resolves_and_warms_and_cools() {
             mix: 1.0
         }]
     );
-    // +100 resolves to gains (1.5, 0.5): red boosted, blue cut. −100 is the
-    // mirror (0.5, 1.5). The resolve step owns the gain formula.
+    // K-135: the range widens to ±150 slider / ±200 hard, with the stronger
+    // ±0.75·k gain. +100 resolves to gains (1.75, 0.25): red boosted, blue
+    // cut hard. −100 is the mirror (0.25, 1.75). The resolve step owns the
+    // gain formula.
+    let s = schema("temperature").unwrap();
+    let temp = s.params.iter().find(|p| p.id == "temperature").unwrap();
+    assert!(matches!(
+        temp.kind,
+        ParamKind::Float {
+            slider: (-150.0, 150.0),
+            hard: (Some(-200.0), Some(200.0)),
+            ..
+        }
+    ));
     let mut warm = e.clone();
     for p in &mut warm.params {
         if p.id == "temperature" {
@@ -1315,8 +1353,24 @@ fn temperature_instantiates_resolves_and_warms_and_cools() {
     assert_eq!(
         resolve_stack(&[warm], 0.0, 1000.0, 1.0, &MarkerContext::NONE),
         vec![Resolved::Temperature {
-            gain_r: 1.5,
-            gain_b: 0.5,
+            gain_r: 1.75,
+            gain_b: 0.25,
+            mix: 1.0
+        }]
+    );
+    // At the +200 hard extreme the blue gain would be 1 − 1.5 = −0.5; the
+    // resolver floors it at 0 (never a negative channel), red at 2.5.
+    let mut hot = e.clone();
+    for p in &mut hot.params {
+        if p.id == "temperature" {
+            p.value = EffectValue::Float(Property::fixed(200.0));
+        }
+    }
+    assert_eq!(
+        resolve_stack(&[hot], 0.0, 1000.0, 1.0, &MarkerContext::NONE),
+        vec![Resolved::Temperature {
+            gain_r: 2.5,
+            gain_b: 0.0,
             mix: 1.0
         }]
     );
@@ -1329,8 +1383,8 @@ fn temperature_instantiates_resolves_and_warms_and_cools() {
     assert_eq!(
         resolve_stack(&[cool], 0.0, 1000.0, 1.0, &MarkerContext::NONE),
         vec![Resolved::Temperature {
-            gain_r: 0.5,
-            gain_b: 1.5,
+            gain_r: 0.25,
+            gain_b: 1.75,
             mix: 1.0
         }]
     );
@@ -1447,8 +1501,19 @@ fn tint_instantiates_resolves_and_maps_luma() {
 fn hue_shift_is_neutral_at_zero_and_preserves_grey_and_luma() {
     let e = instantiate("hue_shift").unwrap();
     assert_eq!(e.float_at("angle", 0.0), Some(0.0));
+    // Preserve luminance is on by default (K-136).
+    assert_eq!(
+        e.param("preserve_luminance"),
+        Some(&EffectValue::Bool(true))
+    );
     // 0° resolves to the identity matrix.
-    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
     assert_eq!(
         r,
         vec![Resolved::HueShift {
@@ -1481,6 +1546,96 @@ fn hue_shift_is_neutral_at_zero_and_preserves_grey_and_luma() {
     ];
     let luma_out = 0.2126 * ro[0] + 0.7152 * ro[1] + 0.0722 * ro[2];
     assert!((luma_in - luma_out).abs() < 1e-3, "luma preserved");
+}
+
+#[test]
+fn hue_shift_preserve_luminance_toggle_picks_the_matrix_branch() {
+    // K-136: Preserve luminance off resolves to the plain-RGB rotation
+    // (equal-weight spin about the grey axis); on keeps the Rec.709
+    // constant-luminance one. The resolve step owns the branch; the kernel
+    // is matrix-general, so both share one op.
+    let mut off = instantiate("hue_shift").unwrap();
+    for p in &mut off.params {
+        match p.id.as_str() {
+            "angle" => p.value = EffectValue::Float(Property::fixed(90.0)),
+            "preserve_luminance" => p.value = EffectValue::Bool(false),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        resolve_stack(
+            std::slice::from_ref(&off),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE
+        ),
+        vec![Resolved::HueShift {
+            m: hue_matrix_rgb(90.0),
+            mix: 1.0
+        }]
+    );
+    // Preserve on (the default) at the same angle uses the Rec.709 matrix,
+    // and the two matrices genuinely differ.
+    let mut on = instantiate("hue_shift").unwrap();
+    for p in &mut on.params {
+        if p.id == "angle" {
+            p.value = EffectValue::Float(Property::fixed(90.0));
+        }
+    }
+    assert_eq!(
+        resolve_stack(
+            std::slice::from_ref(&on),
+            0.0,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE
+        ),
+        vec![Resolved::HueShift {
+            m: hue_matrix(90.0),
+            mix: 1.0
+        }]
+    );
+    assert_ne!(
+        hue_matrix(90.0),
+        hue_matrix_rgb(90.0),
+        "the two hue branches are distinct"
+    );
+
+    // Both branches are the exact identity at 0° (neutral point bit-exact).
+    assert_eq!(
+        hue_matrix_rgb(0.0),
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    );
+
+    // The plain-RGB rotation keeps a neutral grey grey (rows each sum to 1),
+    // but does NOT hold Rec.709 luminance — that is the whole point of the
+    // toggle. It preserves the equal-weight (R+G+B) sum instead.
+    let m = hue_matrix_rgb(120.0);
+    let grey = [0.5_f32, 0.5, 0.5];
+    let g_out = [
+        m[0] * grey[0] + m[1] * grey[1] + m[2] * grey[2],
+        m[3] * grey[0] + m[4] * grey[1] + m[5] * grey[2],
+        m[6] * grey[0] + m[7] * grey[1] + m[8] * grey[2],
+    ];
+    for c in g_out {
+        assert!((c - 0.5).abs() < 1e-3, "grey stays grey: {c}");
+    }
+    let lin = [0.8_f32, 0.2, 0.5];
+    let ro = [
+        m[0] * lin[0] + m[1] * lin[1] + m[2] * lin[2],
+        m[3] * lin[0] + m[4] * lin[1] + m[5] * lin[2],
+        m[6] * lin[0] + m[7] * lin[1] + m[8] * lin[2],
+    ];
+    let sum_in = lin[0] + lin[1] + lin[2];
+    let sum_out = ro[0] + ro[1] + ro[2];
+    assert!((sum_in - sum_out).abs() < 1e-3, "RGB sum preserved");
+    let luma_in = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+    let luma_out = 0.2126 * ro[0] + 0.7152 * ro[1] + 0.0722 * ro[2];
+    assert!(
+        (luma_in - luma_out).abs() > 1e-3,
+        "plain-RGB rotation changes Rec.709 luma: {luma_in} vs {luma_out}"
+    );
 }
 
 #[test]
@@ -1601,13 +1756,48 @@ fn vignette_instantiates_and_resolves() {
     assert_eq!(e.float_at("radius", 0.0), Some(0.75));
     assert_eq!(e.float_at("softness", 0.0), Some(0.5));
     assert_eq!(e.float_at("roundness", 0.0), Some(1.0));
-    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
     assert_eq!(
         r,
         vec![Resolved::Vignette {
             amount: 0.5,
             radius: 0.75,
             softness: 0.5,
+            roundness: 1.0,
+            mix: 1.0,
+        }]
+    );
+
+    // K-135: Softness is open above, so 1.5 resolves un-clamped (Amount,
+    // Radius and Roundness keep their 0..1 caps).
+    let s = schema("vignette").unwrap();
+    let soft = s.params.iter().find(|p| p.id == "softness").unwrap();
+    assert!(matches!(
+        soft.kind,
+        ParamKind::Float {
+            slider: (0.0, 2.0),
+            hard: (Some(0.0), None),
+            ..
+        }
+    ));
+    let mut wide = e;
+    for p in &mut wide.params {
+        if p.id == "softness" {
+            p.value = EffectValue::Float(Property::fixed(1.5));
+        }
+    }
+    assert_eq!(
+        resolve_stack(&[wide], 0.0, 1000.0, 1.0, &MarkerContext::NONE),
+        vec![Resolved::Vignette {
+            amount: 0.5,
+            radius: 0.75,
+            softness: 1.5,
             roundness: 1.0,
             mix: 1.0,
         }]
@@ -1641,6 +1831,22 @@ fn cpu_vignette_darkens_the_corners_and_is_neutral_at_zero_amount() {
     assert!(v[centre] > 0.95, "centre stays lit: {}", v[centre]);
     assert!(v[corner] < 0.05, "corner goes dark: {}", v[corner]);
     assert_eq!(v[corner + 3], 1.0, "alpha is never touched");
+
+    // K-135: Softness > 1 is a legal, wider feather (not clamped to 1). At
+    // the same tight Radius, softness 1.5 spreads the falloff so the corner
+    // is only partly darkened where the hard-edged case above was near
+    // black, and every value stays finite and in gamut — no artefacts.
+    let mut wide = img.clone();
+    cpu::vignette(&mut wide, w, h, 1.0, 0.2, 1.5, 1.0, 1.0);
+    assert!(
+        wide[corner] > v[corner],
+        "wider feather darkens the corner less: {} vs {}",
+        wide[corner],
+        v[corner]
+    );
+    for s in &wide {
+        assert!(s.is_finite() && *s >= 0.0, "no artefacts: {s}");
+    }
 }
 
 #[test]
@@ -2123,24 +2329,37 @@ fn glow_instantiates_resolves_and_pins_the_one_sided_threshold() {
     ));
 
     let e = instantiate("glow").unwrap();
-    assert_eq!(e.float_at("threshold", 0.0), Some(1.0));
+    // K-135/FX-16: default threshold drops to 0.8, and Radius is now px@comp.
+    assert_eq!(e.float_at("threshold", 0.0), Some(0.8));
     assert_eq!(e.float_at("knee", 0.0), Some(0.5));
-    assert_eq!(e.float_at("radius", 0.0), Some(8.0));
+    assert_eq!(e.float_at("radius", 0.0), Some(24.0));
     assert_eq!(e.float_at("intensity", 0.0), Some(1.0));
     assert_eq!(e.colour_at("tint", 0.0), Some([1.0; 4]));
-    // 8% of a 1000px diagonal = 80px.
-    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    // Radius is px@comp scaled by the preview factor: 24 px × a half-res
+    // (0.5) factor = 12 raster px; diag_px no longer feeds Radius.
+    let r = resolve_stack(&[e], 0.0, 1000.0, 0.5, &MarkerContext::NONE);
     assert_eq!(
         r,
         vec![Resolved::Glow {
-            radius_px: 80.0,
-            threshold: 1.0,
+            radius_px: 12.0,
+            threshold: 0.8,
             knee: 0.5,
             intensity: 1.0,
             tint: [1.0; 4],
             mix: 1.0
         }]
     );
+    // The Radius schema is now open above (px@comp, K-135).
+    let s = schema("glow").unwrap();
+    let radius = s.params.iter().find(|p| p.id == "radius").unwrap();
+    assert!(matches!(
+        radius.kind,
+        ParamKind::Float {
+            slider: (0.0, 200.0),
+            hard: (Some(0.0), None),
+            ..
+        }
+    ));
 }
 
 #[test]

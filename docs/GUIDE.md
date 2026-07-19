@@ -543,12 +543,27 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   the scene-linear light the compositor works in, so it behaves like a real camera exposure,
   not a washed-out lift), with 0 stops leaving the picture exactly untouched. Distinct from
   Colour balance's three-channel gain: a single animatable control for the whole image.
-- **Hue shift (K-108).** Turn every colour's hue by an angle — reds toward orange, blues
-  toward purple, and so on — while keeping how *bright* each looks unchanged (a
-  "constant-luminance" rotation, the same maths web browsers use for their hue-rotate filter).
-  0° leaves the picture exactly as it was. Under the hood it is a small fixed colour-mixing
-  matrix worked out once for the angle, so the preview and the export apply the identical
-  numbers.
+- **Hue shift (K-108, K-136).** Turn every colour's hue by an angle — reds toward orange,
+  blues toward purple, and so on. 0° leaves the picture exactly as it was. Under the hood it is
+  a small fixed colour-mixing matrix worked out once for the angle, so the preview and the
+  export apply the identical numbers. A **Preserve luminance** tick (on by default) chooses how
+  it turns:
+  - **On** keeps how *bright* each colour looks unchanged as its hue moves — a
+    "constant-luminance" rotation, the same maths web browsers use for their hue-rotate filter.
+    This weights the calculation by how bright the eye finds each channel (green counts far more
+    than blue).
+  - **Off** does the plainer thing: it spins the red/green/blue values around like a colour
+    wheel with every channel weighted equally. That can *change* how bright a colour looks as
+    its hue turns (a green may go duller or brighter), which is sometimes exactly the punchy,
+    less-careful look you want.
+
+  A word on this and Oklab. Lumit's rule of thumb (K-034) is that hue-type work belongs in
+  Oklab, the perceptual colour space where "keep the brightness, change the hue" is natural.
+  Hue shift's preserve-luminance mode is that *idea* — hold brightness, turn the hue — but it
+  reaches it with a cheaper Rec.709-weighted spin in ordinary linear RGB rather than a full
+  Oklab conversion, which is plenty for a hue wheel and keeps the CPU and GPU trivially
+  matched. The preserve-luminance-**off** mode is the honest "just spin the RGB numbers"
+  version, weights and brightness-shifts and all.
 - **Contrast (K-110).** The familiar contrast slider: push everything further from a middle
   grey (brights brighter, darks darker) or pull it toward that grey to flatten the image.
   100 % leaves the picture exactly as it was; below 100 % flattens, above 100 % punches. The

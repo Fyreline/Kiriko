@@ -454,6 +454,15 @@ fn wgsl_saturation_matches_the_cpu_oracle() {
             },
         ),
         (
+            // K-135: above the old 200 % cap — the kernel does not clamp, it
+            // keeps extrapolating, so CPU/GPU parity must still hold here.
+            "heavy",
+            SaturationOp {
+                saturation: 3.5,
+                mix: 1.0,
+            },
+        ),
+        (
             "mixed",
             SaturationOp {
                 saturation: 0.3,
@@ -629,6 +638,18 @@ fn wgsl_vignette_matches_the_cpu_oracle() {
             },
         ),
         (
+            // K-135: Softness > 1 is a legal, wider feather — the kernel does
+            // not clamp it to 1, so CPU/GPU parity must hold for it too.
+            "wide-feather",
+            VignetteOp {
+                amount: 0.9,
+                radius: 0.3,
+                softness: 1.6,
+                roundness: 1.0,
+                mix: 1.0,
+            },
+        ),
+        (
             "mixed",
             VignetteOp {
                 amount: 0.8,
@@ -750,8 +771,9 @@ fn wgsl_exposure_matches_the_cpu_oracle() {
 /// The §1.6 oracle for temperature: a cheap pointwise per-channel R/B gain,
 /// so CPU and GPU must agree to ≤ 2 fp16 ULP, the GPU is bit-stable, and
 /// temperature 0 (gains `(1.0, 1.0)`) or Mix 0 is the bit-exact identity on
-/// both paths. The gains are the host-computed `1 ± 0.5·k` for `k =
-/// temperature / 100`, so the CPU and kernel multiply by identical numbers.
+/// both paths. The gains are the host-computed `max(0, 1 ± 0.75·k)` for `k =
+/// temperature / 100` (K-135), so the CPU and kernel multiply by identical
+/// numbers.
 /// The corpus is seeded with partial-alpha pixels too — unlike Contrast the
 /// multiply commutes with premultiplied alpha (no unpremultiply wrap), and
 /// this pins that: a fractional-alpha pixel comes out identical on both.
@@ -782,16 +804,18 @@ fn wgsl_temperature_matches_the_cpu_oracle() {
         img[i + 2] = q(rgb[2] * a);
         img[i + 3] = q(*a);
     }
-    // Host-compute the gains exactly as the resolve step does, over a
-    // spread of temperatures (incl. the ±80 the task calls for).
+    // Host-compute the gains exactly as the resolve step does (K-135: the
+    // stronger ±0.75·k gain, k clamped to ±2, gains floored at 0), over a
+    // spread that reaches the new ±150/±200 extremes and the blue-gain floor.
     let gains = |temperature: f32| {
-        let k = (temperature / 100.0).clamp(-1.0, 1.0);
-        (1.0 + 0.5 * k, 1.0 - 0.5 * k)
+        let k = (temperature / 100.0).clamp(-2.0, 2.0);
+        ((1.0 + 0.75 * k).max(0.0), (1.0 - 0.75 * k).max(0.0))
     };
     for (name, temp, mix) in [
         ("neutral", 0.0, 1.0),
-        ("warm", 80.0, 1.0),
-        ("cool", -80.0, 1.0),
+        ("warm", 120.0, 1.0),
+        ("cool", -120.0, 1.0),
+        ("floor", 200.0, 1.0), // blue gain floored at 0
         ("mixed", 60.0, 0.5),
         ("mix-zero", 100.0, 0.0),
     ] {
@@ -1120,17 +1144,27 @@ fn wgsl_hue_shift_matches_the_cpu_oracle() {
     let fx = FxEngine::new(&ctx);
     let (w, h) = (32u32, 24u32);
     let img = corpus(w, h);
-    for (name, deg, mix) in [
-        ("neutral", 0.0, 1.0),
-        ("quarter", 90.0, 1.0),
-        ("half", 180.0, 1.0),
-        ("mixed", 45.0, 0.5),
-        ("mix-zero", 120.0, 0.0),
+    // K-136: both matrix branches — the constant-luminance rotation
+    // (`preserve = true`, `hue_matrix`) and the plain-RGB spin
+    // (`preserve = false`, `hue_matrix_rgb`) — feed the one matrix-general
+    // kernel, so parity must hold for each.
+    for (name, deg, mix, preserve) in [
+        ("neutral", 0.0, 1.0, true),
+        ("quarter", 90.0, 1.0, true),
+        ("half", 180.0, 1.0, true),
+        ("mixed", 45.0, 0.5, true),
+        ("mix-zero", 120.0, 0.0, true),
+        ("rgb-neutral", 0.0, 1.0, false),
+        ("rgb-quarter", 90.0, 1.0, false),
+        ("rgb-mixed", 45.0, 0.5, false),
+        ("rgb-mix-zero", 120.0, 0.0, false),
     ] {
-        let op = HueShiftOp {
-            m: lumit_core::fx::hue_matrix(deg),
-            mix,
+        let m = if preserve {
+            lumit_core::fx::hue_matrix(deg)
+        } else {
+            lumit_core::fx::hue_matrix_rgb(deg)
         };
+        let op = HueShiftOp { m, mix };
         let mut cpu = img.clone();
         lumit_core::fx::cpu::hue_shift(&mut cpu, op.m, op.mix);
 
@@ -1141,7 +1175,7 @@ fn wgsl_hue_shift_matches_the_cpu_oracle() {
         let worst = worst_f16_ulp(&cpu, &gpu);
         eprintln!("hue_shift {name}: worst {worst} ulp");
         assert!(worst <= 2, "{name}: worst {worst} fp16 ULP");
-        if name == "neutral" || name == "mix-zero" {
+        if deg % 360.0 == 0.0 || mix == 0.0 {
             assert_eq!(gpu, img, "{name}: must be the bit-exact identity");
         }
 
@@ -1303,9 +1337,12 @@ fn wgsl_glow_matches_the_cpu_oracle() {
     let img = corpus(w, h);
     for (name, radius, threshold, knee, intensity, tint, mix) in [
         (
+            // The schema default threshold is now 0.8 (K-135/FX-16); radius
+            // here is already raster px (GlowOp is post-resolve), so the
+            // %-diag → px@comp change lives in the resolve step, not here.
             "default",
             6.0f32,
-            1.0f32,
+            0.8f32,
             0.5f32,
             1.0f32,
             [1.0f32; 4],

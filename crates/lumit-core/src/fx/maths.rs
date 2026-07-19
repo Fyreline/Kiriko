@@ -1,8 +1,10 @@
-/// The constant-luminance hue-rotation matrix for `deg` degrees, row-major
-/// (docs/08 §3.17). Rec.709 luma weights keep perceived brightness fixed as
-/// the hue turns. Computed host-side (f64 then cast) so the CPU reference and
-/// the WGSL kernel multiply by the identical `f32` coefficients. Exactly the
-/// identity at 0°, so the effect's neutral point is bit-exact.
+/// The **constant-luminance** hue-rotation matrix for `deg` degrees, row-major
+/// (docs/08 §3.17). Rec.709 luma weights keep perceived brightness fixed as the
+/// hue turns — the standard SVG `feColorMatrix` hue-rotate — so this is the Hue
+/// shift effect's Preserve-luminance mode (K-136, on by default). Computed
+/// host-side (f64 then cast) so the CPU reference and the WGSL kernel multiply
+/// by the identical `f32` coefficients. Exactly the identity at 0°, so the
+/// effect's neutral point is bit-exact.
 pub fn hue_matrix(deg: f64) -> [f32; 9] {
     if deg % 360.0 == 0.0 {
         return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
@@ -20,6 +22,38 @@ pub fn hue_matrix(deg: f64) -> [f32; 9] {
         (lr - c * lr - s * (1.0 - lr)) as f32,
         (lg - c * lg + s * lg) as f32,
         (lb + c * (1.0 - lb) + s * lb) as f32,
+    ]
+}
+
+/// The **plain-RGB** hue-rotation matrix for `deg` degrees, row-major (docs/08
+/// §3.17, K-136): a geometric rotation of the RGB vector about the neutral grey
+/// axis `(1,1,1)/√3` (Rodrigues' formula). It is *not* luminance-weighted, so it
+/// preserves the raw R+G+B sum rather than perceived brightness — a saturated
+/// colour may brighten or dim as its hue turns, the plain colour-wheel spin.
+/// This is the Hue shift effect's Preserve-luminance-off mode. Computed host-side
+/// (f64 then cast) so the CPU reference and the WGSL kernel multiply by identical
+/// `f32` coefficients. Exactly the identity at 0°, like [`hue_matrix`], so the
+/// neutral point stays bit-exact; every row and column sums to 1, so a neutral
+/// grey stays grey.
+pub fn hue_matrix_rgb(deg: f64) -> [f32; 9] {
+    if deg % 360.0 == 0.0 {
+        return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    }
+    let (s, c) = deg.to_radians().sin_cos();
+    // Rotation about n = (1,1,1)/√3: R = c·I + (1−c)/3·J + (s/√3)·[n]×,
+    // with J the all-ones matrix and [n]× the cross-product (skew) matrix.
+    let a = (1.0 - c) / 3.0;
+    let b = s / 3.0_f64.sqrt();
+    [
+        (c + a) as f32,
+        (a - b) as f32,
+        (a + b) as f32,
+        (a + b) as f32,
+        (c + a) as f32,
+        (a - b) as f32,
+        (a - b) as f32,
+        (a + b) as f32,
+        (c + a) as f32,
     ]
 }
 

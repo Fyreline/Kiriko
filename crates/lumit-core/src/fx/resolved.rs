@@ -110,7 +110,8 @@ pub enum Resolved {
         mix: f32,
     },
     Saturation {
-        /// Factor about Rec. 709 luma: 0 = greyscale, 1 = neutral, 2 = max.
+        /// Factor about Rec. 709 luma: 0 = greyscale, 1 = neutral, 2 =
+        /// doubled, and open above (K-135) — the maths extrapolates.
         saturation: f32,
         /// 0..1.
         mix: f32,
@@ -144,7 +145,7 @@ pub enum Resolved {
         amount: f32,
         /// 0..1: the clear centre's reach.
         radius: f32,
-        /// 0..1: feather width beyond radius.
+        /// ≥ 0: feather width beyond radius, open above (K-135).
         softness: f32,
         /// 0..1: 1 = circular, 0 = follows the frame's aspect.
         roundness: f32,
@@ -159,9 +160,10 @@ pub enum Resolved {
         /// 0..1.
         mix: f32,
     },
-    /// Hue shift (docs/08 §3.17): a row-major linear 3×3 colour matrix (the
-    /// constant-luminance hue rotation), computed host-side. Identity is the
-    /// neutral point.
+    /// Hue shift (docs/08 §3.17, K-136): a row-major linear 3×3 colour matrix,
+    /// computed host-side — either the constant-luminance rotation (Preserve
+    /// luminance on) or the plain-RGB spin (off). The kernel is matrix-general,
+    /// so both modes share one op. Identity is the neutral point.
     HueShift {
         /// Row-major 3×3: `[m00,m01,m02, m10,m11,m12, m20,m21,m22]`.
         m: [f32; 9],
@@ -191,9 +193,9 @@ pub enum Resolved {
     /// R/B gain in scene-linear light, computed host-side, alpha untouched.
     /// Gains `(1.0, 1.0)` (Temperature 0) are the neutral point.
     Temperature {
-        /// Scene-linear red gain, `1 + 0.5·(temperature/100)`.
+        /// Scene-linear red gain, `max(0, 1 + 0.75·(temperature/100))`.
         gain_r: f32,
-        /// Scene-linear blue gain, `1 − 0.5·(temperature/100)`.
+        /// Scene-linear blue gain, `max(0, 1 − 0.75·(temperature/100))`.
         gain_b: f32,
         /// 0..1.
         mix: f32,
@@ -612,8 +614,10 @@ fn resolve_one(
             })
         }
         "saturation" => {
+            // Floored at 0 (greyscale), open above (K-135): the luma/colour
+            // mix extrapolates past 200 % cleanly, so no upper clamp.
             let saturation =
-                (e.float_at("saturation", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 2.0);
+                (e.float_at("saturation", lt).unwrap_or(100.0) as f32 / 100.0).max(0.0);
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
             Some(Resolved::Saturation { saturation, mix })
         }
@@ -638,7 +642,9 @@ fn resolve_one(
         "vignette" => {
             let amount = (e.float_at("amount", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
             let radius = (e.float_at("radius", lt).unwrap_or(0.75) as f32).clamp(0.0, 1.0);
-            let softness = (e.float_at("softness", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
+            // Floored at 0, open above (K-135): softness > 1 is a legal wider
+            // feather in the normalised metric, no upper clamp.
+            let softness = (e.float_at("softness", lt).unwrap_or(0.5) as f32).max(0.0);
             let roundness = (e.float_at("roundness", lt).unwrap_or(1.0) as f32).clamp(0.0, 1.0);
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
             Some(Resolved::Vignette {
@@ -657,11 +663,21 @@ fn resolve_one(
         }
         "hue_shift" => {
             let angle = e.float_at("angle", lt).unwrap_or(0.0);
+            // Preserve luminance (K-136): on (default, and absent on old
+            // projects) → the Rec.709 constant-luminance rotation; off → the
+            // plain-RGB spin about the grey axis. The bool only picks which
+            // host-computed matrix is carried, so CPU and GPU stay in parity.
+            let preserve = !matches!(
+                e.param("preserve_luminance"),
+                Some(EffectValue::Bool(false))
+            );
+            let m = if preserve {
+                hue_matrix(angle)
+            } else {
+                hue_matrix_rgb(angle)
+            };
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-            Some(Resolved::HueShift {
-                m: hue_matrix(angle),
-                mix,
-            })
+            Some(Resolved::HueShift { m, mix })
         }
         "contrast" => {
             // k = contrast_percent / 100; hard min 0 (no inversion),
@@ -678,14 +694,16 @@ fn resolve_one(
             Some(Resolved::Gamma { gamma, mix })
         }
         "temperature" => {
-            // k = Temperature / 100, clamped to the ±100 hard range. The
-            // two gains are computed here so the CPU reference and the WGSL
-            // kernel multiply by byte-identical f32 factors (§1.6);
+            // k = Temperature / 100, clamped to the ±2 hard range (±200). The
+            // stronger ±0.75·k gain (K-135) makes full deflection a decisive
+            // orange/blue; the gains floor at 0 so an extreme never drives a
+            // channel negative. Computed here so the CPU reference and the
+            // WGSL kernel multiply by byte-identical f32 factors (§1.6);
             // Temperature 0 → k 0 → gains exactly (1.0, 1.0), the neutral
-            // point.
-            let k = (e.float_at("temperature", lt).unwrap_or(0.0) as f32 / 100.0).clamp(-1.0, 1.0);
-            let gain_r = 1.0 + 0.5 * k;
-            let gain_b = 1.0 - 0.5 * k;
+            // point (the .max(0.0) leaves 1.0 untouched).
+            let k = (e.float_at("temperature", lt).unwrap_or(0.0) as f32 / 100.0).clamp(-2.0, 2.0);
+            let gain_r = (1.0 + 0.75 * k).max(0.0);
+            let gain_b = (1.0 - 0.75 * k).max(0.0);
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
             Some(Resolved::Temperature {
                 gain_r,
@@ -771,14 +789,16 @@ fn resolve_one(
             })
         }
         "glow" => {
-            let radius_pct = e.float_at("radius", lt).unwrap_or(8.0) as f32;
-            let threshold = (e.float_at("threshold", lt).unwrap_or(1.0) as f32).max(0.0);
+            // Radius is px@comp (K-135), scaled by the §2.3 preview factor so
+            // a Half preview blurs the same halo as Full, only softer.
+            let radius = e.float_at("radius", lt).unwrap_or(24.0) as f32;
+            let threshold = (e.float_at("threshold", lt).unwrap_or(0.8) as f32).max(0.0);
             let knee = (e.float_at("knee", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
             let intensity = (e.float_at("intensity", lt).unwrap_or(1.0) as f32).max(0.0);
             let tint = e.colour_at("tint", lt).unwrap_or([1.0; 4]);
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
             Some(Resolved::Glow {
-                radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
+                radius_px: (radius * px_scale).max(0.0),
                 threshold,
                 knee,
                 intensity,

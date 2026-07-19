@@ -9,8 +9,8 @@
 // (Temperature 0) short-circuits to the input, the bit-exact neutral point.
 
 struct Params {
-    gain_r: f32,   // scene-linear red gain, 1 + 0.5·k
-    gain_b: f32,   // scene-linear blue gain, 1 − 0.5·k
+    gain_r: f32,   // scene-linear red gain, max(0, 1 + 0.75·k)
+    gain_b: f32,   // scene-linear blue gain, max(0, 1 − 0.75·k)
     mix_amt: f32,  // 0..1, blended against the unprocessed input
     _pad0: f32,
 };

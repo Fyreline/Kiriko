@@ -6,7 +6,7 @@
 // effect, so a neutral Saturation is the bit-exact identity.
 
 struct Params {
-    saturation: f32,   // 0 = greyscale, 1 = neutral, 2 = doubled
+    saturation: f32,   // 0 = greyscale, 1 = neutral, 2 = doubled, open above
     mix_amt: f32,      // 0..1, blended against the unprocessed input
     _pad0: f32,
     _pad1: f32,

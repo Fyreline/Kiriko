@@ -516,11 +516,15 @@ pub const BUILTINS: &[EffectSchema] = &[
             ParamSchema {
                 id: "saturation",
                 label: "Saturation",
-                // Per cent about Rec. 709 luma: 0 = greyscale, 200 = doubled.
+                // Per cent about Rec. 709 luma: 0 = greyscale, 100 = neutral,
+                // 200 = doubled. The maths (a mix of luma and colour by
+                // saturation ÷ 100) simply keeps extrapolating above 200, so
+                // the hard ceiling is open (K-135): the slider reaches a
+                // heavy 400, and typing higher pushes further.
                 kind: ParamKind::Float {
                     default: 100.0,
-                    slider: (0.0, 200.0),
-                    hard: (Some(0.0), Some(200.0)),
+                    slider: (0.0, 400.0),
+                    hard: (Some(0.0), None),
                 },
             },
             MIX_PARAM,
@@ -572,11 +576,15 @@ pub const BUILTINS: &[EffectSchema] = &[
             ParamSchema {
                 id: "softness",
                 label: "Softness",
-                // 0..1: feather width beyond Radius, in the same metric.
+                // Feather width beyond Radius, in the same normalised metric.
+                // The metric is not capped at 1 (a distance reaches ~√2 at a
+                // corner under circular roundness), so Softness may exceed 1
+                // for a wider feather (K-135): the hard ceiling is open, the
+                // slider reaches 2.
                 kind: ParamKind::Float {
                     default: 0.5,
-                    slider: (0.0, 1.0),
-                    hard: (Some(0.0), Some(1.0)),
+                    slider: (0.0, 2.0),
+                    hard: (Some(0.0), None),
                 },
             },
             ParamSchema {
@@ -626,12 +634,17 @@ pub const BUILTINS: &[EffectSchema] = &[
             MIX_PARAM,
         ],
     },
-    // Hue shift (docs/08 §3.17): rotate every colour's hue by an angle, a
-    // constant-luminance rotation (Rec.709 luma stays put). A linear 3×3
-    // colour matrix, computed host-side so the CPU reference and the kernel
-    // multiply by identical coefficients; premultiplied (a linear matrix
-    // scales through alpha), alpha untouched. 0° is the bit-exact neutral
-    // point. Category Colour, beside its grade siblings.
+    // Hue shift (docs/08 §3.17, K-136): rotate every colour's hue by an
+    // angle. Preserve luminance (default on) keeps perceived brightness
+    // fixed as the hue turns — the constant-luminance rotation weighted by
+    // Rec.709 luma — while off is a plain geometric spin about the grey
+    // axis (equal weights) that lets brightness ride with the hue. Either
+    // way it is a linear 3×3 colour matrix, computed host-side (the bool
+    // only picks which weights), so the CPU reference and the kernel
+    // multiply by identical coefficients and preview equals export (K-031);
+    // premultiplied (a linear matrix scales through alpha), alpha untouched.
+    // 0° is the bit-exact neutral point in both modes. Category Colour,
+    // beside its grade siblings.
     EffectSchema {
         match_name: "hue_shift",
         label: "Hue shift",
@@ -655,6 +668,15 @@ pub const BUILTINS: &[EffectSchema] = &[
                     slider: (-180.0, 180.0),
                     hard: (None, None),
                 },
+            },
+            ParamSchema {
+                // On (default): the constant-luminance rotation (Rec.709 luma
+                // held). Off: a plain-RGB spin about the grey axis, brightness
+                // free to change with the hue. Absent on projects saved before
+                // this bool existed → true, the historical behaviour.
+                id: "preserve_luminance",
+                label: "Preserve luminance",
+                kind: ParamKind::Bool { default: true },
             },
             MIX_PARAM,
         ],
@@ -737,8 +759,11 @@ pub const BUILTINS: &[EffectSchema] = &[
     },
     // Temperature (docs/08 §3.20): a warm/cool white-balance shift as a
     // per-channel gain in scene-linear light — the montage grade's warmth
-    // lever. `k = Temperature ÷ 100`; `gain_r = 1 + 0.5·k` boosts red as it
-    // warms, `gain_b = 1 − 0.5·k` cuts blue, green untouched. Premultiplied: a
+    // lever. `k = Temperature ÷ 100`; `gain_r = 1 + 0.75·k` boosts red as it
+    // warms, `gain_b = 1 − 0.75·k` cuts blue, green untouched — a stronger
+    // per-unit gain (K-135) so full deflection reads as a decisive orange or
+    // blue rather than a timid tint, the gains floored at 0 so an extreme
+    // never drives a channel negative. Premultiplied: a
     // per-channel scalar scales premultiplied colour consistently (straight ×
     // gain, then × the unchanged alpha), so no unpremultiply round trip and
     // alpha is untouched — exactly like Exposure's pure multiply, and unlike
@@ -765,11 +790,14 @@ pub const BUILTINS: &[EffectSchema] = &[
                 id: "temperature",
                 label: "Temperature",
                 // A plain number: negative cools (blue up, red down), positive
-                // warms (red up, blue down). 0 is neutral. Hard ±100.
+                // warms (red up, blue down). 0 is neutral. The slider reaches
+                // ±150 and the hard range ±200 (K-135): with the stronger
+                // ±0.75·k gain, ±150 already pushes one channel toward black,
+                // so a user rarely runs out of headroom wanting more.
                 kind: ParamKind::Float {
                     default: 0.0,
-                    slider: (-100.0, 100.0),
-                    hard: (Some(-100.0), Some(100.0)),
+                    slider: (-150.0, 150.0),
+                    hard: (Some(-200.0), Some(200.0)),
                 },
             },
             MIX_PARAM,
@@ -1064,9 +1092,10 @@ pub const BUILTINS: &[EffectSchema] = &[
     },
     // Glow (docs/08 §3.3): exposure-aware bloom in scene-linear light —
     // bright-pass with a soft knee, a wide gaussian on the leftover light,
-    // additive recombine. The v1 core ships Threshold/Knee/Radius/Intensity/
-    // Tint; the §3.3 mip-chain items (Falloff, Chromatic aberration, the
-    // Screen recombine) land with the progressive chain later and these
+    // additive recombine. The v1 core ships Threshold/Softness (id `knee`)/
+    // Radius/Intensity/Tint; the §3.3 mip-chain items (Falloff, Chromatic
+    // aberration, the Screen recombine) land with the progressive chain later
+    // and these
     // parameters stay stable when they do. The bright pass thresholds all
     // four premultiplied channels alike, so the halo carries alpha and glow
     // spreads over transparency like light.
@@ -1077,7 +1106,11 @@ pub const BUILTINS: &[EffectSchema] = &[
         category: FxCategory::Stylise,
         traits: EffectTraits {
             cost: CostClass::Moderate,
-            roi: Roi::PaddedPctDiag(50.0),
+            // Radius is raw px@comp (K-135), unbounded above, so a tight
+            // %-diag padding cannot be declared statically across every comp
+            // resolution — full-frame is the safe static bound (mirroring
+            // Chromatic aberration's own px@comp parameter).
+            roi: Roi::FullFrame,
             temporal: &[0],
             premultiplied: true,
             seeded: false,
@@ -1090,16 +1123,20 @@ pub const BUILTINS: &[EffectSchema] = &[
                 // Linear-light value above which pixels bloom. The K-090
                 // one-sided hard range made concrete: clamped at zero below,
                 // unbounded above — HDR values beyond the slider are legal
-                // and glow harder (§2.1).
+                // and glow harder (§2.1). Default 0.8 so highlights just
+                // shy of white already bloom on a fresh instance.
                 kind: ParamKind::Float {
-                    default: 1.0,
+                    default: 0.8,
                     slider: (0.0, 4.0),
                     hard: (Some(0.0), None),
                 },
             },
             ParamSchema {
+                // The id stays "knee" (stable identifier, addressed by
+                // expressions and saved projects); only the UI label reads
+                // "Softness", the plainer word for the same soft-knee width.
                 id: "knee",
-                label: "Knee",
+                label: "Softness",
                 // Soft-knee width: the threshold's onset is eased by a
                 // smoothstep over ±knee around it (§3.3 step 1), so the
                 // bloom fades in rather than snapping on.
@@ -1112,12 +1149,15 @@ pub const BUILTINS: &[EffectSchema] = &[
             ParamSchema {
                 id: "radius",
                 label: "Radius",
-                // % of the comp diagonal (§2.3), the halo gaussian's
-                // half-width — measured exactly like Blur's Radius.
+                // px@comp (§2.3, K-135): the halo gaussian's half-width in
+                // real pixels — scaled by the preview factor like every
+                // px@comp parameter — clamped at zero below and unbounded
+                // above, so a wide bloom is a matter of typing a larger
+                // number, not hitting a cap.
                 kind: ParamKind::Float {
-                    default: 8.0,
-                    slider: (0.0, 50.0),
-                    hard: (Some(0.0), Some(100.0)),
+                    default: 24.0,
+                    slider: (0.0, 200.0),
+                    hard: (Some(0.0), None),
                 },
             },
             ParamSchema {

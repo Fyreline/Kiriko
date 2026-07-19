@@ -53,7 +53,7 @@ struct ColourBalanceParams {
 /// Rec. 709 luma, in linear on unpremultiplied colour.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SaturationOp {
-    /// 0 = greyscale, 1 = neutral, 2 = doubled.
+    /// 0 = greyscale, 1 = neutral, 2 = doubled, open above (K-135).
     pub saturation: f32,
     /// 0..1, blended against the unprocessed input.
     pub mix: f32,
@@ -90,9 +90,10 @@ struct ExposureParams {
 
 /// One resolved temperature (docs/08 §3.20): a warm/cool white-balance shift as
 /// a per-channel gain in scene-linear light. `gain_r`/`gain_b` are computed
-/// host-side (`gain_r = 1 + 0.5·k`, `gain_b = 1 − 0.5·k` for `k = temperature /
-/// 100`), so the CPU reference and the kernel multiply by byte-identical
-/// numbers; green and alpha are untouched. Gains `(1.0, 1.0)` (temperature 0)
+/// host-side (`gain_r = max(0, 1 + 0.75·k)`, `gain_b = max(0, 1 − 0.75·k)` for
+/// `k = temperature / 100`, K-135), so the CPU reference and the kernel multiply
+/// by byte-identical numbers; green and alpha are untouched. Gains `(1.0, 1.0)`
+/// (temperature 0)
 /// are the bit-exact neutral point. Premultiplied, exactly like [`ExposureOp`]:
 /// a per-channel scalar scales premultiplied colour consistently, so no
 /// unpremultiply round trip.

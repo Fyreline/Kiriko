@@ -1419,3 +1419,52 @@ no-op (its sampled draws are sized for the nested comp); it takes precedence ove
 an adjustment somehow carries both; sub-frame sample-count reduction under draft/scrub is a
 tracked follow-up (full N always on export). Concurrent-worktree risk: another agent may also
 claim K-134 — renumber on merge if so. Built in an isolated worktree; not pushed.
+
+**K-135 · DECIDED · Effect parameter ranges prefer real/pixel units with open ceilings over
+0–1 or percentage caps.** From the owner (2026-07-19). Unless a parameter's name carries a `%`
+or a 0–1 ratio is genuinely its natural unit (a "roundness" that is literally how-circular, an
+opacity, a mix), a built-in effect parameter should read in real or pixel units with a
+one-sided `0..∞` (or wider signed) hard range rather than a 0–1 or fixed-percentage cap — the
+maths almost always extrapolates cleanly past the old cap, and an editor should not hit a wall
+wanting more. This continues the K-090 one-sided-range amendment, applied as a sweep across the
+shipped grade/stylise effects:
+- **Saturation** (§3.10) — the hard ceiling is lifted (`hard: (Some(0.0), None)`, slider to
+  400 %). The luma/colour mix already extrapolates past 200 %; the CPU reference and WGSL
+  kernel never clamped it, only the resolver did.
+- **Vignette Softness** (§3.14) — lifted to `hard: (Some(0.0), None)`, slider to 2, kept in the
+  normalised distance metric (not converted to pixels). The metric itself is not capped at 1
+  (a corner reaches ~√2 under circular roundness), so a Softness beyond 1 is a legitimately
+  wider feather; Amount/Radius/Roundness keep their 0–1 caps.
+- **Temperature** (§3.20) — slider widened to ±150, hard to ±200, and the per-unit gain
+  strengthened from `0.5·k` to `0.75·k` (`k = Temperature ÷ 100`, clamped to ±2) so full
+  deflection is a decisive orange/blue; the gains floor at 0 (`max(0, …)`) so an extreme never
+  drives a channel negative. 0 stays the bit-exact neutral point; CPU/GPU parity is preserved
+  (gains computed host-side, as before).
+- **Glow** (§3.3) — default Threshold lowered to 0.8; the **Knee** parameter's UI label renamed
+  to **Softness** (the stable id stays `knee`, so saved projects and expressions are
+  unaffected); **Radius** converted from % diag to **px@comp** with `hard: (Some(0.0), None)`
+  (slider to 200, default 24 px), scaled by the preview factor like every px@comp parameter;
+  the effect's ROI becomes `full-frame` since an unbounded px radius cannot be bounded as a
+  %-diag padding (mirroring Chromatic aberration's own px@comp choice).
+
+The changes touch schema ranges/labels and the resolve step (clamps and the glow radius unit +
+the temperature gain formula) only; the CPU oracles and WGSL kernels are unchanged (they never
+clamped), so K-031 preview/export parity holds automatically. Regression tests widen to exercise
+the un-capped values and the temperature floor. Concurrent-worktree risk: another agent may also
+claim K-135 — renumber on merge if so. Built in an isolated worktree; not pushed.
+
+**K-136 · DECIDED · Hue shift gains a Preserve-luminance toggle (default on).** From the owner
+(2026-07-19). The Hue shift effect (§3.17) adds a `preserve_luminance` bool, defaulting **on**,
+which keeps today's behaviour: a constant-luminance rotation weighted by Rec.709 luma, so
+perceived brightness stays put as the hue turns (a project saved before the toggle reads it as
+on). **Off** switches to a plain-RGB spin about the neutral grey axis with equal weights, which
+preserves the raw R+G+B sum rather than perceived luminance, letting brightness ride with the
+hue. Both modes are the same SVG-`feColorMatrix` construction differing only in the luma
+weights, so the resolve step simply picks which host-computed matrix
+(`lumit_core::fx::hue_matrix` vs `hue_matrix_rgb`) to carry; the matrix-general CPU reference
+and WGSL kernel are unchanged and stay in lock-step (K-031). 0° is the bit-exact identity in
+both modes. Note for the record: the preserve-on mode is a Rec.709-weighted **linear-RGB**
+rotation — the *spirit* of K-034's "hue-type operations convert through Oklab" (hold lightness,
+turn hue) reached cheaply, not a literal Oklab/OkLCh rotation; a true-Oklab hue mode remains
+possible future work. Concurrent-worktree risk: another agent may also claim K-136 — renumber
+on merge if so. Built in an isolated worktree; not pushed.

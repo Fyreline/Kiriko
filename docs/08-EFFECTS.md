@@ -344,29 +344,36 @@ band or clip prematurely.
 
 | Parameter | Range / type | Default |
 |---|---|---|
-| Threshold | 0–4 (linear value) | 1.0 |
-| Knee | 0–1 | 0.5 |
-| Radius | 0–50 % diag | 8 % diag |
+| Threshold | 0–4 (linear value), hard min 0, unbounded above | 0.8 |
+| Softness (id `knee`) | 0–1 | 0.5 |
+| Radius | px@comp, hard min 0, unbounded above | 24 px |
 | Falloff | 0.5–4.0 | 1.0 |
 | Intensity | 0–10 | 1.0 |
 | Chromatic aberration | 0–100% | 0 |
 | Tint | colour | white |
 | Recombine | Add / Screen | Add |
 
-Cost class `moderate`; ROI `padded(radius)`. The mip chain makes large radii near-constant
-cost — the "radius 200 makes AE cry" failure mode does not exist here.
+Cost class `moderate`; ROI `full-frame` (Radius is unbounded px@comp, so a %-diag padding
+cannot bound it statically, K-135 — mirroring Chromatic aberration's own px@comp choice).
+The mip chain makes large radii near-constant cost — the "radius 200 makes AE cry" failure
+mode does not exist here.
 
-**Status (v1 core, shipped):** the bright-pass → separable gaussian → additive recombine
-spine, with Threshold (hard range clamped at zero below and unbounded above — the K-090
-one-sided shape; HDR values glow harder), Knee, Radius, Intensity, Tint and the host Mix.
-The knee is pinned as `max(0, c − threshold) · smoothstep(threshold − knee,
-threshold + knee, c)` per channel. The bright pass thresholds all four premultiplied
-channels alike, so the halo carries alpha and glow spreads over transparency like light;
-output alpha saturates at 1. The internal gaussian uses Repeat edges (fixed), so the halo
-holds its strength along frame borders. Intensity 0 is the neutral point — a bit-exact
-passthrough, pinned by test. The progressive mip chain, and with it Falloff, Chromatic
-aberration and the Screen recombine, replace the single gaussian later; every shipped
-parameter is stable when they do.
+**Status (v1 core, shipped; ranges revised K-135/FX-16):** the bright-pass → separable
+gaussian → additive recombine spine, with Threshold (hard range clamped at zero below and
+unbounded above — the K-090 one-sided shape; HDR values glow harder; **default 0.8** so a
+fresh instance blooms highlights just shy of white), **Softness** (the soft-knee width — its
+UI label was renamed from Knee for plainer language; the stable parameter id stays `knee`, so
+saved projects and expressions are unaffected), **Radius** (now **px@comp** rather than %
+diag, K-135: a real-pixel half-width scaled by the preview factor, clamped at zero below and
+unbounded above so a wide bloom is a matter of typing a larger number, not hitting a cap —
+default 24 px), Intensity, Tint and the host Mix. The knee is pinned as
+`max(0, c − threshold) · smoothstep(threshold − knee, threshold + knee, c)` per channel. The
+bright pass thresholds all four premultiplied channels alike, so the halo carries alpha and
+glow spreads over transparency like light; output alpha saturates at 1. The internal gaussian
+uses Repeat edges (fixed), so the halo holds its strength along frame borders. Intensity 0 is
+the neutral point — a bit-exact passthrough, pinned by test. The progressive mip chain, and
+with it Falloff, Chromatic aberration and the Screen recombine, replace the single gaussian
+later; every shipped parameter is stable when they do.
 
 ### 3.4 Shake — parameterised camera shake (S_Shake-class)
 
@@ -525,7 +532,9 @@ grade's tasteful default is a preset choice — see the browser below):
   trackballs, UI: [07-UI-SPEC.md](07-UI-SPEC.md) colour workspace). Applied in linear
   (gain), with gamma on a display-referred intermediate for familiar feel, documented
   precisely in the implementation notes.
-- **Saturation** (0–200%) — colourfulness about Rec. 709 luma in linear light.
+- **Saturation** (per cent about Rec. 709 luma in linear light; 0 = greyscale, 100 = neutral,
+  200 = doubled) — the hard ceiling is **open** (K-135): the luma/colour mix keeps
+  extrapolating past 200, so the slider reaches a heavy 400 and typing higher pushes further.
 
 **Vignette** (§3.14, shipped) is one of these single-purpose colour effects, because every CC
 pack has one. The remaining "CC" stages arrive the same way: **exposure / white balance**
@@ -687,8 +696,8 @@ already in place.
 
 ### 3.14 Vignette
 
-**Parameters:** Amount (0–1, default 0.5), Radius (0–1, default 0.75), Softness (0–1,
-default 0.5), Roundness (0–1, default 1.0), Mix.
+**Parameters:** Amount (0–1, default 0.5), Radius (0–1, default 0.75), Softness (hard min 0,
+unbounded above — slider 0–2, default 0.5), Roundness (0–1, default 1.0), Mix.
 
 **Algorithm sketch.** Darkens toward black away from the frame centre: a normalised distance
 metric (blended by Roundness between a true circle and an ellipse matching the frame's
@@ -698,8 +707,12 @@ pointwise per-pixel darken, no neighbour sampling despite the spatial falloff.
 
 **Status (v1, shipped):** §3.10's one-line mention names Amount, Size, Softness, Roundness
 without ranges or a parameter shape — pinned here as Amount / Radius / Softness / Roundness,
-each a plain 0–1 fraction rather than the %-diag or percentage figures most of the catalogue
-uses: the schema's Radius plays the role §3.10's text calls Size, renamed for clarity against
+plain fractions in the normalised distance metric rather than the %-diag or percentage figures
+most of the catalogue uses. Amount, Radius and Roundness keep a 0–1 cap; **Softness is open
+above** (K-135): the metric itself is not capped at 1 (a corner reaches ~√2 under circular
+roundness), so a Softness beyond 1 is a legitimately wider feather, and only the ceiling is
+lifted — the floor stays 0. The schema's Radius plays the role §3.10's text calls Size,
+renamed for clarity against
 Blur's and Glow's own Radius, which shares their unit family instead. Category is **Colour**,
 alongside Colour balance and Saturation — matching where §3.10's text already lists it, not
 Stylise, despite the spatial falloff. Roundness blends the distance metric between a circle
@@ -758,21 +771,36 @@ one-knob exposure move.
 
 ### 3.17 Hue shift
 
-**Parameters:** Angle (degrees, default 0, slider −180..+180, wraps), Mix.
+**Parameters:** Angle (degrees, default 0, slider −180..+180, wraps), Preserve luminance
+(bool, default on), Mix.
 
-**Algorithm sketch.** A constant-luminance hue rotation — the standard SVG `feColorMatrix`
-hue-rotate, with Rec.709 luma weights so perceived brightness stays put as the hue turns. The
-row-major 3×3 colour matrix is computed host-side (`lumit_core::fx::hue_matrix`) so the CPU
-reference and the WGSL kernel multiply by identical coefficients; its nine coefficients travel
-as individual `f32` uniform fields (tight 4-byte packing, matching the Rust `[f32; 9]` — a
+**Algorithm sketch.** A hue rotation built from the standard SVG `feColorMatrix` hue-rotate
+construction, in one of two modes chosen by **Preserve luminance** (K-136):
+
+- **On (default)** — the weights are Rec.709 luma, so it is a **constant-luminance** rotation:
+  perceived brightness stays put as the hue turns (a saturated green stays as bright, a blue
+  as dark). This is the historical behaviour; a project saved before the toggle existed reads
+  it as on.
+- **Off** — the weights are equal (⅓, ⅓, ⅓), a plain **geometric spin about the grey axis**:
+  it preserves the raw R+G+B sum rather than perceived luminance, so brightness is free to
+  ride with the hue (the way a naïve RGB hue wheel behaves).
+
+Either way the result is a row-major 3×3 colour matrix computed host-side
+(`lumit_core::fx::hue_matrix` / `hue_matrix_rgb` — the bool only picks the weights), so the
+CPU reference and the WGSL kernel multiply by identical coefficients and preview equals export
+(K-031); the kernel is matrix-general and unchanged. The nine coefficients travel as
+individual `f32` uniform fields (tight 4-byte packing, matching the Rust `[f32; 9]` — a
 uniform array would stride at 16). Premultiplied throughout: a linear matrix scales through
 alpha, so no unpremultiply round trip and alpha is untouched. `cheap` cost, `Exact` ROI.
 
-**Status (v1, shipped, K-108):** the third one-knob grade, beside Exposure and Saturation in
-the **Colour** category. Continuous (a linear matrix), so the §1.6 oracle holds to ≤ 2 fp16
-ULP (measured 0–1 on the dev RTX). 0° resolves to the exact identity matrix — the bit-exact
-neutral point, pinned by test — and Mix 0 is likewise the identity. Hue rotation runs in the
-compositor's scene-linear working space (not gamma), consistent with every other grade here.
+**Status (v1, shipped, K-108; Preserve-luminance toggle added K-136):** the third one-knob
+grade, beside Exposure and Saturation in the **Colour** category. Continuous (a linear
+matrix), so the §1.6 oracle holds to ≤ 2 fp16 ULP (measured 0–1 on the dev RTX) in **both**
+modes. 0° resolves to the exact identity matrix in either mode — the bit-exact neutral point,
+pinned by test — and Mix 0 is likewise the identity. Hue rotation runs in the compositor's
+scene-linear working space (not gamma), consistent with every other grade here. (Note: the
+constant-luminance mode is a Rec.709-weighted linear-RGB rotation, in the spirit of K-034's
+perceptual hue handling but not literally an Oklab rotation — see docs/GUIDE.md.)
 
 ### 3.18 Contrast
 
@@ -827,12 +855,15 @@ animatable mid-tone control — the common one-knob gamma move.
 
 ### 3.20 Temperature
 
-**Parameters:** Temperature (a plain number, default 0, slider −100..+100, hard ±100), Mix.
+**Parameters:** Temperature (a plain number, default 0, slider −150..+150, hard ±200), Mix.
 
 **Algorithm sketch.** A warm/cool white-balance shift as a per-channel gain in the
-compositor's scene-linear working space: with `k = Temperature ÷ 100`, red is scaled by
-`gain_r = 1 + 0.5·k` and blue by `gain_b = 1 − 0.5·k`, so warming (`+`) lifts red and drops
-blue and cooling (`−`) does the mirror; green and alpha are untouched. The two gains are
+compositor's scene-linear working space: with `k = Temperature ÷ 100` (clamped to the ±2 hard
+range), red is scaled by `gain_r = max(0, 1 + 0.75·k)` and blue by
+`gain_b = max(0, 1 − 0.75·k)`, so warming (`+`) lifts red and drops blue and cooling (`−`)
+does the mirror; green and alpha are untouched. The `0.75·k` gain (K-135, up from `0.5·k`)
+makes full deflection a decisive orange or blue, and the `max(0, …)` floor stops an extreme
+driving a channel negative. The two gains are
 computed host-side (in the resolve step) so the CPU reference and the WGSL kernel multiply by
 byte-identical `f32` factors — no arithmetic per pixel or per path beyond the multiply itself.
 **Premultiplied throughout**, exactly like Exposure (§3.16): a per-channel scalar scales
@@ -848,9 +879,9 @@ holds to ≤ 2 fp16 ULP, exercised on a corpus that includes partial-alpha pixel
 the premultiplied multiply comes out identical on both paths. Temperature 0 resolves to gains
 exactly `(1.0, 1.0)` and short-circuits to the input on both paths (the bit-exact neutral
 point, pinned by test); Mix 0 is likewise the identity. This is the simple montage-grade
-warmth lever — a fixed ±0.5 R/B gain with green held — not the fuller white balance sketched
-for Tier 2 (§3.10: a Bradford-adapted CCT shift with a Tint axis); it is the common one-click
-warm/cool move, animatable like every other grade.
+warmth lever — a per-channel ±0.75·k R/B gain with green held (K-135) — not the fuller white
+balance sketched for Tier 2 (§3.10: a Bradford-adapted CCT shift with a Tint axis); it is the
+common one-click warm/cool move, animatable like every other grade.
 
 ### 3.21 Matte key — soft chroma key (greenscreen removal)
 
