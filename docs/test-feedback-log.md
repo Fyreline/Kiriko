@@ -47,19 +47,21 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
 - [x] **UI-10** (K-156) Preset save now respects the selection: nothing selected → whole stack;
   else only the selected effects (in order), with params trimmed to just their selected keys
   (params with no selected keys keep their value/animation as set).
-- [ ] **UI-11** Flow input rate: make it a textbox the user types into (not a dropdown),
-  and keyframeable like any other property.
+- [x] **UI-11** (K-160) Flow input rate is now a keyframeable `Property`: a typed value field
+  (0 = "Native", else "N fps") with the stopwatch + ◄ ◆ ► navigator, read at frame time so an
+  animated rate keys each frame. (Lane keyframe diamonds for it not added — a bigger PropRow
+  change; add/remove/navigate + value edit all work.)
 - [x] **UI-12** Per-layer motion-blur toggle now drawn: it was only ever in the right-click
   menu, never the switch row. Shows as an "MB" text switch (no motion-blur glyph exists) in the
   far-right slot; flips `switches.motion_blur`.
 - [x] **UI-13** Importing footage should auto-highlight it in the Project tab and switch to
   that tab if not already there. — done: import selects the new item and raises the Project
   tab (`focus_project_tab` flag consumed by the shell).
-- [ ] **UI-14** Bottom timeline bar: the graph-option buttons are slightly clipped — make
-  room.
-- [ ] **UI-15** Viewfinder: in soft mode the zoomed preview spills over the border edges —
-  it must sit behind the border. In round mode the bottom bar should be a pill spanning the
-  bottom.
+- [x] **UI-14** Bottom-bar cluster tightened (view toggle packs flush, group gaps 10→6, clip
+  moved out) so the interpolation buttons are fully visible. (Eyeball in graph mode.)
+- [x] **UI-15** Magnifier now paints inside a border-clipped rect with the border drawn last
+  (preview sits behind it); the info bar uses the card-corner token so it's a pill under Round,
+  square under Sharp. (Eyeball with a rounded theme.)
 
 ## Effects
 
