@@ -227,7 +227,16 @@ impl AppState {
         let Some(comp) = doc.comp(comp_id) else {
             return;
         };
+        // Centre the anchor on the text's estimated bounds (T23) so it rotates
+        // and scales around its middle, not the top-left origin. A rough glyph
+        // metric (proportional font ≈ 0.5 em advance, ≈ 1 em tall) — exact
+        // metrics need the font at render time, a later refinement.
+        let text = "Text";
+        let size = 72.0_f64;
+        let est_w = text.chars().count() as f64 * size * 0.5;
         let transform = TransformGroup {
+            anchor_x: lumit_core::anim::Property::fixed(est_w * 0.5),
+            anchor_y: lumit_core::anim::Property::fixed(size * 0.5),
             position_x: lumit_core::anim::Property::fixed(f64::from(comp.width) * 0.5),
             position_y: lumit_core::anim::Property::fixed(f64::from(comp.height) * 0.5),
             ..TransformGroup::default()
@@ -237,8 +246,8 @@ impl AppState {
             name: "Text".into(),
             kind: LayerKind::Text {
                 document: TextDocument {
-                    text: "Text".into(),
-                    size: 72.0,
+                    text: text.into(),
+                    size,
                     fill: LinearColour([1.0, 1.0, 1.0, 1.0]),
                     extra: serde_json::Map::new(),
                 },
