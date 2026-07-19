@@ -630,6 +630,9 @@ pub(crate) fn viewer_footage(
                         let response =
                             ui.add_sized(egui::vec2(ui.available_width() - 96.0, 18.0), slider);
                         if response.changed() {
+                            // Scrubbing the transport pauses playback (audio +
+                            // transport state), so it never fights the frame clock.
+                            app.pause_playback();
                             app.preview_frame = frame;
                             // Dragging the scrub slider decodes a draft; releasing
                             // it reloads at the specified resolution.

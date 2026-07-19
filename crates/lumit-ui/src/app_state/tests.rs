@@ -961,6 +961,30 @@ fn deleting_the_audio_layer_silences_the_comp() {
     );
 }
 
+#[test]
+fn scrubbing_pause_stops_the_whole_transport() {
+    // A seek during playback (clicking the timeline, or the viewer scrub) pauses:
+    // `pause_playback` clears the comp playback clock so `is_playing` goes false
+    // and the play button follows. It used to clear only the frame advance and
+    // leave the audio engine running, so `is_playing` stayed true (button stuck)
+    // and audio played on. The audio-engine pause is the same call `toggle_play`
+    // makes; it is not exercised here without an audio device.
+    let mut app = AppState::default();
+    app.new_composition();
+    app.confirm_comp_dialog();
+    app.comp_playback = Some((std::time::Instant::now(), 3));
+    assert!(
+        app.is_playing(),
+        "the comp playback clock counts as playing"
+    );
+    app.pause_playback();
+    assert!(app.comp_playback.is_none());
+    assert!(
+        !app.is_playing(),
+        "scrubbing pause stops the transport state"
+    );
+}
+
 /// GEN-3 (K-153): importing a clip longer than the comp keeps its FULL media
 /// duration — positioned from the comp start — instead of being trimmed to fit.
 /// The comp window clips it at render time; the model keeps the whole layer, so

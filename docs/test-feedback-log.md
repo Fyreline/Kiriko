@@ -130,3 +130,11 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
   one of several audio layers mid-playback has a brief re-decode snap; all-silent is instant.
   Unblocks FX-15.
 - [x] **GEN-5** Default the lane-timeline grid to **time**, not beats. — done.
+
+## Later-reported bugs (this session)
+
+- [x] **Scrub during playback didn't fully stop.** Clicking the timeline (or the viewer
+  scrub) to move the playhead during playback halted the frame advance but left the audio
+  engine running, so `is_playing` stayed true (play button stuck) and audio played on. Added
+  `AppState::pause_playback` (pauses audio + clears the transport) and routed the timeline
+  ruler and viewer scrub through it. Regression test added.

@@ -264,13 +264,22 @@ impl AppState {
     /// Space: play/pause. Plays the open composition (audio-synced, mixing its
     /// audio layers) or the previewed footage, from the current frame.
     #[cfg(feature = "media")]
+    /// Stop playback completely: pause the audio engine AND clear the comp
+    /// playback clock. Scrubbing (a seek during playback) pauses, so the audio
+    /// and the transport state must stop with the frame advance — clearing only
+    /// `comp_playback` used to leave the audio engine running, so `is_playing`
+    /// stayed true (the play button stuck) and the audio played on.
+    pub fn pause_playback(&mut self) {
+        if let Some(engine) = &self.audio_engine {
+            engine.pause();
+        }
+        self.comp_playback = None;
+    }
+
     pub fn toggle_play(&mut self) {
         // Any second press pauses.
         if self.is_playing() {
-            if let Some(engine) = &self.audio_engine {
-                engine.pause();
-            }
-            self.comp_playback = None;
+            self.pause_playback();
             return;
         }
 

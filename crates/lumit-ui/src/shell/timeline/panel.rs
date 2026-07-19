@@ -248,7 +248,7 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
             )
             .to_f64();
             app.preview_comp = Some(comp_id);
-            app.comp_playback = None; // scrubbing pauses
+            app.pause_playback(); // scrubbing pauses — stop audio + transport, not just the frame advance
             app.preview_frame =
                 ((secs / duration * frames as f64) as usize).min(frames.saturating_sub(1));
             // Dragging is scrubbing: decode a coarse draft for instant feedback.
