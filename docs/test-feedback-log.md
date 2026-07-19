@@ -76,13 +76,10 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
   **Sharpen** (amount). — done (K-138): existing effect relabelled "Unsharp mask"; new
   "Sharpen" is a 3×3 high-pass with an Amount dial + oracle test.
 - [ ] **FX-4** Matte after-effects → combobox (see **P1**); remove the bool everywhere.
-- [ ] **FX-5** Saturation should exceed 200.
-- [ ] **FX-6** Vignette softness should go `0..inf` (see **P5** value-range policy);
-  roundness stays 0–1.
-- [ ] **FX-7** Hue shift: add a **preserve luminance** bool, on by default; off does the
-  shift in plain RGB rather than OKLab.
-- [ ] **FX-8** Temperature: wider range / bigger per-unit effect so the extremes are far
-  more blue/orange before hitting the limit.
+- [x] **FX-5** Saturation should exceed 200. — done (K-135): hard cap lifted, slider to 400 %.
+- [x] **FX-6** Vignette softness now `0..inf` (K-135), roundness stays 0–1.
+- [x] **FX-7** Hue shift preserve-luminance bool (K-136): on = constant-luminance, off = plain-RGB spin.
+- [x] **FX-8** Temperature widened (K-135): slider ±150 / hard ±200, per-unit gain 0.5→0.75.
 - [ ] **FX-9** RGB split: add per-channel R/G/B amount sliders; give wavelength more
   samples, with an extra property so the user controls sample count.
 - [ ] **FX-10** Chromatic aberration: add RGB-split's wavelength, and a way to pick the
@@ -97,8 +94,7 @@ changes update `docs/08` and ship their oracle test; new concepts update `GUIDE.
 - [ ] **FX-14** Datamosh: allow intensity > 1; rename it; add control over streak
   duration (imitating I-frame cadence) — currently works but is not noticeable enough.
 - [ ] **FX-15** Flash feels off; blocked on audio fixes before it can be tested.
-- [ ] **FX-16** Glow: default threshold ~0.8; rename "knee" to "softness" (or clearer);
-  radius in pixels, `0..inf`.
+- [x] **FX-16** Glow (K-135): default threshold 0.8, knee label → Softness, radius px 0..inf.
 - [ ] **FX-17** Echo: default mode Screen (needs adding), add the other blend modes, allow
   more than 8 echoes.
 - [ ] **FX-18** Accumulation motion blur → rename to **Motion Blur**; add the option to
