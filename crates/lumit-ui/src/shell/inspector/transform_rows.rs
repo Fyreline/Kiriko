@@ -92,13 +92,29 @@ pub(crate) fn prop_range(
 ) -> (Vec<crate::app_state::PropSel>, bool) {
     let ai = anchor.and_then(|a| order.iter().position(|s| *s == a));
     let ti = order.iter().position(|s| *s == target);
-    match (ai, ti) {
-        (Some(ai), Some(ti)) => {
+    match (ai, ti, anchor) {
+        // A Shift-range only spans within one section (T7): the anchor and target
+        // must share it, or the Shift-click just picks the target (like a fresh
+        // selection) rather than sweeping across effects.
+        (Some(ai), Some(ti), Some(a)) if prop_section(&a) == prop_section(&target) => {
             let (lo, hi) = (ai.min(ti), ai.max(ti));
             (order[lo..=hi].to_vec(), false)
         }
         _ => (vec![target], true),
     }
+}
+
+/// The "section" a property row belongs to for Shift-range selection (T7): all
+/// transform props share one section, the Retime channel another, and each
+/// effect its own — so a Shift-range never sweeps across effects.
+fn prop_section(sel: &crate::app_state::PropSel) -> (uuid::Uuid, u8, usize) {
+    use crate::app_state::PropRow;
+    let (kind, idx) = match sel.row {
+        PropRow::Transform(_) => (0u8, 0usize),
+        PropRow::Retime => (1, 0),
+        PropRow::Effect { effect, .. } => (2, effect),
+    };
+    (sel.layer, kind, idx)
 }
 
 /// New (scale_x, scale_y) when the linked Scale control is dragged so x becomes

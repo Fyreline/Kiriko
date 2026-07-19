@@ -261,14 +261,15 @@ pub(crate) fn effects_rows(
         // is a drag handle: dragging it up or down reorders the stack (one
         // SetLayerEffects, so one undo step).
         {
-            // The title bar lifts when one of this effect's own param rows is the
-            // highlighted property (note 2.8.2), so the highlighted param's effect
-            // reads at a glance.
-            let title_hl = matches!(
-                ctx.selected_prop,
-                Some(crate::app_state::PropSel { layer: l, row: crate::app_state::PropRow::Effect { effect, .. } })
-                    if l == layer.id && effect == idx
-            );
+            // The title bar lifts when ANY of this effect's own param rows is in
+            // the selection (note 2.8.2; T6), so the highlighted effect reads at a
+            // glance — whether you clicked a param or the effect name itself.
+            let title_hl = (0..e.params.len()).any(|pi| {
+                ctx.is_selected(crate::app_state::PropRow::Effect {
+                    effect: idx,
+                    param: pi,
+                })
+            });
             let (row_rect, mut c) = row_frame(ui, ctx, false);
             section_bar(ui, ctx, row_rect, title_hl);
             fx_title_rows.push(row_rect);
@@ -327,6 +328,36 @@ pub(crate) fn effects_rows(
                     fx_reorder_release = Some((idx, y));
                 }
                 c.data_mut(|d| d.remove::<(usize, f32)>(fx_drag_id));
+            }
+            // Clicking the effect name (a click, not a reorder drag) selects the
+            // whole effect (T6): every param row joins the selection so the title
+            // highlights and the effect can be keyed or saved as a preset. Plain
+            // click replaces the selection; Ctrl toggles this effect's rows.
+            if name_resp.clicked() {
+                let rows: Vec<crate::app_state::PropSel> = (0..e.params.len())
+                    .map(|pi| crate::app_state::PropSel {
+                        layer: layer.id,
+                        row: crate::app_state::PropRow::Effect {
+                            effect: idx,
+                            param: pi,
+                        },
+                    })
+                    .collect();
+                if ui.input(|i| i.modifiers.command || i.modifiers.ctrl) {
+                    if rows.iter().all(|r| app.selected_props.contains(r)) {
+                        app.selected_props.retain(|s| !rows.contains(s));
+                    } else {
+                        for r in &rows {
+                            if !app.selected_props.contains(r) {
+                                app.selected_props.push(*r);
+                            }
+                        }
+                    }
+                } else {
+                    app.selected_props = rows.clone();
+                }
+                app.selected_prop = rows.first().copied();
+                app.selected_layer = Some(layer.id);
             }
             if c.small_button("\u{00d7}")
                 .on_hover_text("Remove this effect")

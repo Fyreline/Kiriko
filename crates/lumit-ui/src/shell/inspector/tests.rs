@@ -327,26 +327,38 @@ mod prop_select_gesture_tests {
         assert_eq!(set, vec![tf(TransformProp::PositionX), eff(0, 0), retime()]);
     }
 
-    // Shift-range covers the drawn rows between anchor and target even when the
-    // span mixes transform, Retime and effect rows (UI-6 draw order).
+    // A Shift-range only spans within one section (T7): a Shift-click whose
+    // target is in a different effect (or a different kind) than the anchor just
+    // picks the target; a range within one effect covers its rows.
     #[test]
-    fn range_spans_mixed_row_kinds() {
+    fn range_stops_at_section_boundaries() {
         let order = vec![
             retime(),
             tf(TransformProp::PositionX),
-            tf(TransformProp::Rotation),
             eff(0, 0),
             eff(0, 1),
+            eff(1, 0),
         ];
-        let (range, _) = prop_range(&order, Some(retime()), eff(0, 0));
+        // Anchor in the Retime section, target in effect 0 -> just the target.
+        let (range, to_anchor) = prop_range(&order, Some(retime()), eff(0, 0));
+        assert_eq!(range, vec![eff(0, 0)]);
+        assert!(to_anchor);
+        // Anchor and target both in effect 0 -> the range within that effect.
+        let (range, _) = prop_range(&order, Some(eff(0, 0)), eff(0, 1));
+        assert_eq!(range, vec![eff(0, 0), eff(0, 1)]);
+        // Anchor in effect 0, target in effect 1 -> just the target (no sweep).
+        let (range, _) = prop_range(&order, Some(eff(0, 0)), eff(1, 0));
+        assert_eq!(range, vec![eff(1, 0)]);
+        // Two transform props share the transform section -> they range.
+        let order2 = vec![tf(TransformProp::PositionX), tf(TransformProp::Rotation)];
+        let (range, _) = prop_range(
+            &order2,
+            Some(tf(TransformProp::PositionX)),
+            tf(TransformProp::Rotation),
+        );
         assert_eq!(
             range,
-            vec![
-                retime(),
-                tf(TransformProp::PositionX),
-                tf(TransformProp::Rotation),
-                eff(0, 0),
-            ]
+            vec![tf(TransformProp::PositionX), tf(TransformProp::Rotation)]
         );
     }
 }

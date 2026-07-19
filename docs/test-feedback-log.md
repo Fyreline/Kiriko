@@ -170,8 +170,8 @@ parallel pass left several not-quite-right). No migration burden (pre-release).
 - [ ] T3 Can't shift/ctrl-click to multi-select property rows in the LAYER area (regressed/missing).
 - [ ] T4 Copying a keyframe doesn't work in GRAPH view (works in lane); paste works in both.
 - [ ] T5 Copy/paste of a bezier key: handle LENGTH must be preserved regardless of neighbour distance, except clamped to the gap when the next/prev key is closer than the handle length (value-graph semantics).
-- [ ] T6 In Effect Controls, selecting a property highlights the effect-name row, but clicking the effect name directly doesn't — fix.
-- [ ] T7 Effect Controls shift-click across effects: selecting a prop in effect A then shift-click a prop in effect B should act like ctrl (select just that new one); shift-click WITHIN the same effect acts like shift (range).
+- [x] T6 Clicking an effect title now selects the whole effect (highlights the title, joins the selection); title highlights when any of its params is selected.
+- [x] T7 Shift-range now stops at section boundaries: a cross-effect (or cross-kind) shift-click just picks the target; within one effect it ranges.
 - [ ] T8 Flow input rate still shows "Native"; should hold a float defaulting to the layer's framerate.
 - [ ] T9 Per-layer MB toggle appears to do nothing (should blur the layer's transform motion).
 - [ ] T10 Bottom-bar graph icons still ~1-2px clipped; match the magnet icon's placement.
