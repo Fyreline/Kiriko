@@ -684,12 +684,12 @@ pub(crate) fn build_comp_draws_at(
                     .collect()
             })
             .unwrap_or_default();
-        // The dense motion field for Flow motion blur, carried from the same
-        // decode job (its `(u, v)` are at the layer's decoded size).
+        // The dense motion field for Fast motion blur, carried from the same
+        // decode job (its `(u, v, conf)` are at the layer's decoded size).
         let flow_field = pixels_by_layer.get(&layer.id).and_then(|lp| {
             lp.flow_field
                 .as_ref()
-                .map(|(u, v)| (u.clone(), v.clone(), lp.width, lp.height))
+                .map(|(u, v, conf)| (u.clone(), v.clone(), conf.clone(), lp.width, lp.height))
         });
         draws.push(CompLayerDraw {
             source,
@@ -808,13 +808,23 @@ pub(crate) fn render_below_at(
     below: &[lumit_core::model::Layer],
     tau: f64,
     frame_t: f64,
+    force_mb: Option<lumit_core::model::MotionBlur>,
     pixels_by_layer: &std::collections::HashMap<
         uuid::Uuid,
         &crate::app_state::preview::CompLayerPixels,
     >,
     visited: &mut Vec<uuid::Uuid>,
 ) -> egui_wgpu::wgpu::Texture {
-    let (draws, camera) = below_draws_at(doc, comp, below, tau, frame_t, pixels_by_layer, visited);
+    let (draws, camera) = below_draws_at(
+        doc,
+        comp,
+        below,
+        tau,
+        frame_t,
+        force_mb,
+        pixels_by_layer,
+        visited,
+    );
     let background = comp.background.0.map(f64::from);
     realiser.realise(camera, comp.width, comp.height, background, &draws)
 }
@@ -826,12 +836,14 @@ pub(crate) fn render_below_at(
 /// (the same `pixels_by_layer`); temporal effects in the below-stack are
 /// dropped to stills ([`strip_temporal_inputs`]).
 #[cfg(feature = "media")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn below_draws_at(
     doc: &lumit_core::model::Document,
     comp: &lumit_core::model::Composition,
     below: &[lumit_core::model::Layer],
     tau: f64,
     frame_t: f64,
+    force_mb: Option<lumit_core::model::MotionBlur>,
     pixels_by_layer: &std::collections::HashMap<
         uuid::Uuid,
         &crate::app_state::preview::CompLayerPixels,
@@ -846,6 +858,18 @@ pub(crate) fn below_draws_at(
     // time instead of the sample time `tau` (docs/impl/temporal-rerender.md §5).
     let mut below_comp = comp.clone();
     below_comp.layers = below.to_vec();
+    // Accumulation MB *Force on all layers* (docs/08 §3.26): drop the effect's
+    // shutter onto this SAMPLE-ONLY comp clone and turn every layer's own
+    // motion-blur switch on, so per-layer motion blur (K-120) smears each layer
+    // in every sub-frame sample — the real comp is never touched. None leaves
+    // the sample render exactly as before (Posterize, or accumulation without
+    // the toggle).
+    if let Some(mb) = force_mb {
+        below_comp.motion_blur = mb;
+        for l in &mut below_comp.layers {
+            l.switches.motion_blur = true;
+        }
+    }
     let mut draws = build_comp_draws_at(doc, &below_comp, tau, frame_t, pixels_by_layer, visited);
     strip_temporal_inputs(&mut draws);
     (draws, comp.camera_pose(tau))
@@ -881,7 +905,18 @@ pub(crate) fn posterize_below(
     }
     let tau = lumit_core::fx::posterize_held_time(t_comp, p.rate, p.phase);
     let below = &comp.layers[idx + 1..];
-    let (draws, camera) = below_draws_at(doc, comp, below, tau, frame_t, pixels_by_layer, visited);
+    // Posterize never forces per-layer motion blur (that is accumulation MB's
+    // Force on all layers).
+    let (draws, camera) = below_draws_at(
+        doc,
+        comp,
+        below,
+        tau,
+        frame_t,
+        None,
+        pixels_by_layer,
+        visited,
+    );
     Some(TemporalBelow { draws, camera })
 }
 
@@ -918,12 +953,25 @@ pub(crate) fn accumulation_mb_below(
         return None;
     }
     let dt = 1.0 / comp.frame_rate.fps().max(1.0);
+    // Force on all layers (docs/08 §3.26): when set, every layer in each sample
+    // render also smears along its own transform (the effect's shutter forced on
+    // the sample-only comp clone). None otherwise, so the samples render plainly.
+    let force_mb = p.forced_layer_mb();
     let below = &comp.layers[idx + 1..];
     let samples = offsets
         .iter()
         .map(|off| {
             let tau = t_comp + off * dt;
-            below_draws_at(doc, comp, below, tau, frame_t, pixels_by_layer, visited)
+            below_draws_at(
+                doc,
+                comp,
+                below,
+                tau,
+                frame_t,
+                force_mb,
+                pixels_by_layer,
+                visited,
+            )
         })
         .collect();
     Some(AccumulationBelow {
@@ -1129,7 +1177,17 @@ mod render_below_at_tests {
         // Re-render the whole stack (every layer counts as "below") at the same
         // time through the shared helper.
         let mut v2 = vec![comp.id];
-        let below = render_below_at(&realiser, &doc, &comp, &comp.layers, t, t, &pixels, &mut v2);
+        let below = render_below_at(
+            &realiser,
+            &doc,
+            &comp,
+            &comp.layers,
+            t,
+            t,
+            None,
+            &pixels,
+            &mut v2,
+        );
         let below_bytes = engine
             .readback8(&ctx, &engine.display(&ctx, &below))
             .unwrap();
@@ -1423,7 +1481,9 @@ mod render_below_at_tests {
         let mut v2 = vec![comp.id];
         // frame_t = 0.35 matches what the posterise adjustment passes (its own
         // frame time), so the two below-renders build the identical draws.
-        let held = render_below_at(&realiser, &doc, &comp, below, 0.3, 0.35, &pixels, &mut v2);
+        let held = render_below_at(
+            &realiser, &doc, &comp, below, 0.3, 0.35, None, &pixels, &mut v2,
+        );
         let held_bytes = engine
             .readback8(&ctx, &engine.display(&ctx, &held))
             .unwrap();

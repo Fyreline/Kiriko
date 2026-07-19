@@ -1722,7 +1722,10 @@ pub const BUILTINS: &[EffectSchema] = &[
     // temporal effects inside the sampled below-stack hold to stills.
     EffectSchema {
         match_name: "accumulation_mb",
-        label: "Accumulation motion blur",
+        // The user-facing motion blur (docs/08 §3.26): the accumulation kind is
+        // the correct, whole-scene one, so it takes the plain name. The
+        // optical-flow effect (match_name "motion_blur") is "Fast motion blur".
+        label: "Motion blur",
         version: 1,
         category: FxCategory::Temporal,
         traits: EffectTraits {
@@ -1776,6 +1779,17 @@ pub const BUILTINS: &[EffectSchema] = &[
                     hard: (Some(-720.0), Some(720.0)),
                 },
             },
+            ParamSchema {
+                id: "force_all",
+                label: "Force on all layers",
+                // Force per-layer motion blur (K-120) on every layer during the
+                // sub-frame sample renders — the shutter above stands in for the
+                // comp master and each layer's own switch, without mutating the
+                // comp. So one effect blurs every moving layer without toggling
+                // each one; each accumulation sample is itself transform-smeared,
+                // smoothing the result at lower sample counts. Off by default.
+                kind: ParamKind::Bool { default: false },
+            },
             MIX_PARAM,
         ],
     },
@@ -1805,7 +1819,10 @@ pub const BUILTINS: &[EffectSchema] = &[
     // exactly like Echo (adjustment-layer temporal effects follow).
     EffectSchema {
         match_name: "motion_blur",
-        label: "Motion blur",
+        // The optical-flow, footage-internal blur (docs/08 §3.2): "Fast" because
+        // it is a single-pass per-pixel smear, distinct from the whole-scene,
+        // re-rendering "Motion blur" (accumulation, §3.26).
+        label: "Fast motion blur",
         version: 1,
         category: FxCategory::Temporal,
         traits: EffectTraits {
@@ -1844,6 +1861,18 @@ pub const BUILTINS: &[EffectSchema] = &[
                     default: 16.0,
                     slider: (8.0, 32.0),
                     hard: (Some(2.0), Some(64.0)),
+                },
+            },
+            ParamSchema {
+                id: "view",
+                label: "View",
+                // Diagnostic outputs (FX-19): the blurred picture, the flow
+                // vectors colour-coded (red +x, green +y), or the confidence as
+                // greyscale (white = trusted, black = suspect — where the streak
+                // fades out). Rendered by default.
+                kind: ParamKind::Choice {
+                    options: &["Rendered", "Motion vectors", "Confidence"],
+                    default: 0,
                 },
             },
             MIX_PARAM,

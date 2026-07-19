@@ -1502,6 +1502,44 @@ from `run_ops`, and the `wgsl_sharpen_simple_matches_the_cpu_oracle` parity test
 ≤ 2 fp16 ULP). Both effects sit in **Blur & sharpen**. Spec: [08-EFFECTS.md](08-EFFECTS.md)
 §3.9. Built in an isolated worktree; not pushed.
 
+**K-139 · DECIDED · The accumulation temporal effect is *the* "Motion blur"; it gains "Force on
+all layers" (docs/08 §3.26).** The accumulation re-render effect (K-134) is renamed from
+"Accumulation motion blur" to plain **Motion blur** — the correct, whole-scene kind takes the
+user-facing name — and the optical-flow effect (§3.2) is renamed to **Fast motion blur** so the
+two never collide (the per-layer transform motion-blur *switch*, K-120, is untouched — it is a
+layer switch, not an effect). New bool parameter **Force on all layers** (default off): during
+each sub-frame sample render every layer's own per-layer motion blur (K-120) is forced on, the
+effect's own Shutter angle/phase/Samples standing in for the comp master and each layer's switch,
+so one effect blurs every moving layer without toggling each one and each accumulation sample is
+itself transform-smeared (smoother at low sample counts). Implemented WITHOUT mutating the comp:
+`AccumulationMbParams::forced_layer_mb()` hands a `MotionBlur` to `below_draws_at`, which drops
+it onto the sample render's cloned comp master and every layer switch — the document and the
+live-below composite are untouched, and preview and export drive the identical forced sample
+render (K-031). Boundary: the force reaches the top-level below layers; nested-Precomp inner
+layers keep their own switches (a v1 follow-up). Renaming is label-only — the `accumulation_mb`
+/ `motion_blur` match names and saved projects are unchanged. Concurrent-worktree risk: another
+agent may also claim K-139 — renumber on merge if so. Built in an isolated worktree; not pushed.
+
+**K-140 · DECIDED · Fast motion blur scales the streak by a smooth confidence, not a hard gate,
+and gains a View enum (docs/08 §3.2, docs/impl/optical-flow.md §4).** The optical-flow motion
+blur (§3.2, renamed to **Fast motion blur** in K-139) left hard un-blurred cut regions wherever
+the patch-based flow was unreliable (occlusions, motion boundaries). Fix: the decode worker now
+computes a per-pixel **confidence** in 0..1 alongside the flow — `lumit_flow::confidence(fwd,
+bwd)`, the raw forward–backward consistency mapped 1 (agree) … 0 (disagree, at the same rel/abs
+scale the binary occlusion cut uses; an invalid patch fully suspect), 3×3 box-blurred so the
+taper has no seam — and the kernel scales each pixel's **streak length** by it (`sv = flow ·
+shutter_frac · conf`). Suspect regions fade toward unblurred smoothly instead of cutting;
+confidence 0 is a bit-exact passthrough for that pixel, composing with the existing zero-motion
+and zero-shutter passthroughs. The confidence rides in a new `.z` channel of the flow texture
+(now `rgba32float`, not `rg32float`; Datamosh shares it and reads only `.xy`, so it is
+unaffected). New **View** enum parameter (*Rendered* | *Motion vectors* | *Confidence*, default
+Rendered): the diagnostic views output the flow colour-coded or the confidence as greyscale.
+Full CPU/GPU parity is kept — `lumit_core::fx::cpu::motion_blur` gains matching `conf`/`view`
+arguments and stays op-for-op with `fx_motionblur.wgsl` at the cheap-class ≤ 2 fp16 ULP oracle
+bound; preview and export compute confidence with the identical deterministic function (K-031).
+Concurrent-worktree risk: another agent may also claim K-140 — renumber on merge if so. Built in
+an isolated worktree; not pushed.
+
 **K-141 · DECIDED · Comp playback audio is kept in step with the document by a per-frame
 signature, not baked once (GEN-4 audio fixes).** The comp mix (`export::mixdown` of the
 audible footage layers, laid on the strip by `lumit_audio::mix::place_on_timeline`) was baked

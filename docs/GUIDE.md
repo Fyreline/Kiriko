@@ -157,22 +157,33 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   lighten-only look); wider/looser trails are a follow-up, and the other effects that want
   neighbouring frames — motion blur that follows real motion, and the datamosh look — build on
   this same machinery (both explained further down).
-- **Motion blur that follows real motion** — the second temporal effect, and the one that
-  turns game capture (which has no natural blur — every frame is pin-sharp) into footage that
-  streaks the way a real camera would. It builds on two things already in the box: Echo's
-  "fetch a neighbouring frame" plumbing, and the optical-flow engine that powers slow-motion.
-  The trick is to look at the current frame and the *next* one, work out how far every pixel
-  moved between them (that's the flow — a little arrow for each pixel saying where it went),
-  and then smear each pixel along its own arrow. Fast-moving areas get long streaks; still
-  areas stay crisp — exactly what real motion blur does, and what plugins like RSMB sell. The
-  flow is worked out during decoding, where both frames are sitting in memory anyway (the same
-  place slow-motion computes it), and passed to the blur as a little motion-map image; the
-  preview and the export do it the identical way, so what you see is what you get. Two knobs:
-  **Shutter angle** (how long the "shutter" stays open — 180° is the film-standard half-frame
-  smear; higher blurs more, up to a full 720°) and **Samples** (how many steps to take along
-  each streak — more is smoother but slower). A still frame, or a shutter of zero, leaves the
-  picture untouched. For now it follows the footage's own motion only (not, yet, motion you
-  add with keyframes) and works on footage layers, the same starting scope Echo has.
+- **Fast motion blur — blur that follows real motion** — a temporal effect (called **Fast
+  motion blur** in the menus, to set it apart from the whole-scene *Motion blur* of the
+  accumulation kind) that turns game capture (which has no natural blur — every frame is
+  pin-sharp) into footage that streaks the way a real camera would. It builds on two things
+  already in the box: Echo's "fetch a neighbouring frame" plumbing, and the optical-flow engine
+  that powers slow-motion. The trick is to look at the current frame and the *next* one, work
+  out how far every pixel moved between them (that's the flow — a little arrow for each pixel
+  saying where it went), and then smear each pixel along its own arrow. Fast-moving areas get
+  long streaks; still areas stay crisp — exactly what real motion blur does, and what plugins
+  like RSMB sell. The flow is worked out during decoding, where both frames are sitting in
+  memory anyway (the same place slow-motion computes it), and passed to the blur as a little
+  motion-map image; the preview and the export do it the identical way, so what you see is what
+  you get. **The tricky bit — no more blocky cut-outs (the FX-19 fix).** Guessing motion is
+  unreliable where things appear, disappear, or cross an edge, and the old version simply didn't
+  blur those spots — leaving hard, obviously-wrong seams between blurred and un-blurred patches.
+  The fix hands the blur a second little map alongside the arrows: a *confidence* from 0 to 1,
+  worked out by checking the forward arrows against the backward ones (they should cancel out;
+  where they don't, trust is low) and then softened so it fades rather than jumps. The streak
+  length is simply multiplied by that confidence, so an unreliable area *eases* toward no blur
+  instead of cutting. Three knobs plus a viewer: **Shutter angle** (how long the "shutter" stays
+  open — 180° is the film-standard half-frame smear; higher blurs more, up to a full 720°),
+  **Samples** (how many steps to take along each streak — more is smoother but slower), and a
+  **View** picker — leave it on *Rendered* for the blurred picture, or switch to *Motion vectors*
+  (the arrows, colour-coded) or *Confidence* (the trust map in grey) to see exactly what the
+  effect is doing. A still frame, a shutter of zero, or zero confidence leaves the picture
+  untouched. For now it follows the footage's own motion only (not, yet, motion you add with
+  keyframes) and works on footage layers, the same starting scope Echo has.
 - **Datamosh** — the corrupted-video "reused an old frame's motion" look, and the third
   effect to use the flow-field machinery Motion blur introduced. Real video codecs sometimes
   drop a frame's actual picture data and just reuse the previous frame's content nudged by
@@ -204,16 +215,19 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   layers or the clock). Instead it plugs in at the one place that holds the layers and the
   time — the render loop itself — and that place is the same in the preview and in an export,
   so they always agree (the whole point of the shared `render_below_at` helper: both the live
-  viewer and the file are literally the same re-render code). Two honest details: the footage
-  itself is *held* (it does not step frame-by-frame — smoothing footage in time is the flow
-  Motion blur effect's job), so Posterize quantises the *movement and effects*, not the video
-  playback; and a couple of exotic combinations (an echo *inside* the held part, or Posterize
-  buried in a collapsed precomp) quietly do nothing rather than risk a wrong picture. There is
-  also a Scope switch for a per-layer version, "just this layer's own effects": drop Posterize
-  onto a normal layer and set that scope, and only *that layer's effects* go choppy on the grid
-  — the layer keeps moving smoothly, but its blur, glow, glitch and so on step in time. It needs
-  no re-render of the rest of the scene at all: the layer simply reads a "held" clock for its
-  own effect stack while its position and picture read the live one. That is why it is the
+  viewer and the file are literally the same re-render code). Two honest details: the *video
+  frame itself* also steps to the coarse grid (that was the FX-1 fix — a scene that is only
+  footage playing back would otherwise look untouched, because only the animation was being held;
+  now the app also picks the held moment's source frame, so playback visibly chunks along at, say,
+  12 a second). Smoothing footage *between* those held frames — real motion blur on the streaks —
+  is a different effect (the flow Motion blur); Posterize just quantises the playback grid. And a
+  couple of exotic combinations (an echo *inside* the held part, or Posterize buried in a
+  collapsed precomp) quietly do nothing rather than risk a wrong picture. There is also a Scope
+  switch for a per-layer version, "just this layer's own effects": drop Posterize onto a normal
+  layer and set that scope, and only *that layer* goes choppy on the grid — its effects and its
+  footage playback step while the layer keeps *moving* smoothly. It needs no re-render of the rest
+  of the scene at all: the layer simply reads a "held" clock for its own effect stack and source
+  frame while its position reads the live one. That is why it is the
   cheap, simple cousin of the whole-scene version.
 - **"Don't re-sample this effect" — a per-effect opt-out for the choppy passes.** When
   Posterize time (and, soon, accumulation motion blur) re-renders the scene at a *different*
@@ -225,23 +239,29 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   sampled. Behind the scenes this is just "which clock do I read?" per effect — with the switch
   on, both clocks read the same time, so an ordinary render (no posterise, no accumulation
   blur) is completely unaffected.
-- **Accumulation motion blur — the expensive, correct motion blur.** There are now three kinds
-  of motion blur in Lumit, and this is the heavyweight. The per-layer kind smears one layer
-  along its own movement; the flow kind invents blur for game footage that never had any. This
-  third kind does the honest, brute-force thing: it renders the *whole scene beneath it* several
-  times at instants spread across a single frame — a few moments just before the frame, a few
-  just after — and averages those finished pictures together. Because it re-renders the real
-  scene each time, everything comes out right: moving footage, animated effects, a depth pass,
-  the camera drifting — all correctly placed at each instant, then blended. The averaging is a
-  neat trick with light: each of the N pictures is added in at one-Nth strength, so a part of
-  the scene that didn't move averages back to exactly itself (nothing changes when nothing
+- **"Motion blur" — the expensive, correct motion blur (accumulation).** There are three kinds
+  of motion blur in Lumit, and this is the heavyweight — the one simply called **Motion blur**
+  in the menus. (The others: the per-layer transform *switch*, which smears one layer along its
+  own movement, and **Fast motion blur**, which invents blur for game footage that never had
+  any.) This kind does the honest, brute-force thing: it renders the *whole scene beneath it*
+  several times at instants spread across a single frame — a few moments just before the frame,
+  a few just after — and averages those finished pictures together. Because it re-renders the
+  real scene each time, everything comes out right: moving footage, animated effects, a depth
+  pass, the camera drifting — all correctly placed at each instant, then blended. The averaging
+  is a neat trick with light: each of the N pictures is added in at one-Nth strength, so a part
+  of the scene that didn't move averages back to exactly itself (nothing changes when nothing
   moves — a promise the tests check to the last bit), while anything that *did* move leaves a
   smear proportional to how far it travelled. You drop it on a full-frame adjustment layer to
   blur the whole scene; the Shutter angle sets how much of the frame the "camera" was open
   (180° is the film-standard half-frame), Samples sets how many in-between renders (more is
   smoother and slower — it is genuinely N times the work), and Mix fades the blur back toward
-  the sharp original. It shares the very same re-render machinery as Posterize, so the preview
-  and the exported file are, again, literally the same code.
+  the sharp original. There is also a **Force on all layers** switch: turn it on and every layer
+  also smears along its *own* transform inside each of those in-between renders (the per-layer
+  motion blur, forced on for the whole scene at once, using this effect's shutter — your project
+  is never actually changed, only the temporary render is). It is a convenience — one switch
+  instead of ticking motion blur on every layer — and it smooths the result at lower sample
+  counts. It shares the very same re-render machinery as Posterize, so the preview and the
+  exported file are, again, literally the same code.
 - **Depth of field becomes a real effect — and effects can now read another layer.** Until
   now every effect took numbers, colours, a file. Depth of field needs a *second picture*: a
   "depth map" that says how far away each pixel is. The natural place to get one is **another

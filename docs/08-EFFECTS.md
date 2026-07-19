@@ -188,7 +188,7 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 
 | # | Effect | Replaces | Cost | Temporal window |
 |---|---|---|---|---|
-| 3.2 | Motion blur (flow) | RSMB | heavy | `{-1, 0, +1}` |
+| 3.2 | Fast motion blur (flow) | RSMB | heavy | `{-1, 0, +1}` |
 | 3.3 | Glow | Deep Glow | moderate | `{0}` |
 | 3.4 | Shake | Sapphire S_Shake | cheap | `{0}` |
 | 3.5 | Transform | AE's Transform effect | trivial | `{0}` |
@@ -214,7 +214,7 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.23 | Invert | stock CC pack invert | cheap | `{0}` |
 | 3.24 | Tint | AE Tint / duotone | cheap | `{0}` |
 | 3.25 | Posterize time | AE Posterize Time | cheap | `{0}` |
-| 3.26 | Accumulation motion blur | RSMB / ReelSmart (accumulation) | heavy | `{0}` |
+| 3.26 | Motion blur (accumulation) | RSMB / ReelSmart (accumulation) | heavy | `{0}` |
 
 ### 3.1 Flow engine — optical-flow retime interpolation (Twixtor-class)
 
@@ -273,9 +273,11 @@ retimed clip does not recompute flow. CUDA MAY accelerate this node where presen
 the WGSL path is the portable baseline and the CPU reference is the oracle for the flow
 field itself (vector-field tolerance, then bit-tolerant synthesis).
 
-### 3.2 Motion blur (flow) — synthesised motion blur (RSMB-class)
+### 3.2 Fast motion blur (flow) — synthesised motion blur (RSMB-class)
 
-Game capture has zero natural motion blur; this effect synthesises it from motion vectors.
+Labelled **Fast motion blur** in the UI (a single-pass per-pixel smear, distinct from the
+whole-scene re-rendering **Motion blur** of §3.26). Game capture has zero natural motion blur;
+this effect synthesises it from motion vectors.
 Applied per layer or, most commonly, on an adjustment layer over the whole montage.
 
 **Algorithm sketch.** Obtain per-pixel motion vectors for the current frame: from the flow
@@ -304,15 +306,30 @@ consumer of the §3.1 flow field. Its temporal window is `{0, 1}`: the flow engi
 the per-pixel motion between the current source frame and the next, and the smear runs each
 pixel along that vector. The field is computed **in the decode worker**, where both frames
 already live as decoded RGBA (mirroring how the Flow retiming policy computes flow there),
-and handed to the kernel as a two-channel `rg32float` texture threaded exactly as Echo's
-neighbour frames are (decode → draw → realise/export → the pass). Preview and export compute
-it the same way — the same `to_gray` → `lumit_flow` forward-flow call on the same source
-frames — so they match (K-031); the exact f32 flow texture keeps the CPU/GPU oracle at the
-cheap-class ≤ 2 fp16 ULP bound, the only rounding being the colour taps. The v1 parameter set
+and handed to the kernel as an `rgba32float` texture threaded exactly as Echo's
+neighbour frames are (decode → draw → realise/export → the pass): `.xy` the flow vectors,
+`.z` a per-pixel **confidence** in 0..1. Preview and export compute
+it the same way — the same `to_gray` → `lumit_flow` forward/backward-flow call on the same
+source frames — so they match (K-031); the exact f32 flow texture keeps the CPU/GPU oracle at
+the cheap-class ≤ 2 fp16 ULP bound, the only rounding being the colour taps.
+
+**Confidence, not a hard cut (FX-19).** A patch-based flow field is unreliable at occlusions and
+motion boundaries; gating the blur on/off there leaves hard un-blurred cut regions. Instead each
+pixel's streak length is **scaled smoothly by its confidence** — `lumit_flow::confidence`, a
+0..1 forward–backward-consistency measure (1 where the two flows agree, tapering to 0 where they
+disagree, an invalid patch fully suspect), 3×3 box-blurred so the falloff has no seam. So
+suspect regions fade toward unblurred gradually rather than cutting. Confidence 0 is a bit-exact
+passthrough for that pixel (the streak collapses onto it), so it composes with the zero-motion
+and zero-shutter passthroughs.
+
+The v1 parameter set
 is trimmed to **Shutter angle** (0–720°, default 180 — streak length is shutter ÷ 360 of the
 inter-frame motion, so 180° is half of it, the film-standard look), **Samples** (a fixed
-per-frame tap count, slider 8–32, so the CPU and GPU integrate identically) and the host
-**Mix**. Blur length in pixels = motion vector × (shutter ÷ 360); the streak is a centred
+per-frame tap count, slider 8–32, so the CPU and GPU integrate identically), a **View** enum
+(*Rendered* | *Motion vectors* | *Confidence*, default Rendered — the diagnostic views output
+the flow colour-coded, or the confidence as greyscale, so a user can see what the smear follows
+and where it fades) and the host **Mix**. Blur length in pixels = motion vector × (shutter ÷ 360)
+× confidence; the streak is a centred
 box integral of `Samples` evenly spaced bilinear taps, edges clamped so a full-frame smear
 never darkens the border. Pinned simplifications, each stable when the rest of §3.2 lands:
 **Vector source is Flow only** (Auto's transform-derivative path and the engine-motion-blur
@@ -1060,9 +1077,12 @@ remaps by luma rather than grading in place. The fuller shadows/mids/highlights 
 layers it covers render at. The current comp time snaps down to a coarser grid —
 `held_t = floor((t − phase)·rate)/rate + phase` — and the covered content re-renders at
 `held_t` instead of `t`, so the animation updates only `rate` times a second (the choppy
-stop-motion / on-twos look). It re-resolves **transforms, effects and the camera** at the held
-time; **footage frames are held** at the current frame (sub-frame footage playback is the flow
-Motion blur effect's job, §3.2), so this quantises comp-driven animation. Because it re-renders
+stop-motion / on-twos look). It re-resolves **transforms, effects, the camera AND which source
+frame footage decodes to** at the held time, so a scene that is only footage playing back
+visibly steps to the coarser rate (the decode planner snaps the covered layers' sample time via
+`lumit_core::fx::posterize_sample_times`, the twin of the held re-render — FX-1). Smooth
+sub-frame footage *motion blur* between the held frames is a different effect (the flow Motion
+blur, §3.2); Posterize only *quantises* the playback grid. Because it re-renders
 rather than filters, it lives at the frame-orchestration layer — detected where
 `build_comp_draws` + realise (preview) and `render_comp_linear` (export) run, never in
 `run_ops` — and so resolves to **no** per-pixel op. See
@@ -1072,14 +1092,15 @@ rather than filters, it lives at the frame-orchestration layer — detected wher
 the effect's adjustment layer re-renders at `held_t` and is laid back over the live composite
 by the adjustment's coverage (its mask × opacity), so the owner's global "posterise the whole
 scene" pass is simply the effect on a full-frame adjustment layer. *This layer's effects* holds
-only the layer's own **effect stack** at `held_t` (a per-layer time substitution — no
-re-render of others, no orchestration re-entry): the effects step on the coarse grid while the
-layer's **transform and source stay live**, so the layer moves smoothly but its effect
-animation is choppy — the AE per-layer form. The held effect time is
-`lumit_core::fx::this_layer_effect_time` (the grid computed on comp time, mapped into the
-layer's own base), fed to `resolve_stack_temporal` as the sample time so a
-`sample_temporally == false` effect still resolves at the live playhead. Both scopes ship in
-v1.
+only the layer's own **effect stack and its source sampling** at `held_t` (a per-layer time
+substitution — no re-render of others, no orchestration re-entry): the effects and the footage
+decode step on the coarse grid while the layer's **transform stays live**, so the layer moves
+smoothly but its own effect animation and footage playback are choppy — the AE per-layer form.
+The held effect time is `lumit_core::fx::this_layer_effect_time` (the grid computed on comp
+time, mapped into the layer's own base), fed to `resolve_stack_temporal` as the sample time so a
+`sample_temporally == false` effect still resolves at the live playhead; the held source frame
+comes from the same `posterize_sample_times` snap the *Everything below* layers use. Both scopes
+ship in v1.
 
 **Determinism & cache.** `held_t` is a pure function of `t`, `rate` and `phase`, so many
 frames share it and re-render identically; the frame key folds the effect's parameters, and
@@ -1091,15 +1112,26 @@ one cache entry) is a tracked optimisation on top — correctness never depends 
 shared `Realiser`. A still-scene re-render at the same time is bit-identical to no re-render,
 and a full-coverage posterised frame is bit-identical to a plain render at the held time (both
 pinned by test). **Boundaries (v1):** temporal effects *inside* the held below-stack (echo,
-flow Motion blur, Datamosh) degrade to stills — the held re-render reuses the frame-time decode
-and carries no neighbour frames (the same boundary the after-effects matte takes, K-125); and a
-Posterize adjustment *inside a collapsed* Precomp degrades to a no-op (its held draws are sized
-for the nested comp). `cheap` cost, `FullFrame` ROI, `{0}` temporal, Category **Temporal**.
+flow Motion blur, Datamosh) degrade to stills — the held re-render carries no *neighbour* frames
+(only the primary source frame is snapped to the grid), the same boundary the after-effects
+matte takes (K-125); footage is held everywhere below the adjustment (so a *masked* Posterize
+reveals held footage outside the mask too, comp animation stepping only inside it — the
+full-frame adjustment being the intended global pass); a Posterize adjustment *inside a
+collapsed* Precomp degrades to a no-op (its held draws are sized for the nested comp); and the
+footage *inside a collapsed Precomp that sits beneath* a Posterize is not guaranteed to step —
+the collapse splice keeps its inner decode live (the same reason collapsed-Precomp temporal
+effects are a follow-up), so that narrow case is a documented parity boundary rather than a
+promise. `cheap` cost, `FullFrame` ROI, `{0}` temporal, Category **Temporal**.
 
-### 3.26 Accumulation motion blur — the expensive, correct motion blur
+### 3.26 Motion blur — the expensive, correct motion blur (accumulation)
+
+Labelled **Motion blur** in the UI: the accumulation kind is the correct, whole-scene one, so it
+takes the plain name; the optical-flow effect (§3.2) is *Fast motion blur*. Do not confuse
+either with the per-layer transform motion-blur *switch* (docs/06 §4, K-120), which is a layer
+switch, not an effect.
 
 **Parameters:** Samples N (default 8), Shutter angle (degrees, default 180), Shutter phase
-(degrees, default −90), Mix (per cent, default 100).
+(degrees, default −90), Force on all layers (bool, default off), Mix (per cent, default 100).
 
 **Algorithm sketch.** A **temporal** effect, not a per-pixel one, and the sibling of Posterize
 time (§3.25): it renders the **whole scene below it** several times at in-between moments and
@@ -1122,6 +1154,17 @@ run, never in `run_ops` — and so resolves to **no** per-pixel op. See
 composite beneath the effect's layer is what re-renders, laid back over the live composite by
 the adjustment's coverage (mask × opacity). The owner's global "motion-blur the whole scene"
 pass is simply the effect on a full-frame adjustment layer.
+
+**Force on all layers.** With this on, every layer in each sub-frame sample render also smears
+along **its own transform** — per-layer motion blur (K-120) forced on for the whole below-stack,
+the effect's own Shutter angle/phase/Samples standing in for the comp master and each layer's
+own switch. So one effect blurs every moving layer without toggling each one, and because each
+of the N accumulation samples is itself transform-smeared the result stays smooth at lower
+sample counts. Implemented **without mutating the comp**: the forced shutter and per-layer
+switches ride on the sample render's cloned comp only (`AccumulationMbParams::forced_layer_mb` →
+`below_draws_at`), so the document and the live-below composite are untouched. Off by default.
+Boundary: the force reaches the top-level below layers; the inner layers of a *nested* Precomp
+keep their own switches (a v1 follow-up).
 
 **Preview == export (K-031).** Both paths re-render each sub-frame below-stack through the
 **one** shared `render_below_at` and average with the identical `Compositor::accumulate`, so a

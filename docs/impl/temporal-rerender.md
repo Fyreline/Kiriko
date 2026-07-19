@@ -67,12 +67,25 @@ adjustment in v1).
 - **Everything below**: `render_below_at(…, τ)` — the adjustment path.
 - **This layer's effects**: no re-render of others; the layer the effect sits on evaluates its
   own effect stack at `τ` instead of `t` (a per-layer time substitution feeding its own stack),
-  its transform and source staying live. Simpler; no orchestration re-entry. **Landed (K-133):**
+  its transform staying live. Simpler; no orchestration re-entry. **Landed (K-133):**
   `this_layer_effect_time(effects, fx_on, lt, start_offset)` returns the held layer time (the
   grid computed on comp time `lt + start_offset`, mapped back) for a *This layer* Posterize and
   `lt` unchanged otherwise; both `build_comp_draws_at` (preview) and export's `apply_fx` feed it
   to `resolve_stack_temporal` as the sample time (so `sample_temporally == false` still holds at
   the live `lt`), so the two are identical (K-031).
+- **Footage decode snap (FX-1).** The held re-render alone quantises *comp-driven* animation
+  (transforms/effects/camera); a scene that is only footage playing back would not visibly step,
+  because the decode planner still chose the frame-time source frame. `posterize_sample_times(
+  layers, t) -> Vec<f64>` closes that: it walks the stack top-to-bottom composing each live
+  Posterize's grid onto a running sample time (an *Everything below* adjustment holds every layer
+  beneath it; a *This layer* Posterize holds only its own layer's source sampling), and both the
+  preview decode planner (`collect_comp_jobs`) and export (`prepare` on the main pass,
+  `collect_below_pixels` for the held re-render) read it to snap *which source frame each covered
+  layer decodes* to `τ`. So the held re-render's footage frames now match the held grid, footage
+  playback steps, and preview equals export (K-031). Only the primary source frame is snapped —
+  temporal effects' neighbour frames still degrade to stills — and footage is held everywhere
+  below the adjustment (a masked reveal shows held footage outside the mask too, a documented
+  boundary; the full-frame adjustment is the intended global pass).
 
 ## 5. Per-effect "don't sample" flag (owner request)
 `EffectInstance` gains `#[serde(default = "default_true")] sample_temporally: bool`. During a

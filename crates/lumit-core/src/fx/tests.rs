@@ -103,6 +103,90 @@ fn this_layer_effect_time_holds_only_the_this_layer_scope() {
     );
 }
 
+// posterize_sample_times (docs/08 §3.25): the decode planner's per-layer held
+// comp time — the piece that makes Posterize Time step *footage playback*, not
+// only comp-driven animation. An Everything-below adjustment holds every layer
+// beneath it; a This-layer Posterize holds only its own layer; a plain stack is
+// left at the live playhead. This is the FX-1 regression: the sampled time must
+// snap to the rate.
+#[test]
+fn posterize_sample_times_snap_covered_layers_to_the_grid() {
+    use crate::model::{LayerKind, Switches, TransformGroup};
+    use crate::time::{CompTime, Rational};
+    let secs = |n: i64, d: i64| CompTime(Rational::new(n, d).unwrap());
+    let layer = |kind: LayerKind, effects: Vec<EffectInstance>| Layer {
+        id: uuid::Uuid::now_v7(),
+        name: "l".into(),
+        kind,
+        in_point: secs(0, 1),
+        out_point: secs(10, 1),
+        start_offset: secs(0, 1),
+        transform: TransformGroup::default(),
+        matte: None,
+        parent: None,
+        blend: Default::default(),
+        masks: Vec::new(),
+        effects,
+        switches: Switches::default(),
+        extra: serde_json::Map::new(),
+    };
+    let footage = |effects| {
+        layer(
+            LayerKind::Solid {
+                def: uuid::Uuid::now_v7(),
+            },
+            effects,
+        )
+    };
+
+    // Everything-below Posterize at 10 fps on an adjustment (index 0, the top),
+    // two plain layers beneath. At t = 0.37 the layers below snap to the 0.3
+    // grid; the adjustment carrying the effect is not held by its own effect.
+    let mut post = instantiate("posterize_time").unwrap();
+    for p in &mut post.params {
+        if p.id == "rate" {
+            p.value = EffectValue::Float(Property::fixed(10.0));
+        }
+    }
+    let layers = vec![
+        layer(LayerKind::Adjustment, vec![post.clone()]),
+        footage(vec![]),
+        footage(vec![]),
+    ];
+    let st = posterize_sample_times(&layers, 0.37);
+    assert!((st[0] - 0.37).abs() < 1e-9, "the adjustment itself is live");
+    assert!(
+        (st[1] - 0.3).abs() < 1e-9,
+        "a layer below snaps to the 10 fps grid"
+    );
+    assert!((st[2] - 0.3).abs() < 1e-9);
+
+    // A This-layer Posterize holds only its own layer's sampling; the layer
+    // below it stays live.
+    let mut this = instantiate("posterize_time").unwrap();
+    for p in &mut this.params {
+        match p.id.as_str() {
+            "rate" => p.value = EffectValue::Float(Property::fixed(10.0)),
+            "scope" => p.value = EffectValue::Choice(1),
+            _ => {}
+        }
+    }
+    let layers = vec![footage(vec![this]), footage(vec![])];
+    let st = posterize_sample_times(&layers, 0.37);
+    assert!(
+        (st[0] - 0.3).abs() < 1e-9,
+        "the This-layer layer snaps its own sampling"
+    );
+    assert!(
+        (st[1] - 0.37).abs() < 1e-9,
+        "a layer below a This-layer Posterize is untouched"
+    );
+
+    // No live Posterize → every layer stays at the live playhead.
+    let st = posterize_sample_times(&[footage(vec![]), footage(vec![])], 0.37);
+    assert!(st.iter().all(|&s| (s - 0.37).abs() < 1e-9));
+}
+
 // stack_accumulation_mb (docs/08 §3.26) finds the effect, resolves its shutter
 // and Mix, and derives the centred sub-frame offsets; a bypassed or plain stack
 // reports nothing, and it resolves to no per-pixel op (executed at the
@@ -118,6 +202,23 @@ fn stack_accumulation_mb_detects_resolves_and_offsets() {
     // Eight centred sub-frame offsets across the open shutter (the shared
     // per-layer motion-blur shutter maths).
     assert_eq!(p.sample_offsets().len(), 8);
+    // Force on all layers defaults off, so the sample renders force no per-layer
+    // motion blur (FX-18).
+    assert!(!p.force_all);
+    assert!(p.forced_layer_mb().is_none());
+    // With it on, the forced shutter carries this effect's own angle/phase/
+    // samples and is enabled, so every layer smears in each sample render.
+    let forced = AccumulationMbParams {
+        force_all: true,
+        ..p
+    };
+    let mb = forced
+        .forced_layer_mb()
+        .expect("force_all yields a shutter");
+    assert!(mb.enabled);
+    assert_eq!(mb.shutter_angle, p.shutter_angle);
+    assert_eq!(mb.shutter_phase, p.shutter_phase);
+    assert_eq!(mb.samples, p.samples);
     // A degenerate single sample is no blur — empty offsets, so the caller falls
     // back to the plain frame-time composite.
     let one = AccumulationMbParams { samples: 1, ..p };
@@ -561,13 +662,14 @@ fn cpu_apply_datamosh_is_a_passthrough() {
 fn resolve_motion_blur_converts_shutter_and_rounds_samples() {
     let e = instantiate("motion_blur").unwrap();
     let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
-    // Defaults: 180° → shutter_frac 0.5, 16 samples, full mix.
+    // Defaults: 180° → shutter_frac 0.5, 16 samples, full mix, Rendered view.
     assert_eq!(
         r,
         vec![Resolved::MotionBlur {
             shutter_frac: 0.5,
             samples: 16,
             mix: 1.0,
+            view: MbView::Rendered,
         }]
     );
     // A custom stack: 90° halves the streak; Samples rounds and clamps.
@@ -587,8 +689,24 @@ fn resolve_motion_blur_converts_shutter_and_rounds_samples() {
             shutter_frac: 0.25,
             samples: 8,
             mix: 0.5,
+            view: MbView::Rendered,
         }]
     );
+    // The View row resolves the diagnostic choices (FX-19).
+    let mut e = instantiate("motion_blur").unwrap();
+    for p in e.params.iter_mut() {
+        if p.id == "view" {
+            p.value = EffectValue::Choice(2);
+        }
+    }
+    let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
+    assert!(matches!(
+        r.as_slice(),
+        [Resolved::MotionBlur {
+            view: MbView::Confidence,
+            ..
+        }]
+    ));
 }
 
 #[test]
@@ -600,23 +718,76 @@ fn cpu_motion_blur_still_and_zero_shutter_are_passthrough() {
     img[mid..mid + 4].copy_from_slice(&[4.0, 2.0, 1.0, 1.0]);
     let n = (w * h) as usize;
 
+    let full = vec![1.0f32; n]; // full confidence: streak unscaled
+
     // Zero flow everywhere: every tap lands on the pixel itself, so with
     // Mix 1 the output is the bit-exact input whatever the shutter.
     let (zu, zv) = (vec![0.0f32; n], vec![0.0f32; n]);
     let mut still = img.clone();
-    cpu::motion_blur(&mut still, w, h, &zu, &zv, 0.5, 16, 1.0);
+    cpu::motion_blur(
+        &mut still,
+        w,
+        h,
+        &zu,
+        &zv,
+        &full,
+        0.5,
+        16,
+        1.0,
+        MbView::Rendered,
+    );
     assert_eq!(still, img, "still pixels do not blur");
 
     // A real motion but a closed shutter (frac 0) is also identity.
     let (mu, mv) = (vec![3.0f32; n], vec![0.0f32; n]);
     let mut shut = img.clone();
-    cpu::motion_blur(&mut shut, w, h, &mu, &mv, 0.0, 16, 1.0);
+    cpu::motion_blur(
+        &mut shut,
+        w,
+        h,
+        &mu,
+        &mv,
+        &full,
+        0.0,
+        16,
+        1.0,
+        MbView::Rendered,
+    );
     assert_eq!(shut, img, "a closed shutter does not blur");
 
     // Mix 0 returns the input exactly, whatever the motion.
     let mut mixed = img.clone();
-    cpu::motion_blur(&mut mixed, w, h, &mu, &mv, 0.5, 16, 0.0);
+    cpu::motion_blur(
+        &mut mixed,
+        w,
+        h,
+        &mu,
+        &mv,
+        &full,
+        0.5,
+        16,
+        0.0,
+        MbView::Rendered,
+    );
     assert_eq!(mixed, img, "mix 0 is a passthrough");
+
+    // Zero confidence collapses the streak to nothing (FX-19), so even a real
+    // motion and open shutter leave the input bit-exact.
+    let zero = vec![0.0f32; n];
+    let mut suspect = img.clone();
+    cpu::motion_blur(
+        &mut suspect,
+        w,
+        h,
+        &mu,
+        &mv,
+        &zero,
+        0.5,
+        16,
+        1.0,
+        MbView::Rendered,
+    );
+    assert_eq!(suspect, img, "zero confidence does not blur");
 }
 
 #[test]
@@ -636,8 +807,20 @@ fn cpu_motion_blur_smears_along_the_flow() {
     }
     let n = (w * h) as usize;
     let (u, vv) = (vec![8.0f32; n], vec![0.0f32; n]); // 8px horizontal
+    let full = vec![1.0f32; n];
     let mut out = img.clone();
-    cpu::motion_blur(&mut out, w, h, &u, &vv, 0.5, 16, 1.0); // streak 4px
+    cpu::motion_blur(
+        &mut out,
+        w,
+        h,
+        &u,
+        &vv,
+        &full,
+        0.5,
+        16,
+        1.0,
+        MbView::Rendered,
+    ); // streak 4px
 
     // Indices on row 0 (a closure keeps clippy's erasing-op lint happy and
     // reads clearly as column, row).
@@ -656,6 +839,55 @@ fn cpu_motion_blur_smears_along_the_flow() {
         "the edge softens along the flow: {}",
         out[edge]
     );
+}
+
+// The View diagnostics (FX-19): Motion vectors colour-code the raw flow (mid-
+// grey where still, redder for +x, greener for +y) and Confidence shows the 0..1
+// field as opaque greyscale — both ignore the source and Mix.
+#[test]
+fn cpu_motion_blur_view_diagnostics() {
+    let (w, h) = (2u32, 1u32);
+    let n = (w * h) as usize;
+    // Pixel 0 still; pixel 1 moving +16 px in x.
+    let u = vec![0.0f32, 16.0];
+    let v = vec![0.0f32, 0.0];
+    let conf = vec![1.0f32, 0.25];
+    let src = vec![0.7f32; n * 4]; // arbitrary source — diagnostics ignore it
+
+    // Motion vectors: still pixel is mid-grey (0.5, 0.5, 0.5, 1); the +16 px
+    // pixel saturates red at 0.5 + 16/32 = 1.0.
+    let mut mv = src.clone();
+    cpu::motion_blur(
+        &mut mv,
+        w,
+        h,
+        &u,
+        &v,
+        &conf,
+        0.5,
+        16,
+        1.0,
+        MbView::MotionVectors,
+    );
+    assert_eq!(&mv[0..4], &[0.5, 0.5, 0.5, 1.0]);
+    assert_eq!(&mv[4..8], &[1.0, 0.5, 0.5, 1.0]);
+
+    // Confidence: opaque greyscale of the 0..1 field.
+    let mut cf = src.clone();
+    cpu::motion_blur(
+        &mut cf,
+        w,
+        h,
+        &u,
+        &v,
+        &conf,
+        0.5,
+        16,
+        1.0,
+        MbView::Confidence,
+    );
+    assert_eq!(&cf[0..4], &[1.0, 1.0, 1.0, 1.0]);
+    assert_eq!(&cf[4..8], &[0.25, 0.25, 0.25, 1.0]);
 }
 
 #[test]

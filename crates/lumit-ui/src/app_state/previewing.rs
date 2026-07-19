@@ -422,11 +422,18 @@ impl AppState {
                 }
             }
         }
-        for layer in &comp.layers {
+        // Posterize Time (docs/08 §3.25, FX-1): a layer covered by a live
+        // Posterize decodes its source at the held grid time, not the live
+        // playhead, so footage playback visibly steps — the decode twin of the
+        // held re-render the draw builder performs. `sample_times[idx]` is the
+        // held comp time for `comp.layers[idx]`; equal to `t` for every layer
+        // when no Posterize is live, so an ordinary comp is unchanged.
+        let sample_times = lumit_core::fx::posterize_sample_times(&comp.layers, t);
+        for (idx, layer) in comp.layers.iter().enumerate() {
             if !wanted.contains(&layer.id) || !in_span(layer) {
                 continue;
             }
-            let lt = t - layer.start_offset.0.to_f64();
+            let lt = sample_times[idx] - layer.start_offset.0.to_f64();
             match &layer.kind {
                 // No footage source to decode (an adjustment layer processes
                 // the composite below; solids/text/cameras rasterise elsewhere).

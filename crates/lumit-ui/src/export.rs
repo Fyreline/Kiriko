@@ -414,12 +414,18 @@ impl Renderer<'_> {
         visited: &mut Vec<Uuid>,
         out: &mut HashMap<Uuid, crate::app_state::preview::CompLayerPixels>,
     ) -> Result<(), String> {
-        for l in below {
+        // Posterize Time (docs/08 §3.25, FX-1): a layer covered by a Posterize
+        // within `below` decodes its source at the held grid time, so the held
+        // re-render steps footage — the same snap the preview's decode planner
+        // and the main export path apply (K-031). Equal to `t` for every layer
+        // when no Posterize is live inside `below`.
+        let sample_times = lumit_core::fx::posterize_sample_times(below, t);
+        for (i, l) in below.iter().enumerate() {
             let in_span = t >= l.in_point.0.to_f64() && t < l.out_point.0.to_f64();
             if !l.switches.visible || !in_span {
                 continue;
             }
-            let lt = t - l.start_offset.0.to_f64();
+            let lt = sample_times[i] - l.start_offset.0.to_f64();
             match &l.kind {
                 LayerKind::Footage { item, retime } => {
                     use lumit_core::retime::Interpolation;
@@ -790,8 +796,9 @@ impl Renderer<'_> {
     /// current frame and the requested neighbour are picked exactly as
     /// [`Self::footage_neighbours`] picks its frames (same retime mapping,
     /// same comp step, unmasked), and flow runs on the shared [`Self::flow`]
-    /// engine; the field uploads as an `rg32float` texture the same size as
-    /// the source, matching the prepared texture at full-resolution export.
+    /// engine; the field uploads as an `rgba32float` texture the same size as
+    /// the source (`.xy` motion, `.z` confidence, FX-19), matching the prepared
+    /// texture at full-resolution export.
     fn footage_flow_field(
         &mut self,
         layer: &lumit_core::model::Layer,
@@ -834,9 +841,13 @@ impl Renderer<'_> {
         }
         let ga = lumit_flow::to_gray(&cur.rgba, w, h);
         let gb = lumit_flow::to_gray(&next.rgba, w, h);
-        let (fwd, _bwd) = self.flow.flow_pair(&ga, &gb);
+        let (fwd, bwd) = self.flow.flow_pair(&ga, &gb);
+        // The per-pixel confidence Fast motion blur tapers the streak by (FX-19)
+        // — the same deterministic function the preview runs, so the two match
+        // (K-031); it rides in the flow texture's .z channel.
+        let conf = lumit_flow::confidence(&fwd, &bwd);
         Ok(Some(lumit_gpu::fx::upload_flow_field(
-            self.gpu, &fwd.u, &fwd.v, cur.width, cur.height,
+            self.gpu, &fwd.u, &fwd.v, &conf, cur.width, cur.height,
         )))
     }
 
@@ -1113,7 +1124,13 @@ impl Renderer<'_> {
         // Solo / isolate (K-105): while any layer is soloed, only soloed layers
         // render — the same rule the preview applies, so the two stay identical.
         let any_solo = lumit_core::model::any_solo(comp);
-        for l in &comp.layers {
+        // Posterize Time (docs/08 §3.25, FX-1): a layer covered by a live
+        // Posterize decodes its source at the held grid time so footage playback
+        // steps, matching the preview's decode planner (K-031). The transform and
+        // effects still read the live `lt` below; only the source `prepare` is
+        // snapped. Equal to `t` for every layer when no Posterize is live.
+        let sample_times = lumit_core::fx::posterize_sample_times(&comp.layers, t);
+        for (idx, l) in comp.layers.iter().enumerate() {
             let needed = (!any_solo || l.switches.solo)
                 && (l.switches.visible
                     || comp.layers.iter().any(|c| {
@@ -1168,7 +1185,7 @@ impl Renderer<'_> {
                     continue;
                 }
             }
-            if let Some(p) = self.prepare(l, t, visited)? {
+            if let Some(p) = self.prepare(l, sample_times[idx], visited)? {
                 let diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
                 let markers = lumit_core::fx::MarkerContext::for_layer(comp, l);
                 let neighbours = self.footage_neighbours(l, lt, comp)?;
@@ -1402,16 +1419,26 @@ impl Renderer<'_> {
                         below.clone()
                     } else {
                         let dt = 1.0 / comp.frame_rate.fps().max(1.0);
+                        // The base time this adjustment sits at once Posterize
+                        // holds above it apply (FX-1); `t` for a top-level
+                        // adjustment, so footage stays held at the frame time and
+                        // only comp animation is sampled across the shutter.
+                        let base = sample_times[idx];
                         let below_layers = &comp.layers[idx + 1..];
                         let mut pixels_map = HashMap::new();
-                        self.collect_below_pixels(below_layers, t, visited, &mut pixels_map)?;
+                        self.collect_below_pixels(below_layers, base, visited, &mut pixels_map)?;
                         let pixels_ref: HashMap<Uuid, &crate::app_state::preview::CompLayerPixels> =
                             pixels_map.iter().map(|(k, v)| (*k, v)).collect();
                         let realiser = self.realiser();
+                        // Force on all layers (docs/08 §3.26): each sample render
+                        // also smears every layer along its own transform, via the
+                        // same forced shutter the preview's accumulate path uses
+                        // (K-031). None otherwise.
+                        let force_mb = ab.forced_layer_mb();
                         let frames: Vec<Tex> = offsets
                             .iter()
                             .map(|off| {
-                                let tau = t + off * dt;
+                                let tau = base + off * dt;
                                 crate::shell::render_below_at(
                                     &realiser,
                                     self.doc,
@@ -1419,6 +1446,7 @@ impl Renderer<'_> {
                                     below_layers,
                                     tau,
                                     t,
+                                    force_mb,
                                     &pixels_ref,
                                     visited,
                                 )
@@ -1446,10 +1474,14 @@ impl Renderer<'_> {
                         }
                     }
                 } else if let Some(p) = posterize {
-                    let tau = lumit_core::fx::posterize_held_time(t, p.rate, p.phase);
+                    let tau =
+                        lumit_core::fx::posterize_held_time(sample_times[idx], p.rate, p.phase);
                     let below_layers = &comp.layers[idx + 1..];
                     let mut pixels_map = HashMap::new();
-                    self.collect_below_pixels(below_layers, t, visited, &mut pixels_map)?;
+                    // Decode the below-stack at the held time (FX-1) so footage
+                    // playback steps in the re-render, matching the preview's
+                    // snapped decode (K-031).
+                    self.collect_below_pixels(below_layers, tau, visited, &mut pixels_map)?;
                     let pixels_ref: HashMap<Uuid, &crate::app_state::preview::CompLayerPixels> =
                         pixels_map.iter().map(|(k, v)| (*k, v)).collect();
                     let realiser = self.realiser();
@@ -1463,6 +1495,8 @@ impl Renderer<'_> {
                         // sample_temporally == false holds here, not at `tau`
                         // (docs/impl/temporal-rerender.md §5, K-031).
                         t,
+                        // Posterize never forces per-layer motion blur.
+                        None,
                         &pixels_ref,
                         visited,
                     )
