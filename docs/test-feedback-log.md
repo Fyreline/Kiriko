@@ -165,7 +165,7 @@ Owner directive: work these in the MAIN session, one at a time, for correctness 
 parallel pass left several not-quite-right). No migration burden (pre-release).
 
 ## Testing notes (T)
-- [ ] T1 Linked value boxes still clip at the BOTTOM (vertical).
+- [x] T1 Linked value boxes clipping — pair rows keep default vertical button padding, ROW_H 20→22 for headroom.
 - [ ] T2 Effect prop-name click still doesn't highlight the layer in the layer area.
 - [ ] T3 Can't shift/ctrl-click to multi-select property rows in the LAYER area (regressed/missing).
 - [ ] T4 Copying a keyframe doesn't work in GRAPH view (works in lane); paste works in both.

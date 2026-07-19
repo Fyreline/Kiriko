@@ -129,8 +129,9 @@ pub(crate) fn section_bar(ui: &egui::Ui, ctx: &RowCtx, row_rect: egui::Rect, hig
 /// layer rows above (an even vertical rhythm) and, crucially, gives each row's
 /// value DragValue box (egui's ~18 px `interact_size.y`) a pixel of breathing
 /// room top and bottom — at the old 18 px the box filled the row exactly and its
-/// frame was shaved by the clip (note 2.8.3, the "slightly clipped" defect).
-pub(crate) const ROW_H: f32 = 20.0;
+/// frame was shaved by the clip (note 2.8.3, the "slightly clipped" defect). 22
+/// gives the linked/combined pair value boxes headroom too (T1).
+pub(crate) const ROW_H: f32 = 22.0;
 
 /// Allocate one property timeline row (`ROW_H` tall) and return (row_rect,
 /// left-column child ui). The child is clipped so widgets never spill into the

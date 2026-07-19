@@ -16,7 +16,9 @@ pub(crate) const PAIR_VALUE_W: f32 = 48.0;
 /// inter-widget gap and slim button padding, applied once per row.
 pub(crate) fn pair_row_tighten(c: &mut egui::Ui) {
     c.spacing_mut().item_spacing.x = 3.0;
-    c.spacing_mut().button_padding = egui::vec2(2.0, 1.0);
+    // Tighten only the HORIZONTAL button padding — dropping the vertical padding
+    // shrank the value boxes so the number text clipped at their bottom (T1).
+    c.spacing_mut().button_padding.x = 2.0;
 }
 
 /// Record this property row in the frame's draw order and, when it is clicked,
