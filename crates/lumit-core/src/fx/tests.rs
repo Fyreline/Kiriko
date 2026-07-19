@@ -1080,6 +1080,10 @@ fn rgb_split_instantiates_and_resolves() {
     assert_eq!(e.float_at("amount", 0.0), Some(0.4));
     assert_eq!(e.float_at("angle", 0.0), Some(0.0));
     assert!(matches!(e.param("radial"), Some(EffectValue::Bool(false))));
+    // The per-channel scale defaults reproduce the classic split (FX-9).
+    assert_eq!(e.float_at("red_amount", 0.0), Some(100.0));
+    assert_eq!(e.float_at("green_amount", 0.0), Some(0.0));
+    assert_eq!(e.float_at("blue_amount", 0.0), Some(100.0));
     // 0.4% of a 1000px diagonal = 4px.
     let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
     assert_eq!(
@@ -1088,6 +1092,61 @@ fn rgb_split_instantiates_and_resolves() {
             amount_px: 4.0,
             angle_deg: 0.0,
             radial: false,
+            scale: [1.0, 0.0, 1.0],
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn rgb_split_per_channel_amounts_scale_each_channel() {
+    // Per-channel amounts (FX-9): each per-cent scale resolves to a factor,
+    // and a legacy instance (no per-channel params) falls back to 1 / 0 / 1.
+    let mut e = instantiate("rgb_split").unwrap();
+    for p in &mut e.params {
+        match p.id.as_str() {
+            "red_amount" => p.value = EffectValue::Float(Property::fixed(150.0)),
+            "green_amount" => p.value = EffectValue::Float(Property::fixed(-50.0)),
+            "blue_amount" => p.value = EffectValue::Float(Property::fixed(0.0)),
+            _ => {}
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::RgbSplit {
+            amount_px: 4.0,
+            angle_deg: 0.0,
+            radial: false,
+            scale: [1.5, -0.5, 0.0],
+            mix: 1.0
+        }]
+    );
+
+    // A legacy instance missing the per-channel params still resolves to the
+    // classic 1 / 0 / 1 defaults.
+    e.params
+        .retain(|p| !matches!(p.id.as_str(), "red_amount" | "green_amount" | "blue_amount"));
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::RgbSplit {
+            amount_px: 4.0,
+            angle_deg: 0.0,
+            radial: false,
+            scale: [1.0, 0.0, 1.0],
             mix: 1.0
         }]
     );
@@ -1105,18 +1164,21 @@ fn cpu_rgb_split_shifts_channels_and_keeps_alpha() {
     let mid = at(8, 4);
     img[mid..mid + 3].copy_from_slice(&[1.0, 1.0, 1.0]);
 
+    // The classic split's per-channel scales (FX-9): R and B full, G anchored.
+    let classic = [1.0f32, 0.0, 1.0];
+
     // Amount 0 and mix 0 are both the exact identity.
     let mut a0 = img.clone();
-    cpu::rgb_split(&mut a0, w, h, 0.0, 0.0, false, 1.0);
+    cpu::rgb_split(&mut a0, w, h, 0.0, 0.0, false, classic, 1.0);
     assert_eq!(a0, img);
     let mut m0 = img.clone();
-    cpu::rgb_split(&mut m0, w, h, 3.0, 45.0, false, 0.0);
+    cpu::rgb_split(&mut m0, w, h, 3.0, 45.0, false, classic, 0.0);
     assert_eq!(m0, img);
 
     // Angle 0°, 2px: red lands 2px right of the impulse, blue 2px left,
     // green and alpha exactly where they were.
     let mut s = img.clone();
-    cpu::rgb_split(&mut s, w, h, 2.0, 0.0, false, 1.0);
+    cpu::rgb_split(&mut s, w, h, 2.0, 0.0, false, classic, 1.0);
     assert_eq!(s[at(10, 4)], 1.0, "red shifted +x");
     assert_eq!(s[at(8, 4)], 0.0, "red left the impulse");
     assert_eq!(s[at(6, 4) + 2], 1.0, "blue shifted -x");
@@ -1126,11 +1188,24 @@ fn cpu_rgb_split_shifts_channels_and_keeps_alpha() {
         "alpha follows green: untouched"
     );
 
+    // Per-channel scales (FX-9): halving red's scale halves its displacement,
+    // so red now lands 1px (not 2px) right of the impulse; zeroing blue's
+    // scale keeps blue on the impulse.
+    let mut pc = img.clone();
+    cpu::rgb_split(&mut pc, w, h, 2.0, 0.0, false, [0.5, 0.0, 0.0], 1.0);
+    assert_eq!(pc[at(9, 4)], 1.0, "red at half scale shifts +1x");
+    assert_eq!(pc[at(10, 4)], 0.0, "red no longer reaches +2x");
+    assert_eq!(
+        pc[at(8, 4) + 2],
+        1.0,
+        "blue at scale 0 stays on the impulse"
+    );
+
     // Radial: the exact centre pixel is unmoved even at a huge amount.
     let mut c = img.clone();
     // Centre the impulse for the radial test (odd dimensions: the middle
     // pixel's centre is the frame centre).
-    cpu::rgb_split(&mut c, w, h, 20.0, 0.0, true, 1.0);
+    cpu::rgb_split(&mut c, w, h, 20.0, 0.0, true, classic, 1.0);
     assert_eq!(c[mid], 1.0, "frame-centre red is unmoved");
     assert_eq!(c[mid + 2], 1.0, "frame-centre blue is unmoved");
 }
@@ -1148,6 +1223,7 @@ fn rgb_split_wavelength_bool_selects_the_variant() {
         amount_px: 4.0,
         angle_deg: 0.0,
         radial: false,
+        scale: [1.0, 0.0, 1.0],
         mix: 1.0,
     };
     let r = resolve_stack(
@@ -1159,7 +1235,8 @@ fn rgb_split_wavelength_bool_selects_the_variant() {
     );
     assert_eq!(r, vec![classic]);
 
-    // Wavelength on: the same numbers arrive as SpectralSplit.
+    // Wavelength on: the same numbers arrive as SpectralSplit, carrying the
+    // default Samples (16).
     for p in &mut e.params {
         if p.id == "wavelength" {
             p.value = EffectValue::Bool(true);
@@ -1178,6 +1255,7 @@ fn rgb_split_wavelength_bool_selects_the_variant() {
             amount_px: 4.0,
             angle_deg: 0.0,
             radial: false,
+            samples: 16,
             mix: 1.0
         }]
     );
@@ -1195,10 +1273,31 @@ fn rgb_split_wavelength_bool_selects_the_variant() {
     assert_eq!(r, vec![classic]);
 }
 
+/// The default channel tints — red / green / blue — that reproduce the
+/// classic R-outward / B-inward / G-anchor split (P2/K-143).
+const RGB_TINTS: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
 #[test]
 fn chromatic_aberration_instantiates_and_resolves() {
     let e = instantiate("chromatic_aberration").unwrap();
     assert_eq!(e.float_at("amount", 0.0), Some(4.0));
+    // The three channel colours default to red / green / blue (P2/K-143).
+    assert_eq!(
+        e.colour_at("channel_colour_1", 0.0),
+        Some([1.0, 0.0, 0.0, 1.0])
+    );
+    assert_eq!(
+        e.colour_at("channel_colour_2", 0.0),
+        Some([0.0, 1.0, 0.0, 1.0])
+    );
+    assert_eq!(
+        e.colour_at("channel_colour_3", 0.0),
+        Some([0.0, 0.0, 1.0, 1.0])
+    );
+    assert!(matches!(
+        e.param("wavelength"),
+        Some(EffectValue::Bool(false))
+    ));
     // px@comp, not % diag: diag_px does not enter the conversion, unlike
     // rgb_split's own Amount — only the preview-resolution px_scale does.
     let r = resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE);
@@ -1206,6 +1305,7 @@ fn chromatic_aberration_instantiates_and_resolves() {
         r,
         vec![Resolved::ChromaticAberration {
             amount_px: 4.0,
+            tints: RGB_TINTS,
             mix: 1.0
         }]
     );
@@ -1221,6 +1321,88 @@ fn chromatic_aberration_amount_scales_with_the_preview_factor() {
         r,
         vec![Resolved::ChromaticAberration {
             amount_px: 2.0,
+            tints: RGB_TINTS,
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn chromatic_aberration_wavelength_reuses_the_spectral_split() {
+    // Wavelength on (K-144): the effect reuses RGB split's spectral machinery
+    // as a radial spectral split, carrying the Samples count.
+    let mut e = instantiate("chromatic_aberration").unwrap();
+    for p in &mut e.params {
+        match p.id.as_str() {
+            "wavelength" => p.value = EffectValue::Bool(true),
+            "samples" => p.value = EffectValue::Float(Property::fixed(32.0)),
+            _ => {}
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::SpectralSplit {
+            amount_px: 4.0,
+            angle_deg: 0.0,
+            radial: true,
+            samples: 32,
+            mix: 1.0
+        }]
+    );
+}
+
+#[test]
+fn chromatic_aberration_custom_channel_colours_resolve_as_tints() {
+    // The three-colour picker (P2/K-143): custom channel colours arrive as the
+    // radial taps' tints. A legacy instance (no colour params) falls back to
+    // red / green / blue.
+    let mut e = instantiate("chromatic_aberration").unwrap();
+    for p in &mut e.params {
+        if p.id == "channel_colour_2" {
+            p.value = EffectValue::Colour([
+                Property::fixed(0.5),
+                Property::fixed(0.25),
+                Property::fixed(0.75),
+                Property::fixed(1.0),
+            ]);
+        }
+    }
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::ChromaticAberration {
+            amount_px: 4.0,
+            tints: [[1.0, 0.0, 0.0], [0.5, 0.25, 0.75], [0.0, 0.0, 1.0]],
+            mix: 1.0
+        }]
+    );
+
+    e.params.retain(|p| !p.id.starts_with("channel_colour_"));
+    let r = resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert_eq!(
+        r,
+        vec![Resolved::ChromaticAberration {
+            amount_px: 4.0,
+            tints: RGB_TINTS,
             mix: 1.0
         }]
     );
@@ -1242,16 +1424,16 @@ fn cpu_chromatic_aberration_shifts_channels_radially_and_keeps_alpha() {
     // Amount 0 and mix 0 are both the exact identity (the general
     // formula's own passthrough, mirroring rgb_split's un-guarded style).
     let mut a0 = img.clone();
-    cpu::chromatic_aberration(&mut a0, w, h, 0.0, 1.0);
+    cpu::chromatic_aberration(&mut a0, w, h, 0.0, RGB_TINTS, 1.0);
     assert_eq!(a0, img);
     let mut m0 = img.clone();
-    cpu::chromatic_aberration(&mut m0, w, h, 5.0, 0.0);
+    cpu::chromatic_aberration(&mut m0, w, h, 5.0, RGB_TINTS, 0.0);
     assert_eq!(m0, img);
 
     // The exact centre pixel is unmoved even at a huge amount: its own
     // (position − centre) vector is zero, so every tap collapses onto it.
     let mut c = img.clone();
-    cpu::chromatic_aberration(&mut c, w, h, 20.0, 1.0);
+    cpu::chromatic_aberration(&mut c, w, h, 20.0, RGB_TINTS, 1.0);
     assert_eq!(c[mid], 1.0, "frame-centre red is unmoved");
     assert_eq!(c[mid + 2], 1.0, "frame-centre blue is unmoved");
     assert_eq!(c[mid + 1], 1.0, "green untouched everywhere");
@@ -1269,7 +1451,7 @@ fn cpu_chromatic_aberration_shifts_channels_radially_and_keeps_alpha() {
     let (fw, fh) = (w as f32, h as f32);
     let diag = (fw * fw + fh * fh).sqrt();
     let mut half_diag = img.clone();
-    cpu::chromatic_aberration(&mut half_diag, w, h, 0.5 * diag, 1.0);
+    cpu::chromatic_aberration(&mut half_diag, w, h, 0.5 * diag, RGB_TINTS, 1.0);
     assert!(
         half_diag.iter().step_by(4).all(|&r| r == 1.0),
         "every pixel's red reads the centre's red at Amount = half diagonal"
@@ -1288,6 +1470,33 @@ fn spectral_basis_columns_sum_to_one() {
 }
 
 #[test]
+fn spectral_taps_span_the_offset_and_normalise() {
+    // The variable-sample tap builder (FX-9/K-144): for any count the taps
+    // span −1..+1 evenly, each colour column sums to 1 (uniform preservation),
+    // and the count is clamped to 2..=SPECTRAL_MAX_SAMPLES.
+    for n in [3, 9, 16, 64] {
+        let taps = spectral_taps(n);
+        assert_eq!(taps.len(), n as usize, "n={n} taps");
+        assert!((taps[0][3] - -1.0).abs() < 1e-6, "first tap is the red end");
+        assert!(
+            (taps[taps.len() - 1][3] - 1.0).abs() < 1e-6,
+            "last tap is the blue end"
+        );
+        // Fractions strictly increase across the span.
+        for pair in taps.windows(2) {
+            assert!(pair[1][3] > pair[0][3], "n={n}: fractions increase");
+        }
+        for c in 0..3 {
+            let sum: f32 = taps.iter().map(|t| t[c]).sum();
+            assert!((sum - 1.0).abs() < 1e-5, "n={n} channel {c} sums to {sum}");
+        }
+    }
+    // Clamping: below 3 and above the max both land in range.
+    assert_eq!(spectral_taps(0).len(), 3);
+    assert_eq!(spectral_taps(1000).len(), SPECTRAL_MAX_SAMPLES as usize);
+}
+
+#[test]
 fn cpu_spectral_split_disperses_and_preserves_uniform() {
     let (w, h) = (17u32, 9u32);
     let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
@@ -1298,8 +1507,10 @@ fn cpu_spectral_split_disperses_and_preserves_uniform() {
     for px in uniform.chunks_exact_mut(4) {
         px.copy_from_slice(&[0.5, 0.25, 0.125, 1.0]);
     }
+    // Nine taps line the resampled basis up with the original anchors, so the
+    // impulse below lands exactly on a tap.
     let before = uniform.clone();
-    cpu::spectral_split(&mut uniform, w, h, 3.0, 25.0, false, 1.0);
+    cpu::spectral_split(&mut uniform, w, h, 3.0, 25.0, false, 9, 1.0);
     for (i, (a, b)) in uniform.iter().zip(&before).enumerate() {
         assert!((a - b).abs() < 1e-6, "texel {i}: {a} vs {b}");
     }
@@ -1316,11 +1527,11 @@ fn cpu_spectral_split_disperses_and_preserves_uniform() {
 
     // Mix 0 is the exact identity.
     let mut m0 = img.clone();
-    cpu::spectral_split(&mut m0, w, h, 3.0, 45.0, false, 0.0);
+    cpu::spectral_split(&mut m0, w, h, 3.0, 45.0, false, 9, 0.0);
     assert_eq!(m0, img);
 
     let mut s = img.clone();
-    cpu::spectral_split(&mut s, w, h, 2.0, 0.0, false, 1.0);
+    cpu::spectral_split(&mut s, w, h, 2.0, 0.0, false, 9, 1.0);
     assert!(s[at(10, 4)] > 0.1, "red end lands +2x of the impulse");
     assert!(s[at(6, 4) + 2] > 0.3, "blue end lands -2x of the impulse");
     assert!(s[mid + 1] > 0.3, "green stays astride the impulse");

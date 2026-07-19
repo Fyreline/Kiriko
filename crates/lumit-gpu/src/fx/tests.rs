@@ -228,14 +228,17 @@ fn wgsl_rgb_split_matches_the_cpu_oracle() {
     let fx = FxEngine::new(&ctx);
     let (w, h) = (32u32, 24u32);
     let img = corpus(w, h);
-    for (amount, angle, radial, mix) in [
-        (3.0f32, 0.0f32, false, 1.0f32),
-        (2.5, 33.0, false, 0.6),
-        (4.0, 0.0, true, 1.0),
-        (0.0, 90.0, false, 1.0),
+    // Includes the classic 1 / 0 / 1 scales and asymmetric per-channel scales
+    // (FX-9), one negative, to exercise the per-channel displacement path.
+    for (amount, angle, radial, scale, mix) in [
+        (3.0f32, 0.0f32, false, [1.0f32, 0.0, 1.0], 1.0f32),
+        (2.5, 33.0, false, [1.0, 0.0, 1.0], 0.6),
+        (4.0, 0.0, true, [1.5, 0.25, 0.5], 1.0),
+        (3.0, 20.0, false, [1.2, -0.4, 0.8], 1.0),
+        (0.0, 90.0, false, [1.0, 0.0, 1.0], 1.0),
     ] {
         let mut cpu = img.clone();
-        lumit_core::fx::cpu::rgb_split(&mut cpu, w, h, amount, angle, radial, mix);
+        lumit_core::fx::cpu::rgb_split(&mut cpu, w, h, amount, angle, radial, scale, mix);
 
         let (dx, dy) = lumit_core::fx::rgb_split_offset(amount, angle);
         let tex = upload_linear_f32(&ctx, &img, w, h);
@@ -244,16 +247,19 @@ fn wgsl_rgb_split_matches_the_cpu_oracle() {
             dy,
             amount_px: amount,
             radial,
+            scale,
             mix,
         };
         let out = fx.rgb_split(&ctx, &tex, w, h, &op);
         let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
 
         let worst = worst_f16_ulp(&cpu, &gpu);
-        eprintln!("rgb split a={amount} ang={angle} radial={radial}: worst {worst} ulp");
+        eprintln!(
+            "rgb split a={amount} ang={angle} radial={radial} scale={scale:?}: worst {worst} ulp"
+        );
         assert!(
             worst <= 2,
-            "amount {amount} angle {angle} radial {radial} mix {mix}: \
+            "amount {amount} angle {angle} radial {radial} scale {scale:?} mix {mix}: \
                  worst {worst} fp16 ULP"
         );
 
@@ -278,33 +284,41 @@ fn wgsl_spectral_split_matches_the_cpu_oracle() {
     let fx = FxEngine::new(&ctx);
     let (w, h) = (32u32, 24u32);
     let img = corpus(w, h);
-    for (amount, angle, radial, mix) in [
-        (3.0f32, 0.0f32, false, 1.0f32),
-        (2.5, 33.0, false, 0.6),
-        (4.0, 0.0, true, 1.0),
-        (0.0, 90.0, false, 1.0),
+    // Sweeps the sample count too (FX-9/K-144): 9 (the historical density), a
+    // denser 24, and both range ends, so the variable-count kernel matches.
+    for (amount, angle, radial, samples, mix) in [
+        (3.0f32, 0.0f32, false, 9i32, 1.0f32),
+        (2.5, 33.0, false, 24, 0.6),
+        (4.0, 0.0, true, 16, 1.0),
+        (6.0, 10.0, false, 64, 1.0),
+        (5.0, 0.0, true, 3, 1.0),
+        (0.0, 90.0, false, 16, 1.0),
     ] {
         let mut cpu = img.clone();
-        lumit_core::fx::cpu::spectral_split(&mut cpu, w, h, amount, angle, radial, mix);
+        lumit_core::fx::cpu::spectral_split(&mut cpu, w, h, amount, angle, radial, samples, mix);
 
         let (dx, dy) = lumit_core::fx::rgb_split_offset(amount, angle);
+        let (basis, count) = lumit_core::fx::spectral_basis_uniform(samples);
         let tex = upload_linear_f32(&ctx, &img, w, h);
         let op = SpectralSplitOp {
             dx,
             dy,
             amount_px: amount,
             radial,
-            basis: lumit_core::fx::spectral_basis_vec4(),
+            basis,
+            count,
             mix,
         };
         let out = fx.spectral_split(&ctx, &tex, w, h, &op);
         let gpu = readback_linear_f32(&ctx, &out, w, h).unwrap();
 
         let worst = worst_f16_ulp(&cpu, &gpu);
-        eprintln!("spectral split a={amount} ang={angle} radial={radial}: worst {worst} ulp");
+        eprintln!(
+            "spectral split a={amount} ang={angle} radial={radial} n={samples}: worst {worst} ulp"
+        );
         assert!(
             worst <= 2,
-            "amount {amount} angle {angle} radial {radial} mix {mix}: \
+            "amount {amount} angle {angle} radial {radial} samples {samples} mix {mix}: \
                  worst {worst} fp16 ULP"
         );
 
@@ -329,19 +343,24 @@ fn wgsl_chromatic_aberration_matches_the_cpu_oracle() {
     let fx = FxEngine::new(&ctx);
     let (w, h) = (32u32, 24u32);
     let img = corpus(w, h);
-    for (amount, mix) in [
-        (3.0f32, 1.0f32),
-        (8.0, 0.6),
-        (12.5, 1.0),
-        (0.0, 1.0),
-        (6.0, 0.0),
+    // Default red / green / blue tints (the classic split), plus a custom set
+    // where the middle tap leaks colour (P2/K-143) to exercise the tinted sum.
+    let rgb: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let mixed: [[f32; 3]; 3] = [[1.0, 0.2, 0.0], [0.1, 1.0, 0.1], [0.0, 0.3, 0.9]];
+    for (amount, tints, mix) in [
+        (3.0f32, rgb, 1.0f32),
+        (8.0, rgb, 0.6),
+        (12.5, mixed, 1.0),
+        (0.0, rgb, 1.0),
+        (6.0, rgb, 0.0),
     ] {
         let mut cpu = img.clone();
-        lumit_core::fx::cpu::chromatic_aberration(&mut cpu, w, h, amount, mix);
+        lumit_core::fx::cpu::chromatic_aberration(&mut cpu, w, h, amount, tints, mix);
 
         let tex = upload_linear_f32(&ctx, &img, w, h);
         let op = ChromaticAberrationOp {
             amount_px: amount,
+            tints,
             mix,
         };
         let out = fx.chromatic_aberration(&ctx, &tex, w, h, &op);
@@ -353,7 +372,9 @@ fn wgsl_chromatic_aberration_matches_the_cpu_oracle() {
             worst <= 2,
             "amount {amount} mix {mix}: worst {worst} fp16 ULP"
         );
-        if amount == 0.0 || mix == 0.0 {
+        // The default red/green/blue tints keep amount 0 / mix 0 a bit-exact
+        // passthrough (the tinted sum returns the input for the primaries).
+        if tints == rgb && (amount == 0.0 || mix == 0.0) {
             assert_eq!(
                 gpu, img,
                 "amount 0 or mix 0 must be the bit-exact passthrough"

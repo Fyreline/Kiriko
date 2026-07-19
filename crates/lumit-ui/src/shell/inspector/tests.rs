@@ -288,3 +288,36 @@ mod motion_blur_switch_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod channel_picker_tests {
+    use super::*;
+    use lumit_core::fx::ParamKind;
+
+    // The three-colour channel picker (P2/K-143) finds its group by the stable
+    // `channel_colour_1/2/3` ids. Chromatic aberration (K-144) is the first
+    // adopter: its schema must declare exactly those three ids as Colour params
+    // with red / green / blue defaults, or the picker silently stops finding
+    // them (and the classic split defaults break).
+    #[test]
+    fn chromatic_aberration_declares_the_channel_picker_group() {
+        let schema = lumit_core::fx::schema("chromatic_aberration").unwrap();
+        let defaults = [
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ];
+        for (id, want) in CHANNEL_COLOUR_IDS.iter().zip(defaults.iter()) {
+            let ps = schema
+                .params
+                .iter()
+                .find(|p| &p.id == id)
+                .unwrap_or_else(|| panic!("missing channel colour param {id}"));
+            match ps.kind {
+                ParamKind::Colour { default, .. } => assert_eq!(&default, want, "{id} default"),
+                _ => panic!("{id} must be a Colour parameter"),
+            }
+        }
+    }
+}

@@ -36,17 +36,21 @@ pub fn apply(rgba: &mut [f32], w: u32, h: u32, fx: &Resolved) {
             amount_px,
             angle_deg,
             radial,
+            scale,
             mix,
-        } => rgb_split(rgba, w, h, *amount_px, *angle_deg, *radial, *mix),
+        } => rgb_split(rgba, w, h, *amount_px, *angle_deg, *radial, *scale, *mix),
         Resolved::SpectralSplit {
             amount_px,
             angle_deg,
             radial,
+            samples,
             mix,
-        } => spectral_split(rgba, w, h, *amount_px, *angle_deg, *radial, *mix),
-        Resolved::ChromaticAberration { amount_px, mix } => {
-            chromatic_aberration(rgba, w, h, *amount_px, *mix)
-        }
+        } => spectral_split(rgba, w, h, *amount_px, *angle_deg, *radial, *samples, *mix),
+        Resolved::ChromaticAberration {
+            amount_px,
+            tints,
+            mix,
+        } => chromatic_aberration(rgba, w, h, *amount_px, *tints, *mix),
         Resolved::Flash {
             strength,
             colour,
@@ -878,8 +882,14 @@ fn bilinear(rgba: &[f32], w: u32, h: u32, sx: f32, sy: f32) -> [f32; 4] {
 /// mattes never fringe). Linear mode shifts every pixel by the same
 /// vector; radial mode scales the pixel's own offset from the frame
 /// centre so aberration grows toward the corners (`amount_px` is reached
-/// at the corner distance). Premultiplied throughout; samples outside
-/// the frame clamp to the edge.
+/// at the corner distance). `scale` is the per-channel displacement scale
+/// `[r, g, b]` (FX-9): R and G sample along −offset·scale, B along
+/// +offset·scale, so `[1, 0, 1]` is the classic split (R one way, B the
+/// other, G on its own pixel). Sampling G with `bilinear` at scale 0 lands
+/// exactly on its own pixel, bit-identical to reading it directly, so the
+/// default reproduces the historical output. Premultiplied throughout;
+/// samples outside the frame clamp to the edge.
+#[allow(clippy::too_many_arguments)]
 pub fn rgb_split(
     rgba: &mut [f32],
     w: u32,
@@ -887,6 +897,7 @@ pub fn rgb_split(
     amount_px: f32,
     angle_deg: f32,
     radial: bool,
+    scale: [f32; 3],
     mix: f32,
 ) {
     let original = rgba.to_vec();
@@ -903,9 +914,28 @@ pub fn rgb_split(
             } else {
                 (dx, dy)
             };
-            let r = bilinear(&original, w, h, pos.0 - ox, pos.1 - oy)[0];
-            let b = bilinear(&original, w, h, pos.0 + ox, pos.1 + oy)[2];
-            let split = [r, original[i + 1], b, original[i + 3]];
+            let r = bilinear(
+                &original,
+                w,
+                h,
+                pos.0 - ox * scale[0],
+                pos.1 - oy * scale[0],
+            )[0];
+            let g = bilinear(
+                &original,
+                w,
+                h,
+                pos.0 - ox * scale[1],
+                pos.1 - oy * scale[1],
+            )[1];
+            let b = bilinear(
+                &original,
+                w,
+                h,
+                pos.0 + ox * scale[2],
+                pos.1 + oy * scale[2],
+            )[2];
+            let split = [r, g, b, original[i + 3]];
             for c in 0..4 {
                 rgba[i + c] = original[i + c] * (1.0 - mix) + split[c] * mix;
             }
@@ -913,15 +943,19 @@ pub fn rgb_split(
     }
 }
 
-/// The RGB split's Wavelength mode (docs/08 §3.6, K-090): instead of
-/// three channels at three offsets, nine spectral samples spread across
-/// `±offset` (tap i at fraction i/4 − 1), each weighted by its
-/// wavelength's linear-RGB basis colour ([`super::SPECTRAL_BASIS`]) and
-/// summed — real dispersion's rainbow fringe rather than the classic
-/// hard R/G/B rim. The basis columns are normalised, so a uniform image
-/// passes through unchanged. Offsets (linear or radial) and edge
-/// handling match the classic mode exactly; alpha still follows the
-/// green channel's rule and stays put, so mattes never fringe.
+/// The RGB split's Wavelength mode (docs/08 §3.6, K-090; chromatic
+/// aberration's own Wavelength mode, K-144): instead of three channels at
+/// three offsets, `samples` spectral taps spread across `±offset`, each
+/// weighted by its wavelength's linear-RGB basis colour and summed — real
+/// dispersion's rainbow fringe rather than the classic hard R/G/B rim. The
+/// taps (each carrying its weight and its offset fraction in the `w` lane)
+/// come from [`super::spectral_taps`], shared with the GPU path, and their
+/// colour columns are normalised so a uniform image passes through
+/// unchanged. More taps fill the same span more densely, so a large offset
+/// disperses smoothly rather than showing a few discrete copies. Offsets
+/// (linear or radial) and edge handling match the classic mode exactly;
+/// alpha stays put, so mattes never fringe.
+#[allow(clippy::too_many_arguments)]
 pub fn spectral_split(
     rgba: &mut [f32],
     w: u32,
@@ -929,9 +963,11 @@ pub fn spectral_split(
     amount_px: f32,
     angle_deg: f32,
     radial: bool,
+    samples: i32,
     mix: f32,
 ) {
     let original = rgba.to_vec();
+    let taps = super::spectral_taps(samples);
     let (dx, dy) = super::rgb_split_offset(amount_px, angle_deg);
     let (fw, fh) = (w as f32, h as f32);
     let diag = (fw * fw + fh * fh).sqrt();
@@ -946,11 +982,11 @@ pub fn spectral_split(
                 (dx, dy)
             };
             let mut acc = [0.0f32; 3];
-            for (tap, weight) in super::SPECTRAL_BASIS.iter().enumerate() {
-                let t = tap as f32 * 0.25 - 1.0;
+            for tap in &taps {
+                let t = tap[3];
                 let s = bilinear(&original, w, h, pos.0 + t * ox, pos.1 + t * oy);
                 for c in 0..3 {
-                    acc[c] += weight[c] * s[c];
+                    acc[c] += tap[c] * s[c];
                 }
             }
             let split = [acc[0], acc[1], acc[2], original[i + 3]];
@@ -962,16 +998,26 @@ pub fn spectral_split(
 }
 
 /// Chromatic aberration (docs/08 §3.15): a dedicated, always-radial
-/// sibling of [`rgb_split`]'s own Radial mode — same R-behind/B-ahead
-/// shape, always centred on the frame, no angle or linear mode of its
-/// own. R samples pulled toward centre, B pulled away, so R reads
-/// outward and B inward in the rendered image; G and alpha stay put.
-/// Premultiplied throughout; samples outside the frame clamp to the
-/// edge. Amount 0 is already the bit-exact passthrough through the
-/// general formula (`k` is an exact `0.0`, so every tap lands on its
-/// own pixel) — no separate short-circuit is needed, mirroring
-/// `rgb_split`'s own un-guarded style.
-pub fn chromatic_aberration(rgba: &mut [f32], w: u32, h: u32, amount_px: f32, mix: f32) {
+/// sibling of [`rgb_split`]'s own Radial mode — three tinted radial taps,
+/// always centred on the frame, no angle or linear mode of its own. The
+/// three taps sit at fractions −1 / 0 / +1 (toward centre / on the pixel /
+/// away), each sampled and multiplied component-wise by its `tints[i]`
+/// colour, then summed. Default tints red / green / blue keep only their
+/// own channel — tap −1 → R (reads outward), tap 0 → G (its own pixel),
+/// tap +1 → B (reads inward) — reproducing the classic split; G and alpha
+/// stay put. Premultiplied throughout; samples outside the frame clamp to
+/// the edge. Amount 0 is the bit-exact passthrough through the general
+/// formula (`k` is an exact `0.0`, so every tap lands on its own pixel and
+/// the tinted sum returns the input for the primary defaults) — no separate
+/// short-circuit, mirroring `rgb_split`'s own un-guarded style.
+pub fn chromatic_aberration(
+    rgba: &mut [f32],
+    w: u32,
+    h: u32,
+    amount_px: f32,
+    tints: [[f32; 3]; 3],
+    mix: f32,
+) {
     let original = rgba.to_vec();
     let (fw, fh) = (w as f32, h as f32);
     let diag = (fw * fw + fh * fh).sqrt();
@@ -982,9 +1028,14 @@ pub fn chromatic_aberration(rgba: &mut [f32], w: u32, h: u32, amount_px: f32, mi
             let i = ((y * w + x) * 4) as usize;
             let pos = (x as f32 + 0.5, y as f32 + 0.5);
             let (ox, oy) = ((pos.0 - cx) * k, (pos.1 - cy) * k);
-            let r = bilinear(&original, w, h, pos.0 - ox, pos.1 - oy)[0];
-            let b = bilinear(&original, w, h, pos.0 + ox, pos.1 + oy)[2];
-            let split = [r, original[i + 1], b, original[i + 3]];
+            let mut acc = [0.0f32; 3];
+            for (tap, tint) in [-1.0f32, 0.0, 1.0].iter().zip(tints.iter()) {
+                let s = bilinear(&original, w, h, pos.0 + tap * ox, pos.1 + tap * oy);
+                for c in 0..3 {
+                    acc[c] += tint[c] * s[c];
+                }
+            }
+            let split = [acc[0], acc[1], acc[2], original[i + 3]];
             for c in 0..4 {
                 rgba[i + c] = original[i + c] * (1.0 - mix) + split[c] * mix;
             }

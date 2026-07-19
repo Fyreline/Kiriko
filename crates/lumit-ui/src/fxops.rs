@@ -219,6 +219,7 @@ pub fn run_ops(
                 amount_px,
                 angle_deg,
                 radial,
+                scale,
                 mix,
             } => {
                 let (dx, dy) = lumit_core::fx::rgb_split_offset(*amount_px, *angle_deg);
@@ -232,6 +233,7 @@ pub fn run_ops(
                         dy,
                         amount_px: *amount_px,
                         radial: *radial,
+                        scale: *scale,
                         mix: *mix,
                     },
                 );
@@ -240,9 +242,11 @@ pub fn run_ops(
                 amount_px,
                 angle_deg,
                 radial,
+                samples,
                 mix,
             } => {
                 let (dx, dy) = lumit_core::fx::rgb_split_offset(*amount_px, *angle_deg);
+                let (basis, count) = lumit_core::fx::spectral_basis_uniform(*samples);
                 tex = fx.spectral_split(
                     ctx,
                     &tex,
@@ -253,12 +257,17 @@ pub fn run_ops(
                         dy,
                         amount_px: *amount_px,
                         radial: *radial,
-                        basis: lumit_core::fx::spectral_basis_vec4(),
+                        basis,
+                        count,
                         mix: *mix,
                     },
                 );
             }
-            Resolved::ChromaticAberration { amount_px, mix } => {
+            Resolved::ChromaticAberration {
+                amount_px,
+                tints,
+                mix,
+            } => {
                 tex = fx.chromatic_aberration(
                     ctx,
                     &tex,
@@ -266,6 +275,7 @@ pub fn run_ops(
                     h,
                     &lumit_gpu::fx::ChromaticAberrationOp {
                         amount_px: *amount_px,
+                        tints: *tints,
                         mix: *mix,
                     },
                 );

@@ -10,10 +10,10 @@ struct Params {
     dy: f32,
     amount: f32,    // radial-mode peak offset, raster px
     radial: u32,    // 1 = offsets grow from the frame centre
+    scale_r: f32,   // per-channel displacement scale (FX-9)
+    scale_g: f32,
+    scale_b: f32,
     mix_amt: f32,   // 0..1, blended against the unprocessed input
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -61,9 +61,12 @@ fn rgb_split(@builtin(global_invocation_id) gid: vec3<u32>) {
         off = vec2<f32>((pos.x - fsize.x * 0.5) * k, (pos.y - fsize.y * 0.5) * k);
     }
     let o = textureLoad(src, xy, 0);
-    let r = bilinear(pos.x - off.x, pos.y - off.y, size).r;
-    let b = bilinear(pos.x + off.x, pos.y + off.y, size).b;
-    // Alpha follows the green channel (§3.6): both stay put.
-    let split = vec4<f32>(r, o.g, b, o.a);
+    // Per-channel displacement (FX-9): R and G along −offset·scale, B along
+    // +offset·scale. Sampling G at scale 0 lands on its own pixel, matching
+    // the CPU oracle's `bilinear` read. Alpha follows the green channel (§3.6).
+    let r = bilinear(pos.x - off.x * p.scale_r, pos.y - off.y * p.scale_r, size).r;
+    let g = bilinear(pos.x - off.x * p.scale_g, pos.y - off.y * p.scale_g, size).g;
+    let b = bilinear(pos.x + off.x * p.scale_b, pos.y + off.y * p.scale_b, size).b;
+    let split = vec4<f32>(r, g, b, o.a);
     textureStore(dst, xy, mix(o, split, p.mix_amt));
 }

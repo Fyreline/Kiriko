@@ -348,6 +348,48 @@ pub(crate) fn effects_rows(
                     });
                 }
             };
+            // The reusable three-colour channel picker (P2/K-143): the three
+            // `channel_colour_*` params render as one compact swatch row, driven
+            // by `channel_colour_1`; the other two fold into it, so skip them.
+            if param.id == CHANNEL_COLOUR_IDS[1] || param.id == CHANNEL_COLOUR_IDS[2] {
+                continue;
+            }
+            if param.id == CHANNEL_COLOUR_IDS[0] {
+                let (row_rect, mut c) = row_frame(ui, ctx, row_hl);
+                set_sel(ui, row_rect);
+                // Read the three channels' current scene-linear RGB (clamped to
+                // the picker's gamut, like the single-colour rows).
+                let read = |cid: &str| -> [f32; 3] {
+                    match e.params.iter().find(|p| p.id == cid).map(|p| &p.value) {
+                        Some(EffectValue::Colour(ch)) => [
+                            ch[0].value_at(ctx.lt).clamp(0.0, 1.0) as f32,
+                            ch[1].value_at(ctx.lt).clamp(0.0, 1.0) as f32,
+                            ch[2].value_at(ctx.lt).clamp(0.0, 1.0) as f32,
+                        ],
+                        _ => [0.0, 0.0, 0.0],
+                    }
+                };
+                let mut rgb = [
+                    read(CHANNEL_COLOUR_IDS[0]),
+                    read(CHANNEL_COLOUR_IDS[1]),
+                    read(CHANNEL_COLOUR_IDS[2]),
+                ];
+                if three_colour_swatches(&mut c, ctx.theme, &mut rgb) {
+                    // One undoable SetLayerEffects writing all three colours.
+                    let mut effects = layer.effects.clone();
+                    for (cid, col) in CHANNEL_COLOUR_IDS.iter().zip(rgb.iter()) {
+                        if let Some(p) = effects[idx].params.iter_mut().find(|p| &p.id == cid) {
+                            if let EffectValue::Colour(arr) = &mut p.value {
+                                arr[0] = lumit_core::anim::Property::fixed(col[0] as f64);
+                                arr[1] = lumit_core::anim::Property::fixed(col[1] as f64);
+                                arr[2] = lumit_core::anim::Property::fixed(col[2] as f64);
+                            }
+                        }
+                    }
+                    *pending = Some(commit(effects));
+                }
+                continue;
+            }
             match (&param.value, ps.kind) {
                 (EffectValue::Float(prop), ParamKind::Float { slider, hard, .. }) => {
                     let is_animated = prop.is_animated();

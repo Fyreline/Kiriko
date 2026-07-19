@@ -1,26 +1,27 @@
 // The RGB split's Wavelength mode (docs/08-EFFECTS.md §3.6, K-090 quality
-// tier): wavelength-based dispersion. Mirrors
-// lumit_core::fx::cpu::spectral_split op-for-op (§1.6: the CPU is the
-// oracle): nine spectral samples spread across ±offset (tap i at fraction
-// i/4 − 1), each weighted by its wavelength's linear-RGB basis colour and
-// summed. The basis table arrives in the uniform, host-supplied from
-// lumit_core::fx::SPECTRAL_BASIS — the kernel reads the very numbers the
-// CPU reference does, exactly as the offset's cos/sin arrive host-computed.
-// The basis columns are normalised, so a uniform image passes through
-// unchanged; alpha follows the green channel's rule and stays put (§3.6),
-// so mattes never fringe. The classic three-channel mode is a separate
-// kernel (fx_rgbsplit.wgsl), untouched by this one.
+// tier; chromatic aberration's own Wavelength mode, K-144): wavelength-based
+// dispersion. Mirrors lumit_core::fx::cpu::spectral_split op-for-op (§1.6:
+// the CPU is the oracle): `count` spectral taps spread across ±offset, each
+// carrying its rgb weight (xyz) and its offset fraction in [-1, +1] (the w
+// lane), weighted and summed. The tap table arrives in the uniform,
+// host-supplied from lumit_core::fx::spectral_basis_uniform — the kernel
+// reads the very numbers the CPU reference does, exactly as the offset's
+// cos/sin arrive host-computed. The colour columns are normalised, so a
+// uniform image passes through unchanged; alpha follows the green channel's
+// rule and stays put (§3.6), so mattes never fringe. More taps fill the same
+// span more densely, so a large offset disperses smoothly. The classic
+// three-channel mode is a separate kernel (fx_rgbsplit.wgsl), untouched.
 
 struct Params {
-    basis: array<vec4<f32>, 9>,  // wavelength → linear RGB, w unused
+    basis: array<vec4<f32>, 64>,  // per tap: rgb weight, w = offset fraction
     dx: f32,        // linear-mode offset, raster px (host-computed)
     dy: f32,
     amount: f32,    // radial-mode peak offset, raster px
     radial: u32,    // 1 = offsets grow from the frame centre
+    count: u32,     // number of active taps (2..=64)
     mix_amt: f32,   // 0..1, blended against the unprocessed input
     _pad0: f32,
     _pad1: f32,
-    _pad2: f32,
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -69,8 +70,10 @@ fn spectral_split(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let o = textureLoad(src, xy, 0);
     var acc = vec3<f32>(0.0);
-    for (var i = 0; i < 9; i++) {
-        let t = f32(i) * 0.25 - 1.0;
+    for (var i = 0u; i < p.count; i++) {
+        // The tap's offset fraction rides in the w lane (host-computed, so no
+        // WGSL division re-derives it), the rgb weight in xyz.
+        let t = p.basis[i].w;
         let s = bilinear(pos.x + t * off.x, pos.y + t * off.y, size);
         acc = acc + p.basis[i].rgb * s.rgb;
     }

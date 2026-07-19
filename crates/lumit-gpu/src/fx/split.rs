@@ -16,6 +16,9 @@ pub struct RgbSplitOp {
     /// Radial-mode peak offset (reached at the corner distance), raster px.
     pub amount_px: f32,
     pub radial: bool,
+    /// Per-channel displacement scale `[r, g, b]` (FX-9): R and G shift along
+    /// −offset·scale, B along +offset·scale; `[1, 0, 1]` is the classic split.
+    pub scale: [f32; 3],
     /// 0..1, blended against the unprocessed input.
     pub mix: f32,
 }
@@ -27,14 +30,16 @@ struct RgbSplitParams {
     dy: f32,
     amount: f32,
     radial: u32,
+    scale_r: f32,
+    scale_g: f32,
+    scale_b: f32,
     mix_amt: f32,
-    _pad: [f32; 3],
 }
 
 /// One resolved spectral split — the RGB split's Wavelength mode (docs/08
 /// §3.6, K-090), its own kernel so the classic mode stays byte-identical.
 /// The offset vector and the wavelength basis both arrive host-computed
-/// (`lumit_core::fx::rgb_split_offset` / `spectral_basis_vec4`), so the
+/// (`lumit_core::fx::rgb_split_offset` / `spectral_basis_uniform`), so the
 /// kernel consumes exactly the CPU reference's numbers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpectralSplitOp {
@@ -44,8 +49,13 @@ pub struct SpectralSplitOp {
     /// Radial-mode peak offset (reached at the corner distance), raster px.
     pub amount_px: f32,
     pub radial: bool,
-    /// Wavelength → linear-RGB basis rows (w unused), columns normalised.
-    pub basis: [[f32; 4]; 9],
+    /// The spectral taps (FX-9/K-144): each row is `[r, g, b, fraction]` — the
+    /// column-normalised weight and the tap's offset fraction in `[-1, +1]`.
+    /// The first `count` rows are active; the rest are zero. From
+    /// `lumit_core::fx::spectral_basis_uniform`.
+    pub basis: [[f32; 4]; 64],
+    /// The number of active taps (`2..=64`).
+    pub count: u32,
     /// 0..1, blended against the unprocessed input.
     pub mix: f32,
 }
@@ -53,22 +63,28 @@ pub struct SpectralSplitOp {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SpectralSplitParams {
-    basis: [[f32; 4]; 9],
+    basis: [[f32; 4]; 64],
     dx: f32,
     dy: f32,
     amount: f32,
     radial: u32,
+    count: u32,
     mix_amt: f32,
-    _pad: [f32; 3],
+    _pad0: f32,
+    _pad1: f32,
 }
 
 /// One resolved chromatic aberration (docs/08 §3.15): a dedicated,
-/// always-radial sibling of [`RgbSplitOp`]'s own radial mode — no linear
-/// offset or wavelength dispersion of its own.
+/// always-radial sibling of [`RgbSplitOp`]'s own radial mode — three tinted
+/// radial taps, no linear offset or wavelength dispersion of its own (the
+/// Wavelength mode resolves to [`SpectralSplitOp`] instead).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChromaticAberrationOp {
     /// Peak channel offset, raster pixels (reached at the corner distance).
     pub amount_px: f32,
+    /// The three radial taps' tints `[[r, g, b]; 3]` (P2/K-143), at fractions
+    /// −1 / 0 / +1. Defaults red / green / blue reproduce the classic split.
+    pub tints: [[f32; 3]; 3],
     /// 0..1, blended against the unprocessed input.
     pub mix: f32,
 }
@@ -76,6 +92,8 @@ pub struct ChromaticAberrationOp {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ChromaticAberrationParams {
+    /// Row-major vec4 tints (w unused), one per tap.
+    tints: [[f32; 4]; 3],
     amount: f32,
     mix_amt: f32,
     _pad0: f32,
@@ -108,8 +126,10 @@ impl FxEngine {
                 dy: op.dy,
                 amount: op.amount_px,
                 radial: u32::from(op.radial),
+                scale_r: op.scale[0],
+                scale_g: op.scale[1],
+                scale_b: op.scale[2],
                 mix_amt: op.mix,
-                _pad: [0.0; 3],
             }),
         );
         out
@@ -142,8 +162,10 @@ impl FxEngine {
                 dy: op.dy,
                 amount: op.amount_px,
                 radial: u32::from(op.radial),
+                count: op.count,
                 mix_amt: op.mix,
-                _pad: [0.0; 3],
+                _pad0: 0.0,
+                _pad1: 0.0,
             }),
         );
         out
@@ -171,6 +193,11 @@ impl FxEngine {
             w,
             h,
             bytemuck::bytes_of(&ChromaticAberrationParams {
+                tints: [
+                    [op.tints[0][0], op.tints[0][1], op.tints[0][2], 0.0],
+                    [op.tints[1][0], op.tints[1][1], op.tints[1][2], 0.0],
+                    [op.tints[2][0], op.tints[2][1], op.tints[2][2], 0.0],
+                ],
                 amount: op.amount_px,
                 mix_amt: op.mix,
                 _pad0: 0.0,

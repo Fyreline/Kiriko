@@ -273,12 +273,69 @@ pub const SPECTRAL_BASIS: [[f32; 3]; 9] = [
     [0.026_061_023, 0.0, 0.591_334_94], // 450 nm — the violet re-red bump
 ];
 
-/// [`SPECTRAL_BASIS`] as vec4 rows (w zero) for the GPU uniform — the
-/// kernel reads the very same numbers the CPU reference does.
-pub fn spectral_basis_vec4() -> [[f32; 4]; 9] {
-    let mut out = [[0.0; 4]; 9];
-    for (dst, src) in out.iter_mut().zip(SPECTRAL_BASIS.iter()) {
-        dst[..3].copy_from_slice(src);
+/// The largest number of spectral samples the Wavelength dispersion supports
+/// (docs/08 §3.6, K-090/K-144): the GPU uniform carries a fixed-size basis
+/// array, so the sample count clamps here — the same bounded-cost shape Motion
+/// blur's 64-tap cap uses. High enough that a heavy dispersion reads as a
+/// smooth rainbow rather than a few discrete stacked copies.
+pub const SPECTRAL_MAX_SAMPLES: i32 = 64;
+
+/// Build `samples` spectral taps for the Wavelength dispersion (docs/08 §3.6,
+/// K-090; the "more samples" refinement, K-144). Each entry is
+/// `[r_weight, g_weight, b_weight, fraction]`: the RGB weight to multiply the
+/// tap's sample by, and the offset **fraction** in `[-1, +1]` (−1 = the red
+/// end, +1 = the blue end — the same direction the classic three-channel split
+/// disperses). The nine [`SPECTRAL_BASIS`] anchors are resampled by linear
+/// interpolation to `samples` evenly spaced taps, then each colour column is
+/// normalised to sum 1 across the taps, so a uniform image still passes through
+/// unchanged. More taps simply fill the same `±offset` span more densely, so a
+/// large offset disperses smoothly instead of showing a few discrete copies.
+/// Computed host-side in f64 then cast, so the CPU reference and the WGSL
+/// kernel (which reads the fraction straight from each tap's `w`) consume
+/// bit-identical `f32` numbers. `samples` is clamped to `3..=SPECTRAL_MAX_SAMPLES`
+/// — with only two taps the red and blue ends carry no green weight, so the
+/// dispersion needs at least the middle tap to keep the green channel alive.
+pub fn spectral_taps(samples: i32) -> Vec<[f32; 4]> {
+    let n = samples.clamp(3, SPECTRAL_MAX_SAMPLES) as usize;
+    // Interpolate the nine anchors (at fractions −1, −0.75, …, +1) at each of
+    // the `n` evenly spaced tap fractions.
+    let mut taps: Vec<[f64; 4]> = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = -1.0 + 2.0 * i as f64 / (n - 1) as f64;
+        // Anchor-index space: fraction −1 → 0, +1 → 8 (nine anchors, step 0.25).
+        let a = ((t + 1.0) * 4.0).clamp(0.0, 8.0);
+        let lo = a.floor() as usize;
+        let hi = (lo + 1).min(8);
+        let f = a - lo as f64;
+        let w = |c: usize| {
+            f64::from(SPECTRAL_BASIS[lo][c]) * (1.0 - f) + f64::from(SPECTRAL_BASIS[hi][c]) * f
+        };
+        taps.push([w(0), w(1), w(2), t]);
     }
-    out
+    // Normalise each colour column to sum 1 (uniform-image preservation).
+    for c in 0..3 {
+        let sum: f64 = taps.iter().map(|t| t[c]).sum();
+        if sum > 0.0 {
+            for t in taps.iter_mut() {
+                t[c] /= sum;
+            }
+        }
+    }
+    taps.iter()
+        .map(|t| [t[0] as f32, t[1] as f32, t[2] as f32, t[3] as f32])
+        .collect()
+}
+
+/// [`spectral_taps`] packed into the fixed-size GPU uniform array plus its
+/// active `count` — the kernel loops `0..count`, reading each tap's weight and
+/// its offset fraction (the `w` lane). Entries beyond `count` are zero. Shares
+/// [`spectral_taps`] with the CPU reference, so both paths consume identical
+/// numbers.
+pub fn spectral_basis_uniform(samples: i32) -> ([[f32; 4]; SPECTRAL_MAX_SAMPLES as usize], u32) {
+    let taps = spectral_taps(samples);
+    let mut out = [[0.0f32; 4]; SPECTRAL_MAX_SAMPLES as usize];
+    for (dst, src) in out.iter_mut().zip(taps.iter()) {
+        *dst = *src;
+    }
+    (out, taps.len() as u32)
 }

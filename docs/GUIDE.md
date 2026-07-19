@@ -528,6 +528,23 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   design rule §3.6), and the sines behind the shift direction are computed once on the
   CPU and handed to the GPU, because GPU trigonometry is allowed to be slightly
   imprecise and the CPU-vs-GPU agreement test demands better.
+  *Two later additions (FX-9):* **per-channel amounts** — three sliders (Red / Green /
+  Blue, defaults 100 / 0 / 100 per cent) that scale each channel's own shift, so you can
+  fringe red harder than blue, or nudge green too; the defaults are exactly the classic
+  split. And in **Wavelength** mode there is now a **Samples** knob: that mode fakes a
+  rainbow by taking many samples along the shift and tinting each by a spectrum colour, and
+  at big shifts too few samples showed a handful of separate copies — Samples (default 16,
+  up to 64) fills the gap so it reads as a smooth rainbow. The samples are worked out once
+  on the CPU and handed to the GPU, the same trick as the sines, so preview and export
+  agree to the last bit.
+- **The reusable three-colour channel picker.** Some effects split a picture into three
+  tinted channels; **Chromatic aberration** (below) is the first. Rather than three separate
+  colour rows, those effects show one tidy row of three swatches (defaults red / green /
+  blue) — click a swatch to open the colour picker. It is one small shared widget: any
+  effect whose parameter list names three colours `channel_colour_1/2/3` gets the picker
+  automatically, so the next such effect needs no new interface code. Chromatic aberration's
+  three swatches tint its three taps, and leaving them red / green / blue gives the ordinary
+  R-outward / B-inward / green-anchored fringe; recolour them for a stylised split.
 - **Sharpen.** The second effect in the catalogue, following Blur's four-part template.
   It's an *unsharp mask* — the counter-intuitive classic: blur a copy of the image,
   subtract it from the original (what's left is the fine detail), then add that detail
@@ -613,6 +630,9 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   away from the centre (Amount/Radius/Softness/Roundness); **Chromatic aberration** fringes
   red and blue outward/inward from the centre by a set number of pixels — a simpler,
   always-on-the-corner sibling of RGB split's own Radial mode, for the common one-click case.
+  It later grew two matching extras (K-143/K-144): the **three-colour channel picker** (recolour
+  the three tinted taps; leaving them red / green / blue is the ordinary fringe) and RGB split's
+  own **Wavelength/Samples** rainbow mode, reusing the very same spectral machinery.
 - **Exposure (K-106).** The one-knob brightness lever, measured in photographic *stops* —
   each +1 doubles the light, −1 halves it. It is a straight multiply on the colour (done in
   the scene-linear light the compositor works in, so it behaves like a real camera exposure,

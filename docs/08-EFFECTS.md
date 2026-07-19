@@ -479,10 +479,23 @@ offsets along the angle; radial mode offsets along the vector from centre, scale
 distance^falloff. Operates premultiplied; alpha follows the green channel to avoid fringed
 mattes. Trivially animatable Amount is the scene's impact-frame staple.
 
+**Per-channel amounts (FX-9, K-143):** three per-cent scales — **Red**, **Green**, **Blue**
+(defaults 100 / 0 / 100, open both sides, K-135) — multiply the overall Amount per channel,
+so R and B can fringe by different amounts and G can be nudged off its anchor. R and G
+displace along −offset, B along +offset, so the 100 / 0 / 100 defaults reproduce the classic
+split bit-for-bit. They apply to the classic (non-Wavelength) mode only.
+
+**Wavelength samples (FX-9, K-144):** the Wavelength mode carries a **Samples** control (the
+tap count, `3..=64`, default 16). More taps fill the same `±offset` span more densely, so a
+large offset disperses as a smooth rainbow instead of a few discrete stacked copies. The taps
+(each a column-normalised RGB weight plus its offset fraction) are resampled from the nine
+`SPECTRAL_BASIS` anchors host-side and shared by the CPU reference and the WGSL kernel, so a
+uniform image still passes through unchanged and preview equals export (K-031).
+
 **§3.15 Chromatic aberration** is a separate, single-purpose sibling shipped alongside this
-effect: same R-outward/B-inward radial shape as this effect's own Radial mode, but with
-nothing else to configure — Amount and Mix only, no Angle/Mode/Wavelength — for the common
-case of a one-click corner fringe rather than a tuned dispersion look.
+effect: same R-outward/B-inward radial shape as this effect's own Radial mode. It adds the
+reusable three-colour channel picker and this effect's own Wavelength/Samples dispersion
+(K-144) — see §3.15.
 
 ### 3.7 Flash — beat-aware strobe
 
@@ -781,28 +794,43 @@ rule only reaches `Color32`/hex-literal colours in widget code).
 
 ### 3.15 Chromatic aberration
 
-**Parameters:** Amount (px@comp, default 4), Mix.
+**Parameters:** Amount (px@comp, default 4, open above per K-135), the three channel colours
+(Colour 1 / 2 / 3, default red / green / blue), Wavelength (Bool, default off), Samples
+(3–64, default 16), Mix.
 
-**Algorithm sketch.** R samples pulled toward the frame centre and B pulled away (so R reads
-outward and B inward in the rendered image), growing linearly with each pixel's own distance
-from centre and reaching Amount at the corner; G and alpha stay put. Premultiplied throughout,
-edges clamp. `cheap` cost, `full-frame` ROI.
+**Algorithm sketch.** Three radial taps at offset fractions −1 / 0 / +1 from the frame centre
+(toward centre / on the pixel / away), each sampled and multiplied component-wise by its
+channel colour and summed; G and alpha stay put. Default tints red / green / blue keep only
+their own channel, so R reads outward, B inward and G on its own pixel — the classic split.
+Premultiplied throughout, edges clamp. `cheap` cost, `full-frame` ROI.
+
+**Channel picker (P2, K-143):** the three tap colours are edited through the **reusable
+three-colour channel picker** — three colour swatches (defaults red / green / blue), each
+opening the colour picker. The widget is shared: any effect whose schema declares three
+Colour parameters `channel_colour_1/2/3` gets it automatically (see `channel_picker` in the
+inspector), so a future three-tinted-channel effect adopts it without new UI code.
+
+**Wavelength (K-144):** a `Wavelength` Bool (default off) reuses §3.6 RGB split's own spectral
+machinery — turning on resolves the effect to a radial spectral split with a **Samples**
+control (3–64, default 16), the same many-tap dispersion RGB split's Wavelength mode uses, for
+a smooth rainbow fringe rather than the three tinted taps. The channel colours apply to the
+non-Wavelength mode only.
 
 **Status (v1, shipped):** a dedicated, always-radial sibling of §3.6 RGB split's own Radial
 mode, not a replacement for it — RGB split's Radial mode already covers this exact shape as
 one of its three modes (alongside Linear and the Wavelength quality tier), sharing its Amount
 currency (% diag) with Linear mode's Angle-driven offset. This effect exists as a
-single-purpose, one-click version with nothing else to configure: drop it on and it already
-looks right (§1.2), the same shape rule that split the old Grade into Colour balance and
-Saturation (K-090). Because it has no Angle to share a currency with, Amount is authored in
-raw px@comp (§2.3) instead of % diag — scaled by the preview factor exactly like Block
-glitch's Block size (§3.12) — and its ROI is declared `full-frame` rather than a tight
-%-diag padding, since a
-fixed pixel offset cannot be bounded as a percentage of the diagonal across every comp
-resolution ahead of time. Category is **Distortion**, matching RGB split. No explicit Amount-0
-short circuit is needed in either the CPU reference or the WGSL kernel: the radial offset's
-scale factor is an exact `0.0` at Amount 0, so every tap already collapses onto its own pixel
-— the same un-guarded style RGB split's own kernel uses (asserted bit-exact by test).
+single-purpose, one-click version: drop it on and it already looks right (§1.2), the same
+shape rule that split the old Grade into Colour balance and Saturation (K-090). Because it has
+no Angle to share a currency with, Amount is authored in raw px@comp (§2.3) instead of % diag —
+scaled by the preview factor exactly like Block glitch's Block size (§3.12) — and its ROI is
+declared `full-frame` rather than a tight %-diag padding, since a fixed pixel offset cannot be
+bounded as a percentage of the diagonal across every comp resolution ahead of time. Category
+is **Distortion**, matching RGB split. No explicit Amount-0 short circuit is needed in either
+the CPU reference or the WGSL kernel: the radial offset's scale factor is an exact `0.0` at
+Amount 0, so every tap collapses onto its own pixel and the tinted sum returns the input for
+the primary defaults — the same un-guarded style RGB split's own kernel uses (asserted
+bit-exact by test).
 
 ### 3.16 Exposure
 

@@ -1588,6 +1588,58 @@ docs' "raw source pixels" framing; if the owner prefers behaviour-preserving mig
 The v1 temporal boundary is unchanged (echo/flow on the source still degrade to a still). Built
 in an isolated worktree; not pushed — another agent may also claim K-142, renumber on merge if so.
 
+**K-143 · DECIDED · A reusable three-colour channel picker, and RGB split gains per-channel
+amounts.** From the owner (2026-07-19), the P2 + FX-9 channel-split work.
+- **The three-colour channel picker (P2).** A small reusable inspector widget shows three
+  colour swatches (defaults red / green / blue), each opening the colour picker, for effects
+  that split a picture into three tinted channels. It is convention-driven: any effect whose
+  schema declares three `ParamKind::Colour` parameters named `channel_colour_1`,
+  `channel_colour_2`, `channel_colour_3` renders them as one compact swatch row instead of
+  three separate colour rows — the widget (`shell::inspector::channel_picker`) finds the group
+  by those ids, so a future three-tinted-channel effect adopts it with no new UI code. The three
+  colours are ordinary scene-linear Colour parameters, so they serialise and animate through the
+  existing model unchanged. First adopter: Chromatic aberration (K-144).
+- **RGB split per-channel amounts (FX-9).** RGB split (§3.6) gains three per-cent scales —
+  **Red** / **Green** / **Blue** (defaults 100 / 0 / 100, hard-open both sides per K-135) — that
+  multiply the overall Amount per channel: R and G displace along −offset, B along +offset, so
+  the defaults reproduce the classic split bit-for-bit while letting R and B fringe by different
+  amounts (or G leave its anchor). They apply to the classic (non-Wavelength) mode only.
+- Build: `Resolved::RgbSplit` gains a `scale: [f32; 3]`; the CPU reference
+  (`cpu::rgb_split`), the `fx_rgbsplit.wgsl` kernel and the `RgbSplitOp` carry it, and green
+  is now read through the same `bilinear` sampler as R and B (at scale 0 it lands exactly on
+  its own pixel, so the classic look is byte-identical). CPU/GPU parity and the
+  `wgsl_rgb_split_matches_the_cpu_oracle` test hold (K-031). Built in an isolated worktree; not
+  pushed — another agent may also claim K-143, renumber on merge if so.
+
+**K-144 · DECIDED · Chromatic aberration adopts the channel picker and RGB split's Wavelength
+machinery; the spectral dispersion becomes a user-controlled variable-sample count.** From the
+owner (2026-07-19), the FX-10 + FX-9 spectral work.
+- **Chromatic aberration (§3.15)** becomes three tinted radial taps at offset fractions −1 / 0 /
+  +1, each sampled and multiplied component-wise by one of the K-143 channel colours and summed.
+  Defaults red / green / blue keep only their own channel, reproducing the historical
+  R-outward / B-inward / G-anchor split bit-for-bit; the three colours are edited through the
+  reusable picker (K-143). It also gains a **Wavelength** Bool + **Samples** control that reuse
+  §3.6 RGB split's own spectral machinery — turning Wavelength on resolves the effect to a radial
+  `SpectralSplit`, so no second dispersion kernel exists. The channel colours apply to the
+  non-Wavelength mode only.
+- **Variable-sample spectral dispersion (FX-9/FX-10).** The Wavelength mode of both RGB split and
+  Chromatic aberration carries a **Samples** count (`3..=64`, default 16, replacing the fixed nine
+  taps). More taps fill the same `±offset` span more densely, so a large offset disperses as a
+  smooth rainbow instead of a few discrete stacked copies. The taps — each a column-normalised RGB
+  weight plus its offset fraction — are resampled from the nine `SPECTRAL_BASIS` anchors host-side
+  (`fx::spectral_taps` / `spectral_basis_uniform`) and shared by the CPU reference and the WGSL
+  kernel (which reads each tap's offset fraction from the vec4 `w` lane), so a uniform image still
+  passes through unchanged and preview equals export (K-031). The floor is 3, not 2, because two
+  taps (the red and blue ends alone) carry no green weight. Legacy Wavelength instances saved
+  before the control existed read the default 16, a denser look than the old nine.
+- Build: `Resolved::SpectralSplit` gains a `samples: i32` (staying `Copy`; the taps are rebuilt
+  from it on both paths); `Resolved::ChromaticAberration` gains `tints: [[f32; 3]; 3]`. The
+  `SpectralSplitOp`/`fx_spectral.wgsl` uniform carries a fixed 64-entry tap array plus a `count`;
+  `ChromaticAberrationOp`/`fx_chromatic.wgsl` carries the three tints. Full 4-site + oracle
+  (`wgsl_spectral_split_matches_the_cpu_oracle`, `wgsl_chromatic_aberration_matches_the_cpu_oracle`,
+  cheap class, ≤ 2 fp16 ULP). Built in an isolated worktree; not pushed — another agent may also
+  claim K-144, renumber on merge if so.
+
 **K-145 · DECIDED · Two reusable effect-UI primitives: a shared Edges mode enum (P3) and
 schema-driven collapsible parameter groups (P4).** Factored out so effects stop re-deciding
 two recurring shapes:

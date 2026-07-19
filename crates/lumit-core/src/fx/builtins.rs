@@ -314,11 +314,13 @@ pub const BUILTINS: &[EffectSchema] = &[
     },
     // Chromatic aberration (docs/08 §3.6): R and B sample offset positions,
     // G stays put, alpha follows the green channel so mattes never fringe.
-    // Operates premultiplied. The Wavelength Bool (K-090 quality tier)
-    // swaps the three-channel split for a nine-sample spectral dispersion
-    // sharing the same parameters. The §3.6 Centre/Falloff/channel-blur
-    // extras land later; radial mode grows the offset from the frame
-    // centre.
+    // Operates premultiplied. Per-channel scales (FX-9) let each channel
+    // fringe by its own amount. The Wavelength Bool (K-090 quality tier)
+    // swaps the three-channel split for a `samples`-tap spectral dispersion
+    // (FX-9/K-144: enough taps that a large offset disperses smoothly
+    // rather than showing a few discrete copies) sharing the same offset.
+    // The §3.6 Centre/Falloff/channel-blur extras land later; radial mode
+    // grows the offset from the frame centre.
     EffectSchema {
         groups: &[],
         match_name: "rgb_split",
@@ -362,16 +364,66 @@ pub const BUILTINS: &[EffectSchema] = &[
                 // like lens fringing.
                 kind: ParamKind::Bool { default: false },
             },
+            // Per-channel displacement scales (FX-9): each channel's shift is
+            // the overall Amount times its own per-cent scale, so R and B can
+            // fringe by different amounts (or G can be nudged off its anchor).
+            // R and G displace along −offset, B along +offset — so the defaults
+            // 100 / 0 / 100 % reproduce the classic split (R one way, B the
+            // other, G unmoved) bit-for-bit. Open both sides (K-135): a
+            // negative scale flips a channel's direction, and there is no
+            // natural ceiling on how far a channel may fringe.
+            ParamSchema {
+                id: "red_amount",
+                label: "Red",
+                kind: ParamKind::Float {
+                    default: 100.0,
+                    slider: (-200.0, 200.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "green_amount",
+                label: "Green",
+                kind: ParamKind::Float {
+                    default: 0.0,
+                    slider: (-200.0, 200.0),
+                    hard: (None, None),
+                },
+            },
+            ParamSchema {
+                id: "blue_amount",
+                label: "Blue",
+                kind: ParamKind::Float {
+                    default: 100.0,
+                    slider: (-200.0, 200.0),
+                    hard: (None, None),
+                },
+            },
             ParamSchema {
                 id: "wavelength",
                 label: "Wavelength",
                 // K-090 quality tier: off = the classic three-channel
                 // split (byte-identical to before this Bool existed); on =
-                // wavelength-based dispersion — nine spectral samples along
-                // the same offset, weighted by SPECTRAL_BASIS and
-                // recombined in linear, for the higher-quality rainbow
-                // fringe. All other parameters are shared between modes.
+                // wavelength-based dispersion — `samples` spectral taps along
+                // the same offset, weighted by the resampled SPECTRAL_BASIS
+                // and recombined in linear, for the higher-quality rainbow
+                // fringe. All other parameters are shared between modes; the
+                // per-channel scales above apply to the classic mode only.
                 kind: ParamKind::Bool { default: false },
+            },
+            ParamSchema {
+                id: "samples",
+                label: "Samples",
+                // Wavelength mode's tap count (FX-9/K-144): more taps fill the
+                // same ±offset span more densely, so a large offset disperses
+                // as a smooth rainbow rather than a few discrete stacked
+                // copies. The resolver rounds and clamps to 3..=64
+                // (SPECTRAL_MAX_SAMPLES); ignored in the classic mode.
+                kind: ParamKind::Float {
+                    default: 16.0,
+                    slider: (3.0, 64.0),
+                    hard: (Some(3.0), Some(64.0)),
+                },
             },
             MIX_PARAM,
         ],
@@ -385,7 +437,9 @@ pub const BUILTINS: &[EffectSchema] = &[
     // authored in raw px@comp (§2.3) instead — scaled by the preview factor
     // exactly like Glitch's Block size — because "how many pixels of
     // fringe" is the honest unit for a single-purpose corner effect with no
-    // angle to share a currency with.
+    // angle to share a currency with. K-143/K-144 add the reusable
+    // three-colour channel picker (the three radial taps' tints, default
+    // r/g/b) and RGB split's own Wavelength/Samples spectral machinery.
     EffectSchema {
         groups: &[],
         match_name: "chromatic_aberration",
@@ -409,11 +463,65 @@ pub const BUILTINS: &[EffectSchema] = &[
                 id: "amount",
                 label: "Amount",
                 // px@comp (§2.3): peak channel offset, reached at the
-                // corner distance from the frame centre.
+                // corner distance from the frame centre. Open above (K-135):
+                // there is no natural ceiling on how much fringe an editor
+                // may want.
                 kind: ParamKind::Float {
                     default: 4.0,
                     slider: (0.0, 20.0),
-                    hard: (Some(0.0), Some(100.0)),
+                    hard: (Some(0.0), None),
+                },
+            },
+            // The three channel colours (P2/K-143): the reusable three-colour
+            // picker tints the three radial taps. Defaults red / green / blue
+            // reproduce the classic R-outward / B-inward / G-anchor split
+            // bit-for-bit (each primary tint keeps only its own channel).
+            // Named `channel_colour_1/2/3` by convention so the picker widget
+            // finds the group; any future three-tinted-channel effect reuses it.
+            ParamSchema {
+                id: "channel_colour_1",
+                label: "Colour 1",
+                kind: ParamKind::Colour {
+                    default: [1.0, 0.0, 0.0, 1.0],
+                    range: (0.0, 1.0),
+                },
+            },
+            ParamSchema {
+                id: "channel_colour_2",
+                label: "Colour 2",
+                kind: ParamKind::Colour {
+                    default: [0.0, 1.0, 0.0, 1.0],
+                    range: (0.0, 1.0),
+                },
+            },
+            ParamSchema {
+                id: "channel_colour_3",
+                label: "Colour 3",
+                kind: ParamKind::Colour {
+                    default: [0.0, 0.0, 1.0, 1.0],
+                    range: (0.0, 1.0),
+                },
+            },
+            ParamSchema {
+                id: "wavelength",
+                label: "Wavelength",
+                // K-144 quality tier, reusing RGB split's own spectral
+                // machinery (K-090): off = the three tinted radial taps above;
+                // on = `samples` spectral taps for a smooth rainbow fringe. Off
+                // (and absent on projects saved before this Bool) keeps the
+                // historical three-channel behaviour.
+                kind: ParamKind::Bool { default: false },
+            },
+            ParamSchema {
+                id: "samples",
+                label: "Samples",
+                // Wavelength mode's tap count (K-144): the same control RGB
+                // split's Wavelength mode carries. Rounded and clamped to
+                // 3..=64; ignored when Wavelength is off.
+                kind: ParamKind::Float {
+                    default: 16.0,
+                    slider: (3.0, 64.0),
+                    hard: (Some(3.0), Some(64.0)),
                 },
             },
             MIX_PARAM,

@@ -1,12 +1,17 @@
 // Chromatic aberration (docs/08-EFFECTS.md §3.15). Mirrors
 // lumit_core::fx::cpu::chromatic_aberration op-for-op (§1.6: the CPU is the
 // oracle): a dedicated, always-radial sibling of RGB split's own Radial
-// mode (fx_rgbsplit.wgsl) — R pulled outward, B pulled inward, G and alpha
-// stay put, growing from the frame centre. No explicit Amount-0 short
-// circuit is needed: `k` is an exact `0.0` at Amount 0, so every tap lands
-// on its own pixel — the same un-guarded style fx_rgbsplit.wgsl uses.
+// mode (fx_rgbsplit.wgsl) — three radial taps at fractions −1 / 0 / +1,
+// each sampled and multiplied component-wise by its tint colour (P2/K-143)
+// and summed, growing from the frame centre. Default tints red / green /
+// blue keep only their own channel (R reads outward, B inward, G on its own
+// pixel), reproducing the classic split; alpha stays put. No explicit
+// Amount-0 short circuit is needed: `k` is an exact `0.0` at Amount 0, so
+// every tap lands on its own pixel — the same un-guarded style
+// fx_rgbsplit.wgsl uses.
 
 struct Params {
+    tints: array<vec4<f32>, 3>,  // per tap: rgb tint, w unused
     amount: f32,   // raster px: peak offset, reached at the corner distance
     mix_amt: f32,  // 0..1, blended against the unprocessed input
     _pad0: f32,
@@ -55,8 +60,14 @@ fn chromatic_aberration(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = p.amount / (0.5 * diag);
     let pos = vec2<f32>(xy) + vec2<f32>(0.5);
     let off = (pos - fsize * 0.5) * k;
-    let r = bilinear(pos.x - off.x, pos.y - off.y, size).r;
-    let b = bilinear(pos.x + off.x, pos.y + off.y, size).b;
-    let split = vec4<f32>(r, o.g, b, o.a);
+    // Three tinted taps at fractions −1 / 0 / +1 (== cpu::chromatic_aberration;
+    // f32(i) − 1 is exactly −1 / 0 / +1, so no lookup table is needed).
+    var acc = vec3<f32>(0.0);
+    for (var i = 0; i < 3; i++) {
+        let t = f32(i) - 1.0;
+        let s = bilinear(pos.x + t * off.x, pos.y + t * off.y, size);
+        acc = acc + p.tints[i].rgb * s.rgb;
+    }
+    let split = vec4<f32>(acc, o.a);
     textureStore(dst, xy, mix(o, split, p.mix_amt));
 }

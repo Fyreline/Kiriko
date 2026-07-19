@@ -8,6 +8,7 @@
 
 use super::*;
 
+mod channel_picker;
 mod controls;
 mod effect_rows;
 mod keyframe_nav;
@@ -15,6 +16,7 @@ mod lane;
 mod speed_rows;
 mod transform_rows;
 
+pub(crate) use channel_picker::*;
 pub(crate) use controls::*;
 pub(crate) use effect_rows::*;
 pub(crate) use keyframe_nav::*;

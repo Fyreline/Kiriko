@@ -104,12 +104,17 @@ pub enum Resolved {
         angle_deg: f32,
         /// True: offsets grow from the frame centre instead.
         radial: bool,
+        /// Per-channel displacement scale (FX-9), `[r, g, b]`: each channel
+        /// shifts by `amount_px · scale[c]` — R and G along −offset, B along
+        /// +offset. `[1, 0, 1]` is the classic split (the neutral default).
+        scale: [f32; 3],
         /// 0..1.
         mix: f32,
     },
     /// The RGB split's Wavelength mode (docs/08 §3.6, K-090): its own
     /// variant, exactly as Blur's Directional mode is — so the classic
-    /// mode's path stays byte-identical.
+    /// mode's path stays byte-identical. Chromatic aberration's own
+    /// Wavelength mode (K-144) reuses this variant with `radial: true`.
     SpectralSplit {
         /// Peak spectral offset in raster pixels.
         amount_px: f32,
@@ -117,6 +122,11 @@ pub enum Resolved {
         angle_deg: f32,
         /// True: offsets grow from the frame centre instead.
         radial: bool,
+        /// The number of spectral taps (FX-9/K-144), clamped 3..=64. The taps
+        /// (weight + offset fraction) are rebuilt from this by
+        /// [`super::spectral_taps`] on both the CPU and GPU paths, so the enum
+        /// stays `Copy` and both consume identical numbers.
+        samples: i32,
         /// 0..1.
         mix: f32,
     },
@@ -127,6 +137,11 @@ pub enum Resolved {
         /// Peak channel offset in raster pixels, reached at the corner
         /// distance from the frame centre.
         amount_px: f32,
+        /// The three radial taps' tints (P2/K-143), `[[r,g,b]; 3]` at
+        /// fractions −1 / 0 / +1. Defaults red / green / blue reproduce the
+        /// classic R-outward / B-inward / G-anchor split bit-for-bit (each
+        /// tint keeps only its own channel of its tap).
+        tints: [[f32; 3]; 3],
         /// 0..1.
         mix: f32,
     },
@@ -599,17 +614,31 @@ fn resolve_one(
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
             let amount_px = (amount_pct / 100.0 * diag_px).max(0.0);
             Some(if wavelength {
+                // Wavelength mode ignores the per-channel scales; its tap
+                // count is the Samples parameter (absent on pre-feature
+                // projects → the default 16, denser than the historical 9).
+                let samples = e.float_at("samples", lt).unwrap_or(16.0).round() as i32;
                 Resolved::SpectralSplit {
                     amount_px,
                     angle_deg,
                     radial,
+                    samples,
                     mix,
                 }
             } else {
+                // Per-channel scales (FX-9): per cent → factor. Absent on
+                // pre-feature projects → the classic 1 / 0 / 1 defaults.
+                let scale =
+                    |id: &str, default: f64| (e.float_at(id, lt).unwrap_or(default) / 100.0) as f32;
                 Resolved::RgbSplit {
                     amount_px,
                     angle_deg,
                     radial,
+                    scale: [
+                        scale("red_amount", 100.0),
+                        scale("green_amount", 0.0),
+                        scale("blue_amount", 100.0),
+                    ],
                     mix,
                 }
             })
@@ -617,7 +646,37 @@ fn resolve_one(
         "chromatic_aberration" => {
             let amount_px = (e.float_at("amount", lt).unwrap_or(4.0) as f32 * px_scale).max(0.0);
             let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-            Some(Resolved::ChromaticAberration { amount_px, mix })
+            // Wavelength mode (K-144) reuses RGB split's spectral machinery as
+            // a radial spectral split; off (and absent on pre-feature
+            // projects) keeps the three tinted radial taps.
+            let wavelength = matches!(e.param("wavelength"), Some(EffectValue::Bool(true)));
+            Some(if wavelength {
+                let samples = e.float_at("samples", lt).unwrap_or(16.0).round() as i32;
+                Resolved::SpectralSplit {
+                    amount_px,
+                    angle_deg: 0.0,
+                    radial: true,
+                    samples,
+                    mix,
+                }
+            } else {
+                // The three channel colours (P2/K-143): absent on pre-feature
+                // projects → the classic red / green / blue, which reproduce
+                // the historical R-outward / B-inward / G-anchor split.
+                let tint = |id: &str, default: [f64; 4]| -> [f32; 3] {
+                    let c = e.colour_at(id, lt).unwrap_or(default);
+                    [c[0] as f32, c[1] as f32, c[2] as f32]
+                };
+                Resolved::ChromaticAberration {
+                    amount_px,
+                    tints: [
+                        tint("channel_colour_1", [1.0, 0.0, 0.0, 1.0]),
+                        tint("channel_colour_2", [0.0, 1.0, 0.0, 1.0]),
+                        tint("channel_colour_3", [0.0, 0.0, 1.0, 1.0]),
+                    ],
+                    mix,
+                }
+            })
         }
         "flash" => {
             // Instances saved before the marker modes existed carry no
