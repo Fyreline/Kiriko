@@ -163,12 +163,39 @@ pub(crate) fn motion_blur_samples(
 
 /// Build a comp's draw list recursively (preview side of Precomp layers).
 /// Bottom-up order; matte sources come from decoded pixels (precomp mattes
-/// await the GPU mask pass, mirroring export).
+/// await the GPU mask pass, mirroring export). The ordinary render entry: draws
+/// at comp time `t_comp` with every effect resolved at `t_comp` too — a thin
+/// wrapper over [`build_comp_draws_at`] with the sample and frame times equal.
 #[cfg(feature = "media")]
 pub(crate) fn build_comp_draws(
     doc: &lumit_core::model::Document,
     comp: &lumit_core::model::Composition,
     t_comp: f64,
+    pixels_by_layer: &std::collections::HashMap<
+        uuid::Uuid,
+        &crate::app_state::preview::CompLayerPixels,
+    >,
+    visited: &mut Vec<uuid::Uuid>,
+) -> Vec<CompLayerDraw> {
+    build_comp_draws_at(doc, comp, t_comp, t_comp, pixels_by_layer, visited)
+}
+
+/// Build a comp's draw list at sample comp time `t_comp`, resolving each layer's
+/// effects at `t_comp` **except** those flagged `sample_temporally == false`,
+/// which resolve at the true frame time `frame_t` instead (docs/impl/
+/// temporal-rerender.md §5). For an ordinary render `frame_t == t_comp`, so the
+/// two times coincide and nothing changes; only a held/sub-frame temporal
+/// re-render (Posterize time, accumulation motion blur) passes a `frame_t` that
+/// differs, letting a costly/stochastic effect stay pinned to the playhead while
+/// the rest of the scene is sampled. `frame_t` threads through nested Precomps
+/// (each layer's own `start_offset` subtracted) so the flag is honoured at every
+/// depth.
+#[cfg(feature = "media")]
+pub(crate) fn build_comp_draws_at(
+    doc: &lumit_core::model::Document,
+    comp: &lumit_core::model::Composition,
+    t_comp: f64,
+    frame_t: f64,
     pixels_by_layer: &std::collections::HashMap<
         uuid::Uuid,
         &crate::app_state::preview::CompLayerPixels,
@@ -314,6 +341,22 @@ pub(crate) fn build_comp_draws(
             continue;
         }
         let lt = t_comp - layer.start_offset.0.to_f64();
+        // The true frame time in this layer's own time base, for effects a
+        // held/sub-frame re-render must not re-sample (docs/impl/
+        // temporal-rerender.md §5). Equal to `lt` on an ordinary render.
+        let frame_lt = frame_t - layer.start_offset.0.to_f64();
+        // This layer's effects (docs/08 §3.25): a Posterize time scoped to *this
+        // layer* holds this layer's OWN effect stack on the coarse grid — its
+        // effects sample the held time while the transform and source below stay
+        // live. Fed to resolve_stack_temporal as the *sample* time, so a
+        // sample_temporally == false effect still holds at the true playhead
+        // (§5); equal to `lt` when the stack has no this-layer Posterize.
+        let effect_lt = lumit_core::fx::this_layer_effect_time(
+            &layer.effects,
+            layer.switches.fx,
+            lt,
+            layer.start_offset.0.to_f64(),
+        );
         let tr = &layer.transform;
 
         let (source, natural) = match &layer.kind {
@@ -333,7 +376,8 @@ pub(crate) fn build_comp_draws(
                     lumit_core::model::CollapseState::Active
                 ) {
                     visited.push(*nested_id);
-                    let mut inner = build_comp_draws(doc, nested, lt, pixels_by_layer, visited);
+                    let mut inner =
+                        build_comp_draws_at(doc, nested, lt, frame_lt, pixels_by_layer, visited);
                     visited.pop();
                     let own = lumit_gpu::place_matrix(
                         (
@@ -380,13 +424,17 @@ pub(crate) fn build_comp_draws(
                         // the parent would mis-size the re-render. Clear it — the
                         // effect degrades to a no-op here, a documented boundary;
                         // a non-collapsed Precomp posterises on its own path.
+                        // Accumulation motion blur (§3.26) takes the same boundary
+                        // for the same sizing reason.
                         d.temporal_below = None;
+                        d.accumulation_below = None;
                     }
                     draws.extend(inner);
                     continue;
                 }
                 visited.push(*nested_id);
-                let nested_draws = build_comp_draws(doc, nested, lt, pixels_by_layer, visited);
+                let nested_draws =
+                    build_comp_draws_at(doc, nested, lt, frame_lt, pixels_by_layer, visited);
                 visited.pop();
                 let nbg = nested.background.0;
                 (
@@ -413,9 +461,18 @@ pub(crate) fn build_comp_draws(
                 let comp_diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
                 let fx = if layer.switches.fx {
                     // The §1.4 marker context, built by the same shared
-                    // constructor export uses (K-031).
+                    // constructor export uses (K-031). Effects flagged
+                    // sample_temporally == false resolve at the frame time in a
+                    // held re-render (§5); equal to `lt` on an ordinary render.
                     let markers = lumit_core::fx::MarkerContext::for_layer(comp, layer);
-                    lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0, &markers)
+                    lumit_core::fx::resolve_stack_temporal(
+                        &layer.effects,
+                        effect_lt,
+                        frame_lt,
+                        comp_diag,
+                        1.0,
+                        &markers,
+                    )
                 } else {
                     Vec::new()
                 };
@@ -423,10 +480,33 @@ pub(crate) fn build_comp_draws(
                 // stack re-rendered at the held time, built by the shared
                 // `below_draws_at` export also drives (K-031). A Posterize Time
                 // effect has no Resolved op, so this — not `fx` — is what makes
-                // such an adjustment live.
-                let temporal_below =
-                    posterize_below(doc, comp, layer, idx, t_comp, pixels_by_layer, visited);
-                if fx.is_empty() && temporal_below.is_none() {
+                // such an adjustment live. `frame_t` carries the playhead through
+                // so the held below honours sample_temporally too (§5).
+                let temporal_below = posterize_below(
+                    doc,
+                    comp,
+                    layer,
+                    idx,
+                    t_comp,
+                    frame_t,
+                    pixels_by_layer,
+                    visited,
+                );
+                // Accumulation motion blur everything-below (docs/08 §3.26): N
+                // sub-frame below-stacks realise averages, standing in for the
+                // plain below-composite. Like Posterize it resolves to no op, so
+                // this — not `fx` — is what keeps such an adjustment live.
+                let accumulation_below = accumulation_mb_below(
+                    doc,
+                    comp,
+                    layer,
+                    idx,
+                    t_comp,
+                    frame_t,
+                    pixels_by_layer,
+                    visited,
+                );
+                if fx.is_empty() && temporal_below.is_none() && accumulation_below.is_none() {
                     continue;
                 }
                 draws.push(CompLayerDraw {
@@ -484,6 +564,7 @@ pub(crate) fn build_comp_draws(
                     // motion blur has no image of its own to smear (docs/06 §4).
                     mb: Vec::new(),
                     temporal_below,
+                    accumulation_below,
                 });
                 continue;
             }
@@ -575,11 +656,15 @@ pub(crate) fn build_comp_draws(
                 // scale doubles as the §2.3 preview-resolution factor:
                 // raster pixels per comp pixel for px@comp parameters. The
                 // §1.4 marker context comes from the same shared
-                // constructor export uses (K-031).
+                // constructor export uses (K-031). In a held/sub-frame temporal
+                // re-render, an effect flagged sample_temporally == false stays
+                // at the frame time `frame_lt` (§5); on an ordinary render
+                // `frame_lt == lt`, so this is the plain resolve.
                 let markers = lumit_core::fx::MarkerContext::for_layer(comp, layer);
-                lumit_core::fx::resolve_stack(
+                lumit_core::fx::resolve_stack_temporal(
                     &layer.effects,
-                    lt,
+                    effect_lt,
+                    frame_lt,
                     comp_diag * scale,
                     scale,
                     &markers,
@@ -663,8 +748,9 @@ pub(crate) fn build_comp_draws(
             // Built the same way export does, so the two smear identically.
             mb: motion_blur_samples(comp, layer, t_comp),
             // Ordinary layers never carry a temporal re-render — that is an
-            // adjustment-only capability in v1 (docs/08 §3.25).
+            // adjustment-only capability in v1 (docs/08 §3.25, §3.26).
             temporal_below: None,
+            accumulation_below: None,
         });
     }
     draws
@@ -708,20 +794,27 @@ fn lut_files(effects: &[lumit_core::model::EffectInstance], lt: f64) -> Vec<Opti
 /// frame-time decode and export carries no neighbour decode for it. A
 /// documented v1 boundary (docs/08 §3.25), matching the after-effects matte's
 /// own temporal boundary (K-125).
+///
+/// `frame_t` is the true playhead, threaded so an effect in the below-stack
+/// flagged `sample_temporally == false` holds at the frame time rather than
+/// `tau` (docs/impl/temporal-rerender.md §5); for a plain re-render at the same
+/// time the caller passes `frame_t == tau`.
 #[cfg(feature = "media")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_below_at(
     realiser: &Realiser,
     doc: &lumit_core::model::Document,
     comp: &lumit_core::model::Composition,
     below: &[lumit_core::model::Layer],
     tau: f64,
+    frame_t: f64,
     pixels_by_layer: &std::collections::HashMap<
         uuid::Uuid,
         &crate::app_state::preview::CompLayerPixels,
     >,
     visited: &mut Vec<uuid::Uuid>,
 ) -> egui_wgpu::wgpu::Texture {
-    let (draws, camera) = below_draws_at(doc, comp, below, tau, pixels_by_layer, visited);
+    let (draws, camera) = below_draws_at(doc, comp, below, tau, frame_t, pixels_by_layer, visited);
     let background = comp.background.0.map(f64::from);
     realiser.realise(camera, comp.width, comp.height, background, &draws)
 }
@@ -738,6 +831,7 @@ pub(crate) fn below_draws_at(
     comp: &lumit_core::model::Composition,
     below: &[lumit_core::model::Layer],
     tau: f64,
+    frame_t: f64,
     pixels_by_layer: &std::collections::HashMap<
         uuid::Uuid,
         &crate::app_state::preview::CompLayerPixels,
@@ -747,10 +841,12 @@ pub(crate) fn below_draws_at(
     // A below-only view of the comp: the same size, background, frame rate,
     // markers and camera, but only the layers beneath the adjustment. The
     // camera is read from the original comp at `tau` (a Camera layer inside
-    // `below` draws nothing itself).
+    // `below` draws nothing itself). `frame_t` is the true playhead, so an effect
+    // in the below-stack flagged sample_temporally == false holds at the frame
+    // time instead of the sample time `tau` (docs/impl/temporal-rerender.md §5).
     let mut below_comp = comp.clone();
     below_comp.layers = below.to_vec();
-    let mut draws = build_comp_draws(doc, &below_comp, tau, pixels_by_layer, visited);
+    let mut draws = build_comp_draws_at(doc, &below_comp, tau, frame_t, pixels_by_layer, visited);
     strip_temporal_inputs(&mut draws);
     (draws, comp.camera_pose(tau))
 }
@@ -764,12 +860,14 @@ pub(crate) fn below_draws_at(
 /// (`build_comp_draws`) and export, which detects the same effect in
 /// `render_comp_linear` and calls [`render_below_at`] directly.
 #[cfg(feature = "media")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn posterize_below(
     doc: &lumit_core::model::Document,
     comp: &lumit_core::model::Composition,
     layer: &lumit_core::model::Layer,
     idx: usize,
     t_comp: f64,
+    frame_t: f64,
     pixels_by_layer: &std::collections::HashMap<
         uuid::Uuid,
         &crate::app_state::preview::CompLayerPixels,
@@ -783,8 +881,55 @@ pub(crate) fn posterize_below(
     }
     let tau = lumit_core::fx::posterize_held_time(t_comp, p.rate, p.phase);
     let below = &comp.layers[idx + 1..];
-    let (draws, camera) = below_draws_at(doc, comp, below, tau, pixels_by_layer, visited);
+    let (draws, camera) = below_draws_at(doc, comp, below, tau, frame_t, pixels_by_layer, visited);
     Some(TemporalBelow { draws, camera })
+}
+
+/// The N sub-frame below-stacks for an accumulation motion blur adjustment
+/// (docs/08 §3.26, docs/impl/temporal-rerender.md §3), or None when `layer`
+/// carries no such effect (or its Samples < 2, which is no blur — the adjustment
+/// then falls back to the plain below-composite). `idx` is the layer's document
+/// index, so the below-set is `comp.layers[idx + 1..]`. Each sample time is
+/// `τ_k = t_comp + off_k·dt` with the offsets from [`lumit_core::fx::
+/// AccumulationMbParams::sample_offsets`] (the shared per-layer motion-blur
+/// shutter maths), and each below-stack is built by the same `below_draws_at`
+/// export drives, so preview equals export (K-031). `frame_t` threads the
+/// playhead so a sample_temporally == false effect in the below-stack still holds
+/// at the frame time (§5).
+#[cfg(feature = "media")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn accumulation_mb_below(
+    doc: &lumit_core::model::Document,
+    comp: &lumit_core::model::Composition,
+    layer: &lumit_core::model::Layer,
+    idx: usize,
+    t_comp: f64,
+    frame_t: f64,
+    pixels_by_layer: &std::collections::HashMap<
+        uuid::Uuid,
+        &crate::app_state::preview::CompLayerPixels,
+    >,
+    visited: &mut Vec<uuid::Uuid>,
+) -> Option<AccumulationBelow> {
+    let lt = t_comp - layer.start_offset.0.to_f64();
+    let p = lumit_core::fx::stack_accumulation_mb(&layer.effects, layer.switches.fx, lt)?;
+    let offsets = p.sample_offsets();
+    if offsets.is_empty() {
+        return None;
+    }
+    let dt = 1.0 / comp.frame_rate.fps().max(1.0);
+    let below = &comp.layers[idx + 1..];
+    let samples = offsets
+        .iter()
+        .map(|off| {
+            let tau = t_comp + off * dt;
+            below_draws_at(doc, comp, below, tau, frame_t, pixels_by_layer, visited)
+        })
+        .collect();
+    Some(AccumulationBelow {
+        samples,
+        mix: p.mix as f32,
+    })
 }
 
 /// Drop the neighbour frames and flow field a temporal effect reads, recursing
@@ -984,7 +1129,7 @@ mod render_below_at_tests {
         // Re-render the whole stack (every layer counts as "below") at the same
         // time through the shared helper.
         let mut v2 = vec![comp.id];
-        let below = render_below_at(&realiser, &doc, &comp, &comp.layers, t, &pixels, &mut v2);
+        let below = render_below_at(&realiser, &doc, &comp, &comp.layers, t, t, &pixels, &mut v2);
         let below_bytes = engine
             .readback8(&ctx, &engine.display(&ctx, &below))
             .unwrap();
@@ -1090,6 +1235,153 @@ mod render_below_at_tests {
         );
     }
 
+    // docs/impl/temporal-rerender.md §5: an effect in the held below-stack flagged
+    // sample_temporally == false stays pinned to the frame time while the scene's
+    // transforms sample the held time. The text below carries a blur whose radius
+    // ramps 0%→100% over a second and opts out of sampling; under a 10 fps
+    // posterise at t = 0.35 (held tau = 0.3) its transform holds at x = 30 but its
+    // blur resolves at the frame time 0.35 (35% of the diagonal), not 0.3.
+    #[test]
+    fn a_non_sampling_below_effect_holds_at_the_frame_time_not_the_grid() {
+        let mut text = text_layer(0.0);
+        text.transform.position_x = ramp(0.0, 100.0); // x = 100·t
+        let mut blur = lumit_core::fx::instantiate("blur").unwrap();
+        blur.sample_temporally = false;
+        for p in &mut blur.params {
+            if p.id == "radius" {
+                p.value = lumit_core::model::EffectValue::Float(ramp(0.0, 100.0));
+                // radius% = 100·t
+            }
+        }
+        text.effects = vec![blur];
+        let comp = Composition {
+            id: Uuid::now_v7(),
+            name: "c".into(),
+            width: 320,
+            height: 180,
+            frame_rate: FrameRate::new(30, 1).unwrap(),
+            duration: Duration(Rational::new(10, 1).unwrap()),
+            background: LinearColour([0.1, 0.1, 0.1, 1.0]),
+            work_area: None,
+            layers: vec![posterize_adjustment(10.0), text],
+            markers: Vec::new(),
+            motion_blur: Default::default(),
+            extra: serde_json::Map::new(),
+        };
+        let doc = Document::new();
+        let pixels: HashMap<Uuid, &crate::app_state::preview::CompLayerPixels> = HashMap::new();
+        let mut visited = vec![comp.id];
+        let draws = build_comp_draws(&doc, &comp, 0.35, &pixels, &mut visited);
+        let adj = draws
+            .iter()
+            .find(|d| matches!(d.source, DrawSource::Adjust))
+            .expect("the posterize adjustment emits a staging draw");
+        let tb = adj
+            .temporal_below
+            .as_ref()
+            .expect("an everything-below posterize carries a held below-stack");
+        assert_eq!(tb.draws.len(), 1, "the one text layer below is held");
+        // The transform samples the held time (x = 30).
+        assert!(
+            (tb.draws[0].position.0 - 30.0).abs() < 0.01,
+            "transform held at tau = 0.3; got {}",
+            tb.draws[0].position.0
+        );
+        // The blur, opting out, resolves at the frame time 0.35 (35% of diag).
+        let diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
+        let radius = match tb.draws[0].fx.first() {
+            Some(lumit_core::fx::Resolved::Blur { radius_px, .. }) => *radius_px,
+            other => panic!("expected a blur op, got {other:?}"),
+        };
+        assert!(
+            (radius - 0.35 * diag).abs() < 0.5,
+            "blur must hold at the frame time 0.35 ({}), got {radius}",
+            0.35 * diag
+        );
+        assert!(
+            (radius - 0.30 * diag).abs() > 5.0,
+            "blur must NOT sample the held time 0.30; got {radius}"
+        );
+    }
+
+    // docs/08 §3.25: a Posterize time scoped to *This layer's effects* holds only
+    // the layer's OWN effect stack on the coarse grid — no re-render of others,
+    // no adjustment (no orchestration re-entry). The text carries a blur (radius
+    // ramps 0%→100% over a second) and a 10 fps this-layer Posterize; at t = 0.35
+    // its transform stays live (x = 35) while the blur resolves at the held time
+    // 0.3 (30% of the diagonal), not 0.35. GPU-free structural check.
+    #[test]
+    fn this_layer_posterize_holds_the_layers_own_effects_but_not_its_transform() {
+        let mut text = text_layer(0.0);
+        text.transform.position_x = ramp(0.0, 100.0); // x = 100·t (stays live)
+        let mut blur = lumit_core::fx::instantiate("blur").unwrap();
+        for p in &mut blur.params {
+            if p.id == "radius" {
+                p.value = lumit_core::model::EffectValue::Float(ramp(0.0, 100.0));
+                // % = 100·t
+            }
+        }
+        let mut post = lumit_core::fx::instantiate("posterize_time").unwrap();
+        for p in &mut post.params {
+            match p.id.as_str() {
+                "rate" => p.value = lumit_core::model::EffectValue::Float(Property::fixed(10.0)),
+                // 1 = This layer's effects.
+                "scope" => p.value = lumit_core::model::EffectValue::Choice(1),
+                _ => {}
+            }
+        }
+        text.effects = vec![blur, post];
+        let comp = Composition {
+            id: Uuid::now_v7(),
+            name: "c".into(),
+            width: 320,
+            height: 180,
+            frame_rate: FrameRate::new(30, 1).unwrap(),
+            duration: Duration(Rational::new(10, 1).unwrap()),
+            background: LinearColour([0.1, 0.1, 0.1, 1.0]),
+            work_area: None,
+            layers: vec![text],
+            markers: Vec::new(),
+            motion_blur: Default::default(),
+            extra: serde_json::Map::new(),
+        };
+        let doc = Document::new();
+        let pixels: HashMap<Uuid, &crate::app_state::preview::CompLayerPixels> = HashMap::new();
+        let mut visited = vec![comp.id];
+        let draws = build_comp_draws(&doc, &comp, 0.35, &pixels, &mut visited);
+        let d = draws
+            .iter()
+            .find(|d| !matches!(d.source, DrawSource::Adjust))
+            .expect("the text layer draws");
+        // The transform stays at the playhead — only the effects are held.
+        assert!(
+            (d.position.0 - 35.0).abs() < 0.01,
+            "transform live at t = 0.35 (x = 35); got {}",
+            d.position.0
+        );
+        // The blur resolves at the held time 0.3 (30% of diag), not 0.35.
+        let diag = ((comp.width as f32).powi(2) + (comp.height as f32).powi(2)).sqrt();
+        let radius = match d.fx.first() {
+            Some(lumit_core::fx::Resolved::Blur { radius_px, .. }) => *radius_px,
+            other => panic!("expected a blur op, got {other:?}"),
+        };
+        assert!(
+            (radius - 0.30 * diag).abs() < 0.5,
+            "blur held at the grid time 0.3 ({}); got {radius}",
+            0.30 * diag
+        );
+        assert!(
+            (radius - 0.35 * diag).abs() > 5.0,
+            "blur must NOT resolve at the live time 0.35; got {radius}"
+        );
+        // The Posterize itself has no per-pixel op — only the blur survives.
+        assert_eq!(
+            d.fx.len(),
+            1,
+            "posterize resolves to nothing; only the blur"
+        );
+    }
+
     // docs/08 §3.25 + K-031: the whole preview Posterize path (detect → held
     // below → adjustment blend) must reduce, at full coverage, to a plain render
     // of the below-stack at the held time. So a posterised frame at t = 0.35
@@ -1129,7 +1421,9 @@ mod render_below_at_tests {
         // A plain render of the below-stack (just the text) at tau = 0.3.
         let below = &comp.layers[1..];
         let mut v2 = vec![comp.id];
-        let held = render_below_at(&realiser, &doc, &comp, below, 0.3, &pixels, &mut v2);
+        // frame_t = 0.35 matches what the posterise adjustment passes (its own
+        // frame time), so the two below-renders build the identical draws.
+        let held = render_below_at(&realiser, &doc, &comp, below, 0.3, 0.35, &pixels, &mut v2);
         let held_bytes = engine
             .readback8(&ctx, &engine.display(&ctx, &held))
             .unwrap();
@@ -1137,6 +1431,163 @@ mod render_below_at_tests {
         assert_eq!(
             posterised_bytes, held_bytes,
             "a full-coverage posterised frame must equal a plain render at the held time"
+        );
+    }
+
+    // An adjustment layer carrying an accumulation motion blur effect at the
+    // given sample count (defaults otherwise: 180° shutter centred on the frame).
+    fn accumulation_adjustment(samples: f64) -> Layer {
+        let mut e = lumit_core::fx::instantiate("accumulation_mb").unwrap();
+        for p in &mut e.params {
+            if p.id == "samples" {
+                p.value = lumit_core::model::EffectValue::Float(Property::fixed(samples));
+            }
+        }
+        Layer {
+            id: Uuid::now_v7(),
+            name: "accumulation".into(),
+            kind: LayerKind::Adjustment,
+            in_point: CompTime(Rational::ZERO),
+            out_point: CompTime(Rational::new(10, 1).unwrap()),
+            start_offset: CompTime(Rational::ZERO),
+            transform: TransformGroup::default(),
+            matte: None,
+            parent: None,
+            blend: Default::default(),
+            masks: Vec::new(),
+            effects: vec![e],
+            switches: Switches::default(),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    fn comp_with(fps: u32, layers: Vec<Layer>) -> Composition {
+        Composition {
+            id: Uuid::now_v7(),
+            name: "c".into(),
+            width: 320,
+            height: 180,
+            frame_rate: FrameRate::new(fps, 1).unwrap(),
+            duration: Duration(Rational::new(10, 1).unwrap()),
+            background: LinearColour([0.1, 0.1, 0.1, 1.0]),
+            work_area: None,
+            layers,
+            markers: Vec::new(),
+            motion_blur: Default::default(),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    // docs/08 §3.26: an accumulation motion blur adjustment carries N sub-frame
+    // below-stacks, one per shutter sample, centred on the frame. A moving text
+    // (x = 200·t) in a 2 fps comp (dt = 0.5 s) spreads visibly; at t = 0.5 the 4
+    // below-stacks straddle x = 100, their positions strictly increasing across
+    // the centred shutter. GPU-free structural check.
+    #[test]
+    fn accumulation_adjustment_holds_n_subframe_below_stacks_centred_on_the_frame() {
+        let mut text = text_layer(0.0);
+        text.transform.position_x = ramp(0.0, 200.0); // x = 200·t
+        let comp = comp_with(2, vec![accumulation_adjustment(4.0), text]);
+        let doc = Document::new();
+        let pixels: HashMap<Uuid, &crate::app_state::preview::CompLayerPixels> = HashMap::new();
+        let mut visited = vec![comp.id];
+        let draws = build_comp_draws(&doc, &comp, 0.5, &pixels, &mut visited);
+        let adj = draws
+            .iter()
+            .find(|d| matches!(d.source, DrawSource::Adjust))
+            .expect("the accumulation adjustment emits a staging draw");
+        let ab = adj
+            .accumulation_below
+            .as_ref()
+            .expect("an accumulation adjustment carries N sub-frame below-stacks");
+        assert_eq!(ab.samples.len(), 4, "one below-stack per shutter sample");
+        let xs: Vec<f32> = ab
+            .samples
+            .iter()
+            .map(|(draws, _)| draws[0].position.0)
+            .collect();
+        // Strictly increasing (the centred shutter sweeps forward in time).
+        assert!(
+            xs.windows(2).all(|w| w[0] < w[1]),
+            "sub-frame positions increase across the shutter: {xs:?}"
+        );
+        // Centred on the frame: the samples straddle x = 100 (the frame-time
+        // position at t = 0.5).
+        assert!(
+            xs[0] < 100.0 && *xs.last().unwrap() > 100.0,
+            "the shutter is centred on x = 100: {xs:?}"
+        );
+        assert!((ab.mix - 1.0).abs() < 1e-6, "full Mix by default");
+    }
+
+    // docs/08 §3.26 + K-031: a still scene averaged over N is bit-identical to the
+    // plain composite (the accumulation adjustment is a pure identity when nothing
+    // moves), while a moving scene smears — differs from the plain composite and
+    // covers a wider horizontal extent. The same combine drives the export path.
+    #[test]
+    fn accumulation_still_scene_is_identity_and_moving_scene_smears() {
+        let Ok(ctx) = lumit_gpu::GpuContext::headless() else {
+            return; // no GPU here — skip, as the gpu crate's own tests do
+        };
+        let engine = lumit_gpu::ColourEngine::new(&ctx);
+        let compositor = lumit_gpu::Compositor::new(&ctx);
+        let fx = lumit_gpu::fx::FxEngine::new(&ctx);
+        let lut_cache = std::cell::RefCell::new(HashMap::new());
+        let realiser = Realiser {
+            ctx: lumit_gpu::GpuContext::from_parts(ctx.device.clone(), ctx.queue.clone()),
+            engine: &engine,
+            compositor: &compositor,
+            fx: &fx,
+            lut_cache: &lut_cache,
+        };
+        let doc = Document::new();
+        let pixels: HashMap<Uuid, &crate::app_state::preview::CompLayerPixels> = HashMap::new();
+        let render = |comp: &Composition, t: f64| -> Vec<u8> {
+            let mut v = vec![comp.id];
+            let draws = build_comp_draws(&doc, comp, t, &pixels, &mut v);
+            let bg = comp.background.0.map(f64::from);
+            let tex = realiser.realise(comp.camera_pose(t), comp.width, comp.height, bg, &draws);
+            engine.readback8(&ctx, &engine.display(&ctx, &tex)).unwrap()
+        };
+
+        // STILL scene: a static text below a 4-sample accumulation adjustment must
+        // be a bit-exact identity — every sub-frame render is equal, so their
+        // average is the plain composite (1/4 is exact in fp16, four copies sum
+        // back exactly), and the full-coverage blend lays it back unchanged.
+        let still_text = text_layer(120.0);
+        let still_plain = comp_with(30, vec![still_text.clone()]);
+        let still_acc = comp_with(30, vec![accumulation_adjustment(4.0), still_text]);
+        assert_eq!(
+            render(&still_plain, 0.5),
+            render(&still_acc, 0.5),
+            "a still scene averaged over N must equal the plain composite bit-for-bit"
+        );
+
+        // MOVING scene: text sweeping x = 200·t in a 2 fps comp (dt = 0.5 s) so the
+        // shutter spreads ~37 px. The accumulation frame must differ from the plain
+        // composite (the smear) and cover a wider horizontal extent.
+        let mut moving_text = text_layer(0.0);
+        moving_text.transform.position_x = ramp(0.0, 200.0);
+        let moving_plain = comp_with(2, vec![moving_text.clone()]);
+        let moving_acc = comp_with(2, vec![accumulation_adjustment(4.0), moving_text]);
+        let plain = render(&moving_plain, 0.5);
+        let smeared = render(&moving_acc, 0.5);
+        assert_ne!(
+            plain, smeared,
+            "a moving scene must smear (differ from the plain composite)"
+        );
+        // Columns carrying visible text (red well above the dark background).
+        let (w, h) = (320usize, 180usize);
+        let text_cols = |b: &[u8]| {
+            (0..w)
+                .filter(|&x| (0..h).any(|y| b[(y * w + x) * 4] > 130))
+                .count()
+        };
+        assert!(
+            text_cols(&smeared) > text_cols(&plain),
+            "the smear must widen the covered columns: plain {}, smeared {}",
+            text_cols(&plain),
+            text_cols(&smeared)
         );
     }
 }

@@ -96,6 +96,24 @@ pub struct TemporalBelow {
     pub camera: Option<lumit_core::model::CameraPose>,
 }
 
+/// The below-stack re-rendered at N sub-frame times for an accumulation motion
+/// blur adjustment (docs/08 §3.26; docs/impl/temporal-rerender.md §3): one draw
+/// list + camera per shutter sample. `Realiser::realise` renders each, averages
+/// the N finished composites with the hardware additive-at-1/N pass
+/// ([`lumit_gpu::Compositor::accumulate`]), then blends that average against the
+/// plain frame-time below-composite by `mix`, and the result stands in for the
+/// below-composite the adjustment's own effects and coverage blend see — the
+/// same `render_below_at` (via `below_draws_at`) export drives, so preview equals
+/// export (K-031). Carried on the adjustment's [`DrawSource::Adjust`] draw; None
+/// on every ordinary draw and every non-accumulation adjustment.
+#[cfg(feature = "media")]
+pub struct AccumulationBelow {
+    /// One below-stack draw list + camera per sub-frame sample time `τ_k`.
+    pub samples: Vec<(Vec<CompLayerDraw>, Option<lumit_core::model::CameraPose>)>,
+    /// Averaged-over-original blend, 0..1 (1 = full accumulation blur).
+    pub mix: f32,
+}
+
 #[cfg(feature = "media")]
 pub struct CompLayerDraw {
     pub source: DrawSource,
@@ -163,6 +181,13 @@ pub struct CompLayerDraw {
     /// plain below-composite, blended by the adjustment's coverage. None on
     /// every ordinary draw, so nothing changes when no temporal effect is live.
     pub temporal_below: Option<TemporalBelow>,
+    /// The below-stack re-rendered at N sub-frame times for accumulation motion
+    /// blur (docs/08 §3.26). Some only on an adjustment [`DrawSource::Adjust`]
+    /// draw whose stack holds a live accumulation MB effect: `realise` averages
+    /// the N finished composites and blends by `mix`, standing in for the plain
+    /// below-composite. Takes precedence over `temporal_below` when both are set
+    /// (one temporal re-render per adjustment in v1). None on every ordinary draw.
+    pub accumulation_below: Option<AccumulationBelow>,
 }
 
 /// GPU display path (slice 5 completion): decoded sRGB bytes → linear fp16
@@ -438,9 +463,15 @@ impl Realiser<'_> {
             // texture export's `render_below_at` produces, K-031); the coverage
             // blend below still lays the result over the live below-at-t, so a
             // mask reveals the held region. None on an ordinary adjustment.
-            let fx_input = match &l.temporal_below {
-                Some(tb) => self.realise(tb.camera, width, height, background, &tb.draws),
-                None => below.clone(),
+            // Accumulation motion blur (docs/08 §3.26) takes precedence: it
+            // renders N sub-frame below-stacks and averages them; else Posterize
+            // holds one below-stack; else the plain below-composite.
+            let fx_input = if let Some(ab) = &l.accumulation_below {
+                self.accumulate_below(width, height, background, ab, &below)
+            } else if let Some(tb) = &l.temporal_below {
+                self.realise(tb.camera, width, height, background, &tb.draws)
+            } else {
+                below.clone()
             };
             let processed = crate::fxops::run_ops(
                 self.fx,
@@ -467,6 +498,52 @@ impl Realiser<'_> {
             start = i + 1;
         }
         self.realise_segment(camera, width, height, background, &layers[start..], &acc)
+    }
+
+    /// Accumulation motion blur (docs/08 §3.26, docs/impl/temporal-rerender.md
+    /// §3): render each sub-frame below-stack through the same realise path,
+    /// average the N finished composites with the hardware additive-at-`1/N` pass
+    /// ([`lumit_gpu::Compositor::accumulate`]), then blend that average against
+    /// the frame-time below-composite `below` by `mix` (a linear interpolation
+    /// the additive blend gives exactly). The result stands in for the
+    /// below-composite the adjustment's own effects and coverage blend see. A
+    /// still scene averages back to `below` bit-for-bit (the K-031 identity); a
+    /// moving one smears. Export runs the identical combine, so the two agree.
+    fn accumulate_below(
+        &self,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        ab: &AccumulationBelow,
+        below: &egui_wgpu::wgpu::Texture,
+    ) -> egui_wgpu::wgpu::Texture {
+        let frames: Vec<egui_wgpu::wgpu::Texture> = ab
+            .samples
+            .iter()
+            .map(|(draws, camera)| self.realise(*camera, width, height, background, draws))
+            .collect();
+        if frames.is_empty() {
+            // No samples (N < 2) degrades to the plain below — never a panic.
+            return below.clone();
+        }
+        // Equal weights 1/N sum to 1: the premultiplied arithmetic mean.
+        let weight = 1.0 / frames.len() as f32;
+        let avg_layers: Vec<(&egui_wgpu::wgpu::Texture, f32)> =
+            frames.iter().map(|f| (f, weight)).collect();
+        let average = self
+            .compositor
+            .accumulate(&self.ctx, width, height, &avg_layers);
+        if ab.mix >= 1.0 {
+            average
+        } else {
+            // Mix blends the blurred average against the live below-composite.
+            self.compositor.accumulate(
+                &self.ctx,
+                width,
+                height,
+                &[(below, 1.0 - ab.mix), (&average, ab.mix)],
+            )
+        }
     }
 
     /// The adjustment layer's comp-space coverage (docs/06 §1.5): its mask

@@ -228,6 +228,12 @@ pub struct Compositor {
     /// premultiplied average — distinct from `pipeline_add` (the Add blend
     /// mode), which over-composites alpha (docs/06 §4, K-120).
     pipeline_accumulate: wgpu::RenderPipeline,
+    /// Pure-additive blend over a PREMULTIPLIED-passthrough fragment
+    /// (`fs_accumulate`), for accumulation motion blur (docs/08 §3.26): the
+    /// inputs are already-premultiplied comp composites, so it scales each by its
+    /// weight without re-premultiplying by alpha (as `pipeline_accumulate`'s
+    /// `fs_layer` would). See [`Self::accumulate`].
+    pipeline_premul_accumulate: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// Bound at binding 3 when a layer has no matte.
@@ -386,6 +392,37 @@ impl Compositor {
         let pipeline_add = make_pipeline(blend_add, "composite-add");
         let pipeline_multiply = make_pipeline(blend_multiply, "composite-multiply");
         let pipeline_accumulate = make_pipeline(blend_accumulate, "composite-mb-accumulate");
+        // Additive blend over the premultiplied-passthrough fragment, for
+        // accumulation motion blur (docs/08 §3.26): the sub-frame comp
+        // composites are already premultiplied, so fs_accumulate scales each by
+        // its weight without re-premultiplying (which fs_layer would).
+        let pipeline_premul_accumulate =
+            ctx.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("composite-accumulate-premul"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_layer"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_accumulate"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: WORKING_FORMAT,
+                            blend: Some(blend_accumulate),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview: None,
+                    cache: None,
+                });
         // Snapshot blends: no fixed-function blending — the fragment
         // composites itself from the dst snapshot and writes the final value.
         let pipeline_snapshot =
@@ -470,6 +507,7 @@ impl Compositor {
             pipeline_multiply,
             pipeline_snapshot,
             pipeline_accumulate,
+            pipeline_premul_accumulate,
             layout,
             sampler,
             white,
@@ -910,6 +948,155 @@ impl Compositor {
                 ..Default::default()
             });
             rpass.set_pipeline(&self.pipeline_accumulate);
+            for bind in &binds {
+                rpass.set_bind_group(0, bind, &[]);
+                rpass.draw(0..6, 0..1);
+            }
+        }
+        ctx.queue.submit([encoder.finish()]);
+        target
+    }
+
+    /// The premultiplied weighted sum of N comp-sized textures — the
+    /// accumulation motion-blur combine (docs/08 §3.26, docs/impl/
+    /// temporal-rerender.md §3).
+    ///
+    /// Each `(texture, weight)` is drawn 1:1 (identity placement, full comp
+    /// size) into a fresh transparent comp-sized target with the pure-additive
+    /// blend (BOTH colour and alpha add) over the premultiplied-passthrough
+    /// fragment, so the target holds `Σ weight_k · premul(texture_k)`. The inputs
+    /// are already-premultiplied comp composites, so — unlike
+    /// [`Self::motion_blur_average`], which premultiplies a straight-alpha source
+    /// and re-draws ONE texture at N placements — this scales each premultiplied
+    /// texel by its weight and never re-premultiplies. With equal weights `1/N`
+    /// it is the arithmetic mean of the N DIFFERENT below-composites (a still
+    /// scene, every texture equal, averages back to itself bit-for-bit when `N`
+    /// is a power of two, since `1/N` is exact in fp16; a moving one smears). The
+    /// caller also uses it to blend the averaged result against the frame-time
+    /// composite by the effect's Mix — two weighted layers `1 − mix` and `mix`,
+    /// the pure linear interpolation the additive blend gives exactly.
+    ///
+    /// An empty `layers` returns a transparent frame (a defensive no-op, never a
+    /// panic — the caller only invokes this with a non-empty set).
+    pub fn accumulate(
+        &self,
+        ctx: &GpuContext,
+        width: u32,
+        height: u32,
+        layers: &[(&wgpu::Texture, f32)],
+    ) -> wgpu::Texture {
+        let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("accumulate"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORKING_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let white_view = self.white.create_view(&Default::default());
+        let black_view = self.black.create_view(&Default::default());
+        let binds: Vec<wgpu::BindGroup> = layers
+            .iter()
+            .map(|(texture, weight)| {
+                // Identity placement at comp size: a full-frame 1:1 quad. The
+                // weight rides in params.x (fs_accumulate scales the premultiplied
+                // texel by it); the matrix carries no opacity, so it stays plain.
+                let layer = CompositeLayer {
+                    texture,
+                    size: (width as f32, height as f32),
+                    position: (0.0, 0.0),
+                    anchor: (0.0, 0.0),
+                    scale: (100.0, 100.0),
+                    rotation_deg: 0.0,
+                    opacity: 100.0,
+                    matte: None,
+                    blend: Blend::Add,
+                    z: 0.0,
+                    rotation_x_deg: 0.0,
+                    rotation_y_deg: 0.0,
+                    three_d: false,
+                    layer_mask: None,
+                    pre: None,
+                };
+                let uniform = LayerUniform {
+                    matrix: layer
+                        .matrix(width as f32, height as f32, None)
+                        .to_cols_array_2d(),
+                    params: [weight.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+                    target: [width as f32, height as f32, -1.0, 0.0],
+                };
+                let buffer = wgpu::util::DeviceExt::create_buffer_init(
+                    &ctx.device,
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("accumulate-uniform"),
+                        contents: bytemuck::bytes_of(&uniform),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    },
+                );
+                ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("accumulate"),
+                    layout: &self.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(
+                                &texture.create_view(&Default::default()),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&white_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&white_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&black_view),
+                        },
+                    ],
+                })
+            })
+            .collect();
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("accumulate"),
+            });
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("accumulate"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Transparent black: the additive sum builds up from nothing.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            rpass.set_pipeline(&self.pipeline_premul_accumulate);
             for bind in &binds {
                 rpass.set_bind_group(0, bind, &[]);
                 rpass.draw(0..6, 0..1);
@@ -1559,6 +1746,87 @@ mod tests {
         assert!(
             moving_cols > still_cols + 5,
             "moving coverage {moving_cols} must widen past static {still_cols}"
+        );
+    }
+
+    /// Accumulation motion blur (docs/08 §3.26): the additive average of N
+    /// DIFFERENT premultiplied below-composites. A still scene (N identical
+    /// frames) averages back to itself bit-for-bit — the identity the whole
+    /// preview==export promise rests on — while a moving scene (the same quad at
+    /// two positions) spreads coverage across both.
+    #[test]
+    fn accumulate_averages_premultiplied_frames() {
+        let Ok(ctx) = GpuContext::headless() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let colour = ColourEngine::new(&ctx);
+        let compositor = Compositor::new(&ctx);
+        let red = solid_linear(&ctx, &colour, [255, 0, 0, 255], 4, 8);
+        // A genuinely premultiplied comp: a red quad over the LEFT half of an
+        // 8×8 frame on a transparent background (the right half is alpha 0).
+        let frame = |x: f32| {
+            compositor.composite(
+                &ctx,
+                8,
+                8,
+                [0.0, 0.0, 0.0, 0.0],
+                &[CompositeLayer {
+                    texture: &red,
+                    size: (4.0, 8.0),
+                    position: (x, 0.0),
+                    anchor: (0.0, 0.0),
+                    scale: (100.0, 100.0),
+                    rotation_deg: 0.0,
+                    opacity: 100.0,
+                    matte: None,
+                    blend: Blend::Normal,
+                    z: 0.0,
+                    rotation_x_deg: 0.0,
+                    rotation_y_deg: 0.0,
+                    three_d: false,
+                    layer_mask: None,
+                    pre: None,
+                }],
+            )
+        };
+        let left = frame(0.0);
+        // Four identical copies at 1/4 must return the frame bit-for-bit (1/4 is
+        // exact in fp16, four copies sum back exactly) — the still-scene identity.
+        let avg = compositor.accumulate(
+            &ctx,
+            8,
+            8,
+            &[(&left, 0.25), (&left, 0.25), (&left, 0.25), (&left, 0.25)],
+        );
+        let a = crate::fx::readback_linear_f32(&ctx, &left, 8, 8).unwrap();
+        let b = crate::fx::readback_linear_f32(&ctx, &avg, 8, 8).unwrap();
+        assert_eq!(
+            a, b,
+            "averaging identical premultiplied frames is the identity"
+        );
+
+        // Moving: the same quad on the RIGHT half, averaged 50/50 with the left —
+        // both halves are now half-covered (the smear), where neither single
+        // frame covers both.
+        let right = frame(4.0);
+        let mixed = compositor.accumulate(&ctx, 8, 8, &[(&left, 0.5), (&right, 0.5)]);
+        let m = crate::fx::readback_linear_f32(&ctx, &mixed, 8, 8).unwrap();
+        let alpha = |px: &[f32], x: usize, y: usize| px[(y * 8 + x) * 4 + 3];
+        assert!(
+            (alpha(&m, 1, 4) - 0.5).abs() < 0.05,
+            "left half-covered ~0.5; got {}",
+            alpha(&m, 1, 4)
+        );
+        assert!(
+            (alpha(&m, 6, 4) - 0.5).abs() < 0.05,
+            "right half-covered ~0.5; got {}",
+            alpha(&m, 6, 4)
+        );
+        assert!(
+            alpha(&a, 6, 4) < 0.05,
+            "the left frame alone leaves the right transparent; got {}",
+            alpha(&a, 6, 4)
         );
     }
 

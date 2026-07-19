@@ -192,6 +192,16 @@ fn feed_effect_stack(
         }]);
         h.update(e.effect.match_name.as_bytes());
         h.update(&e.effect.version.to_le_bytes());
+        // The per-effect temporal opt-out (K-132, docs/impl/temporal-rerender.md
+        // §6): an effect flagged sample_temporally == false renders at the frame
+        // time (not the held/sample time) inside a temporal re-render below a
+        // Posterize/accumulation adjustment, so the flag is content. Feed only the
+        // non-default (false), so ordinary keys — every effect sampling, the
+        // overwhelming case — are unchanged, but toggling it off is never a stale
+        // cache hit.
+        if !e.sample_temporally {
+            h.update(b"no-temporal-sample/");
+        }
         for p in &e.params {
             h.update(p.id.as_bytes());
             use lumit_core::model::EffectValue;
@@ -1043,6 +1053,16 @@ mod tests {
         let mut v2 = with_fx.clone();
         v2.layers[0].effects[0].effect.version = 2;
         assert_ne!(fx_key, key(&doc, &v2, 1.0));
+
+        // The per-effect temporal opt-out (K-132) is content: turning
+        // sample_temporally off changes the frame under a temporal re-render, so
+        // it changes the key; the default (on) keys exactly as the flagless case.
+        let mut opt_out = with_fx.clone();
+        opt_out.layers[0].effects[0].sample_temporally = false;
+        assert_ne!(fx_key, key(&doc, &opt_out, 1.0));
+        let mut still_on = with_fx.clone();
+        still_on.layers[0].effects[0].sample_temporally = true;
+        assert_eq!(fx_key, key(&doc, &still_on, 1.0));
     }
 
     /// An after-effects matte (K-decision) gates by the source's *processed*

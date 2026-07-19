@@ -58,6 +58,85 @@ fn stack_posterize_detects_and_resolves() {
     assert!(stack_posterize(std::slice::from_ref(&blur), true, 0.0).is_none());
 }
 
+// this_layer_effect_time (docs/08 §3.25): a *This layer's effects* Posterize
+// holds this layer's own stack on the coarse grid, while *Everything below*, a
+// plain stack, or a bypassed one leave the layer time untouched (that scope
+// re-renders the layers beneath instead).
+#[test]
+fn this_layer_effect_time_holds_only_the_this_layer_scope() {
+    let mut e = instantiate("posterize_time").unwrap();
+    for p in &mut e.params {
+        match p.id.as_str() {
+            "rate" => p.value = EffectValue::Float(Property::fixed(10.0)),
+            "scope" => p.value = EffectValue::Choice(1), // This layer's effects
+            _ => {}
+        }
+    }
+    // 10 fps grid, no offset: t = 0.35 holds at 0.3.
+    assert!((this_layer_effect_time(std::slice::from_ref(&e), true, 0.35, 0.0) - 0.3).abs() < 1e-9);
+    // The hold is computed on comp time `lt + start_offset` and mapped back, so a
+    // layer offset by 1.0s still lands its held effects on the same comp grid:
+    // held comp time floor(3.5)/10 = 0.3, minus the offset → -0.7.
+    assert!(
+        (this_layer_effect_time(std::slice::from_ref(&e), true, -0.65, 1.0) - (-0.7)).abs() < 1e-9
+    );
+    // Everything below leaves the layer time untouched (its re-render is the
+    // adjustment path, not a per-layer substitution).
+    for p in &mut e.params {
+        if p.id == "scope" {
+            p.value = EffectValue::Choice(0);
+        }
+    }
+    assert_eq!(
+        this_layer_effect_time(std::slice::from_ref(&e), true, 0.35, 0.0),
+        0.35
+    );
+    // Bypassed or plain stacks are untouched too.
+    assert_eq!(
+        this_layer_effect_time(std::slice::from_ref(&e), false, 0.35, 0.0),
+        0.35
+    );
+    let blur = instantiate("blur").unwrap();
+    assert_eq!(
+        this_layer_effect_time(std::slice::from_ref(&blur), true, 0.35, 0.0),
+        0.35
+    );
+}
+
+// stack_accumulation_mb (docs/08 §3.26) finds the effect, resolves its shutter
+// and Mix, and derives the centred sub-frame offsets; a bypassed or plain stack
+// reports nothing, and it resolves to no per-pixel op (executed at the
+// orchestration layer, like Posterize).
+#[test]
+fn stack_accumulation_mb_detects_resolves_and_offsets() {
+    let e = instantiate("accumulation_mb").unwrap();
+    let p = stack_accumulation_mb(std::slice::from_ref(&e), true, 0.0).unwrap();
+    assert_eq!(p.samples, 8); // default
+    assert_eq!(p.shutter_angle, 180.0);
+    assert_eq!(p.shutter_phase, -90.0);
+    assert!((p.mix - 1.0).abs() < 1e-9);
+    // Eight centred sub-frame offsets across the open shutter (the shared
+    // per-layer motion-blur shutter maths).
+    assert_eq!(p.sample_offsets().len(), 8);
+    // A degenerate single sample is no blur — empty offsets, so the caller falls
+    // back to the plain frame-time composite.
+    let one = AccumulationMbParams { samples: 1, ..p };
+    assert!(one.sample_offsets().is_empty());
+    // Bypassed or a plain stack report nothing.
+    assert!(stack_accumulation_mb(std::slice::from_ref(&e), false, 0.0).is_none());
+    let blur = instantiate("blur").unwrap();
+    assert!(stack_accumulation_mb(std::slice::from_ref(&blur), true, 0.0).is_none());
+    // No per-pixel op: it never reaches a kernel.
+    assert!(resolve_stack(
+        std::slice::from_ref(&e),
+        0.0,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE
+    )
+    .is_empty());
+}
+
 // A Posterize Time effect has no per-pixel op: it must resolve to nothing (it is
 // executed at the orchestration layer, not in run_ops), exactly like a
 // placeholder — so it never reaches a kernel.
@@ -106,6 +185,84 @@ fn resolve_stack_evaluates_converts_and_skips_dead_effects() {
     assert!(
         resolve_stack(&[e], 0.0, 1000.0, 1.0, &MarkerContext::NONE).is_empty(),
         "placeholders render as identity"
+    );
+}
+
+// docs/impl/temporal-rerender.md §5: in a held/sub-frame re-render an effect
+// flagged sample_temporally == false resolves at the true frame time, while the
+// rest of the stack samples the held time. resolve_stack_temporal is the
+// per-effect time split both the preview and export re-render drive; with the
+// two times equal it is byte-identical to resolve_stack (the ordinary render is
+// unchanged).
+#[test]
+fn resolve_stack_temporal_pins_non_sampling_effects_to_the_frame_time() {
+    use crate::anim::{Keyframe, SideInterp};
+    use crate::time::Rational;
+    // A blur whose radius ramps 0%→100% over one second, so a held time and a
+    // frame time resolve to visibly different radii.
+    let key = |time: Rational, value: f64| Keyframe {
+        time,
+        value,
+        interp_in: SideInterp::Linear,
+        interp_out: SideInterp::Linear,
+    };
+    let ramp = Property {
+        animation: Animation::Keyframed(vec![
+            key(Rational::ZERO, 0.0),
+            key(Rational::new(1, 1).unwrap(), 100.0),
+        ]),
+        extra: serde_json::Map::new(),
+    };
+    let mut e = instantiate("blur").unwrap();
+    for p in &mut e.params {
+        if p.id == "radius" {
+            p.value = EffectValue::Float(ramp.clone());
+        }
+    }
+    let radius_of = |r: &[Resolved]| match r.first() {
+        Some(Resolved::Blur { radius_px, .. }) => *radius_px,
+        _ => panic!("expected a blur"),
+    };
+    // Sample time 0.2 (radius 20% → 200px of a 1000px diagonal), frame time 0.8
+    // (80% → 800px). With the flag ON (the default) the effect samples the held
+    // time; with it OFF it holds at the frame time.
+    let sampled = resolve_stack_temporal(
+        std::slice::from_ref(&e),
+        0.2,
+        0.8,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert!((radius_of(&sampled) - 200.0).abs() < 0.01);
+    e.sample_temporally = false;
+    let held = resolve_stack_temporal(
+        std::slice::from_ref(&e),
+        0.2,
+        0.8,
+        1000.0,
+        1.0,
+        &MarkerContext::NONE,
+    );
+    assert!((radius_of(&held) - 800.0).abs() < 0.01);
+    // Equal times ⇒ byte-identical to resolve_stack (ordinary render unchanged),
+    // whatever the flag.
+    assert_eq!(
+        resolve_stack_temporal(
+            std::slice::from_ref(&e),
+            0.5,
+            0.5,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE
+        ),
+        resolve_stack(
+            std::slice::from_ref(&e),
+            0.5,
+            1000.0,
+            1.0,
+            &MarkerContext::NONE
+        ),
     );
 }
 

@@ -214,6 +214,7 @@ specified in §3.1's original text but surfaced as layer UI, not an effect. Summ
 | 3.23 | Invert | stock CC pack invert | cheap | `{0}` |
 | 3.24 | Tint | AE Tint / duotone | cheap | `{0}` |
 | 3.25 | Posterize time | AE Posterize Time | cheap | `{0}` |
+| 3.26 | Accumulation motion blur | RSMB / ReelSmart (accumulation) | heavy | `{0}` |
 
 ### 3.1 Flow engine — optical-flow retime interpolation (Twixtor-class)
 
@@ -1023,10 +1024,15 @@ rather than filters, it lives at the frame-orchestration layer — detected wher
 **Scope.** *Everything below* is **adjustment behaviour**: the composite of everything beneath
 the effect's adjustment layer re-renders at `held_t` and is laid back over the live composite
 by the adjustment's coverage (its mask × opacity), so the owner's global "posterise the whole
-scene" pass is simply the effect on a full-frame adjustment layer. *This layer's effects*
-holds only the layer's own source + stack at `held_t` (a per-layer time substitution feeding
-its own stack) — the AE per-layer form. (v1 ships *Everything below*; *This layer's effects* is
-the immediate follow-up — the schema, scope choice and held-time maths are already in place.)
+scene" pass is simply the effect on a full-frame adjustment layer. *This layer's effects* holds
+only the layer's own **effect stack** at `held_t` (a per-layer time substitution — no
+re-render of others, no orchestration re-entry): the effects step on the coarse grid while the
+layer's **transform and source stay live**, so the layer moves smoothly but its effect
+animation is choppy — the AE per-layer form. The held effect time is
+`lumit_core::fx::this_layer_effect_time` (the grid computed on comp time, mapped into the
+layer's own base), fed to `resolve_stack_temporal` as the sample time so a
+`sample_temporally == false` effect still resolves at the live playhead. Both scopes ship in
+v1.
 
 **Determinism & cache.** `held_t` is a pure function of `t`, `rate` and `phase`, so many
 frames share it and re-render identically; the frame key folds the effect's parameters, and
@@ -1042,6 +1048,53 @@ flow Motion blur, Datamosh) degrade to stills — the held re-render reuses the 
 and carries no neighbour frames (the same boundary the after-effects matte takes, K-125); and a
 Posterize adjustment *inside a collapsed* Precomp degrades to a no-op (its held draws are sized
 for the nested comp). `cheap` cost, `FullFrame` ROI, `{0}` temporal, Category **Temporal**.
+
+### 3.26 Accumulation motion blur — the expensive, correct motion blur
+
+**Parameters:** Samples N (default 8), Shutter angle (degrees, default 180), Shutter phase
+(degrees, default −90), Mix (per cent, default 100).
+
+**Algorithm sketch.** A **temporal** effect, not a per-pixel one, and the sibling of Posterize
+time (§3.25): it renders the **whole scene below it** several times at in-between moments and
+averages the finished frames. Per-layer motion blur (docs/06 §4, K-120) smears one layer along
+its own transform; accumulation motion blur smears everything below — footage motion, animated
+effects, depth passes, the camera — all correct per sample (no blurred-depth artefact). The
+sub-frame sample times reuse the **same centred-shutter maths** as per-layer motion blur
+(`MotionBlur::sample_offsets`): for Samples N the k-th offset is `phase/360 + (k + 0.5)/N ·
+angle/360` frames, so `τ_k = t + off_k · dt` (dt = one comp frame). The N finished
+below-composites are averaged by a **hardware additive-at-`1/N`** pass (`Compositor::accumulate`
+— colour **and** alpha additive over a premultiplied-passthrough fragment, so a static scene is
+unchanged; NOT the Add blend mode, which over-composites alpha). **Mix** blends the averaged
+(blurred) result against the frame-time composite (a linear interpolation the same additive pass
+gives exactly). Because it re-renders rather than filters, it lives at the frame-orchestration
+layer — detected where `build_comp_draws` + realise (preview) and `render_comp_linear` (export)
+run, never in `run_ops` — and so resolves to **no** per-pixel op. See
+[docs/impl/temporal-rerender.md](impl/temporal-rerender.md).
+
+**Adjustment behaviour.** Like Posterize's *Everything below*, it is an adjustment effect: the
+composite beneath the effect's layer is what re-renders, laid back over the live composite by
+the adjustment's coverage (mask × opacity). The owner's global "motion-blur the whole scene"
+pass is simply the effect on a full-frame adjustment layer.
+
+**Preview == export (K-031).** Both paths re-render each sub-frame below-stack through the
+**one** shared `render_below_at` and average with the identical `Compositor::accumulate`, so a
+preview frame equals an export frame. A **still scene** averaged over N is bit-identical to the
+plain composite (pinned by test — `1/N` is exact in fp16, the N copies sum back exactly); a
+**moving scene** smears (a coverage-widening test). **Boundaries (v1):** temporal effects inside
+the sampled below-stack (echo, flow motion blur, datamosh) hold to stills (the same K-125
+boundary Posterize takes), and an accumulation adjustment inside a collapsed Precomp degrades to
+a no-op (its sampled draws are sized for the nested comp). Honours the per-effect
+`sample_temporally` flag (K-132) — a particle system stays pinned to the playhead across the
+samples. Sub-frame sample-count reduction under the draft/scrub path is a tracked follow-up
+(full N always on export). `heavy` cost (≈ N× a full comp render), `FullFrame` ROI, `{0}`
+temporal, Category **Temporal**.
+
+**Per-effect sampling (K-132).** The held re-render honours each below-effect's
+`sample_temporally` flag (a general `EffectInstance` property, default on): an effect with it
+**off** resolves at the true frame time, not the held time `held_t`, so a costly or stochastic
+effect (a particle system) is pinned to the playhead while the rest of the scene holds. The
+split is `lumit_core::fx::resolve_stack_temporal`; with the frame and held times equal it is
+byte-identical to the plain resolve, so an ordinary render is unchanged.
 
 ---
 

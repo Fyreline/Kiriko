@@ -209,8 +209,39 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   Motion blur effect's job), so Posterize quantises the *movement and effects*, not the video
   playback; and a couple of exotic combinations (an echo *inside* the held part, or Posterize
   buried in a collapsed precomp) quietly do nothing rather than risk a wrong picture. There is
-  a Scope switch for a per-layer version ("just this layer's own effects") that is the next
-  small step — the maths and the switch are already in place.
+  also a Scope switch for a per-layer version, "just this layer's own effects": drop Posterize
+  onto a normal layer and set that scope, and only *that layer's effects* go choppy on the grid
+  — the layer keeps moving smoothly, but its blur, glow, glitch and so on step in time. It needs
+  no re-render of the rest of the scene at all: the layer simply reads a "held" clock for its
+  own effect stack while its position and picture read the live one. That is why it is the
+  cheap, simple cousin of the whole-scene version.
+- **"Don't re-sample this effect" — a per-effect opt-out for the choppy passes.** When
+  Posterize time (and, soon, accumulation motion blur) re-renders the scene at a *different*
+  moment, it normally re-runs everything at that moment. But some effects are expensive or
+  random — a particle system, say — and you would not want them re-computed for every sample;
+  it would look wrong and cost a fortune. So every effect now carries a quiet switch, **on** by
+  default: leave it on and the effect moves in time with the rest of the scene; turn it **off**
+  and that one effect stays frozen at the real playhead while everything around it is held or
+  sampled. Behind the scenes this is just "which clock do I read?" per effect — with the switch
+  on, both clocks read the same time, so an ordinary render (no posterise, no accumulation
+  blur) is completely unaffected.
+- **Accumulation motion blur — the expensive, correct motion blur.** There are now three kinds
+  of motion blur in Lumit, and this is the heavyweight. The per-layer kind smears one layer
+  along its own movement; the flow kind invents blur for game footage that never had any. This
+  third kind does the honest, brute-force thing: it renders the *whole scene beneath it* several
+  times at instants spread across a single frame — a few moments just before the frame, a few
+  just after — and averages those finished pictures together. Because it re-renders the real
+  scene each time, everything comes out right: moving footage, animated effects, a depth pass,
+  the camera drifting — all correctly placed at each instant, then blended. The averaging is a
+  neat trick with light: each of the N pictures is added in at one-Nth strength, so a part of
+  the scene that didn't move averages back to exactly itself (nothing changes when nothing
+  moves — a promise the tests check to the last bit), while anything that *did* move leaves a
+  smear proportional to how far it travelled. You drop it on a full-frame adjustment layer to
+  blur the whole scene; the Shutter angle sets how much of the frame the "camera" was open
+  (180° is the film-standard half-frame), Samples sets how many in-between renders (more is
+  smoother and slower — it is genuinely N times the work), and Mix fades the blur back toward
+  the sharp original. It shares the very same re-render machinery as Posterize, so the preview
+  and the exported file are, again, literally the same code.
 - **Depth of field becomes a real effect — and effects can now read another layer.** Until
   now every effect took numbers, colours, a file. Depth of field needs a *second picture*: a
   "depth map" that says how far away each pixel is. The natural place to get one is **another

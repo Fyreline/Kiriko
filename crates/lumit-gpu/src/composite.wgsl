@@ -141,3 +141,15 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(texel.rgb * a, a);
 }
+
+// Accumulation motion blur (docs/08 §3.26, docs/impl/temporal-rerender.md §3).
+// The inputs are already-PREMULTIPLIED comp composites (the below-stack rendered
+// at each sub-frame time), so — unlike fs_layer, which premultiplies a
+// straight-alpha source — this must NOT re-multiply by alpha. It scales the
+// premultiplied texel (colour AND alpha) by the per-sample weight params.x and
+// lets the pure-additive blend sum them, so N frames at weight 1/N give the
+// premultiplied arithmetic mean. Drawn 1:1 at comp size (identity placement).
+@fragment
+fn fs_accumulate(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(src, samp, in.uv) * layer.params.x;
+}

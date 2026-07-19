@@ -38,6 +38,33 @@ pub fn posterize_held_time(t: f64, rate: f64, phase: f64) -> f64 {
     ((t - phase) * rate).floor() / rate + phase
 }
 
+/// The layer time a *This layer's effects* Posterize Time holds this layer's
+/// own effect stack at (docs/08 §3.25): the coarse-grid held time in the layer's
+/// own time base. Returns `lt` unchanged when the stack has no live Posterize or
+/// its scope is *Everything below* (that scope re-renders the layers beneath
+/// instead — the adjustment path, not this per-layer time substitution). `lt` is
+/// the layer time the stack would otherwise resolve at and `start_offset` is the
+/// layer's own offset, so the hold is computed on the comp time `lt +
+/// start_offset` (matching the *Everything below* path, which holds on comp
+/// time) and mapped back into the layer's base. Only the effect stack is held —
+/// the caller keeps the layer's transform and source live, so the effects step
+/// on the grid while the layer itself moves smoothly. Pure and deterministic, so
+/// the preview and export derive the identical held time (K-031); shared by both
+/// so a *This layer's effects* frame is identical in the viewport and the file.
+pub fn this_layer_effect_time(
+    effects: &[EffectInstance],
+    fx_on: bool,
+    lt: f64,
+    start_offset: f64,
+) -> f64 {
+    match stack_posterize(effects, fx_on, lt) {
+        Some(p) if p.scope == PosterizeScope::ThisLayer => {
+            posterize_held_time(lt + start_offset, p.rate, p.phase) - start_offset
+        }
+        _ => lt,
+    }
+}
+
 /// The first enabled built-in Posterize Time effect in a live stack, resolved
 /// at layer time `lt`. None when the stack is bypassed or carries none — so a
 /// layer with no Posterize pays nothing and renders normally. A stack with more
@@ -62,6 +89,78 @@ pub fn stack_posterize(
                 _ => PosterizeScope::EverythingBelow,
             };
             PosterizeParams { rate, phase, scope }
+        })
+}
+
+/// An accumulation motion blur effect resolved at a layer time (docs/08 §3.26,
+/// docs/impl/temporal-rerender.md §3): the sub-frame shutter it samples the
+/// below-stack across, and the Mix blending the averaged result against the
+/// frame-time composite.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AccumulationMbParams {
+    /// Sub-frame renders of the scene below across the open shutter.
+    pub samples: u32,
+    /// Shutter angle in degrees (the open fraction is `shutter_angle / 360`).
+    pub shutter_angle: f64,
+    /// Shutter phase in degrees (where the open interval sits; -90 centres it).
+    pub shutter_phase: f64,
+    /// Averaged-over-original blend, 0..1 (1 = full accumulation blur).
+    pub mix: f64,
+}
+
+impl AccumulationMbParams {
+    /// The sub-frame sample offsets in *frames* across the open shutter, reusing
+    /// the shared per-layer motion-blur shutter maths ([`crate::model::
+    /// MotionBlur::sample_offsets`]) so the two derive the identical centred
+    /// samples. Empty when `samples < 2` (a single sample is no blur — the caller
+    /// then falls back to the plain frame-time composite). A caller turns each
+    /// offset into a comp-time sample by `t + offset · dt` (dt = one frame in comp
+    /// seconds).
+    pub fn sample_offsets(&self) -> Vec<f64> {
+        crate::model::MotionBlur {
+            enabled: true,
+            shutter_angle: self.shutter_angle,
+            shutter_phase: self.shutter_phase,
+            samples: self.samples,
+        }
+        .sample_offsets()
+    }
+}
+
+/// The first enabled built-in accumulation motion blur effect in a live stack,
+/// resolved at layer time `lt`. None when the stack is bypassed or carries none
+/// — so a layer with no accumulation blur pays nothing. A stack with more than
+/// one takes the first in order (a single accumulation pass per layer in v1).
+pub fn stack_accumulation_mb(
+    effects: &[EffectInstance],
+    fx_on: bool,
+    lt: f64,
+) -> Option<AccumulationMbParams> {
+    if !fx_on {
+        return None;
+    }
+    effects
+        .iter()
+        .filter(|e| e.enabled && e.effect.namespace == EffectNamespace::Builtin)
+        .find(|e| e.effect.match_name == "accumulation_mb")
+        .map(|e| {
+            // Samples is a Float row (no integer kind); round and clamp to the
+            // same 2..64 the schema declares, so a hand-edited project cannot
+            // demand an unbounded number of full comp re-renders.
+            let samples = e
+                .float_at("samples", lt)
+                .unwrap_or(8.0)
+                .round()
+                .clamp(2.0, 64.0) as u32;
+            let shutter_angle = e.float_at("shutter_angle", lt).unwrap_or(180.0);
+            let shutter_phase = e.float_at("shutter_phase", lt).unwrap_or(-90.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) / 100.0).clamp(0.0, 1.0);
+            AccumulationMbParams {
+                samples,
+                shutter_angle,
+                shutter_phase,
+                mix,
+            }
         })
 }
 

@@ -912,9 +912,29 @@ impl Renderer<'_> {
         if !layer.switches.fx || layer.effects.is_empty() {
             return tex;
         }
+        // This layer's effects (docs/08 §3.25): hold this layer's own stack on
+        // the posterised grid when it carries a *This layer* Posterize, else `lt`
+        // unchanged — the identical held time the preview's build_comp_draws
+        // derives (K-031). Fed as the sample time to resolve_stack_temporal, so a
+        // sample_temporally == false effect still resolves at the true layer time
+        // `lt` (§5); with no this-layer Posterize this is byte-identical to
+        // resolve_stack.
         // Export renders at full resolution: px@comp parameters are already
         // raster pixels (§2.3 factor 1).
-        let resolved = lumit_core::fx::resolve_stack(&layer.effects, lt, comp_diag, 1.0, markers);
+        let effect_lt = lumit_core::fx::this_layer_effect_time(
+            &layer.effects,
+            layer.switches.fx,
+            lt,
+            layer.start_offset.0.to_f64(),
+        );
+        let resolved = lumit_core::fx::resolve_stack_temporal(
+            &layer.effects,
+            effect_lt,
+            lt,
+            comp_diag,
+            1.0,
+            markers,
+        );
         let (w, h) = (tex.width(), tex.height());
         // The motion field must match the texture it smears (both are the
         // full-resolution source); a mismatch degrades to a passthrough.
@@ -1313,9 +1333,20 @@ impl Renderer<'_> {
                 let lt = t - l.start_offset.0.to_f64();
                 let fx = if l.switches.fx {
                     // The §1.4 marker context, built by the same shared
-                    // constructor preview uses (K-031).
+                    // constructor preview uses (K-031). A *This layer* Posterize
+                    // on an adjustment holds the adjustment's own stack on the
+                    // grid (docs/08 §3.25); effect_lt == lt with none, so this is
+                    // byte-identical to resolve_stack then.
                     let markers = lumit_core::fx::MarkerContext::for_layer(comp, l);
-                    lumit_core::fx::resolve_stack(&l.effects, lt, comp_diag, 1.0, &markers)
+                    let effect_lt = lumit_core::fx::this_layer_effect_time(
+                        &l.effects,
+                        l.switches.fx,
+                        lt,
+                        l.start_offset.0.to_f64(),
+                    );
+                    lumit_core::fx::resolve_stack_temporal(
+                        &l.effects, effect_lt, lt, comp_diag, 1.0, &markers,
+                    )
                 } else {
                     Vec::new()
                 };
@@ -1325,7 +1356,12 @@ impl Renderer<'_> {
                 // what keeps such an adjustment live.
                 let posterize = lumit_core::fx::stack_posterize(&l.effects, l.switches.fx, lt)
                     .filter(|p| p.scope == lumit_core::fx::PosterizeScope::EverythingBelow);
-                if fx.is_empty() && posterize.is_none() {
+                // Accumulation motion blur everything-below (docs/08 §3.26): N
+                // sub-frame below-renders averaged. Like Posterize it resolves to
+                // no op, so this — not `fx` — keeps such an adjustment live.
+                let accumulation =
+                    lumit_core::fx::stack_accumulation_mb(&l.effects, l.switches.fx, lt);
+                if fx.is_empty() && posterize.is_none() && accumulation.is_none() {
                     continue;
                 }
                 let below = self.compositor.composite_seeded(
@@ -1352,7 +1388,64 @@ impl Renderer<'_> {
                 // reuses `build_comp_draws` + the shared `Realiser`, so the held
                 // texture is identical to the preview's (K-031); the coverage
                 // blend below still lays it over the live below-at-t.
-                let fx_input = if let Some(p) = posterize {
+                let fx_input = if let Some(ab) = accumulation {
+                    // Render each sub-frame below-stack through the SAME
+                    // render_below_at the preview drives, average the N finished
+                    // composites with the hardware additive-at-1/N pass, then
+                    // blend against the frame-time below by Mix (docs/08 §3.26).
+                    // The held decode is gathered once (footage is held), and the
+                    // playhead `t` is threaded so a sample_temporally == false
+                    // effect still holds live (§5). Identical to the preview's
+                    // accumulate_below (K-031).
+                    let offsets = ab.sample_offsets();
+                    if offsets.is_empty() {
+                        below.clone()
+                    } else {
+                        let dt = 1.0 / comp.frame_rate.fps().max(1.0);
+                        let below_layers = &comp.layers[idx + 1..];
+                        let mut pixels_map = HashMap::new();
+                        self.collect_below_pixels(below_layers, t, visited, &mut pixels_map)?;
+                        let pixels_ref: HashMap<Uuid, &crate::app_state::preview::CompLayerPixels> =
+                            pixels_map.iter().map(|(k, v)| (*k, v)).collect();
+                        let realiser = self.realiser();
+                        let frames: Vec<Tex> = offsets
+                            .iter()
+                            .map(|off| {
+                                let tau = t + off * dt;
+                                crate::shell::render_below_at(
+                                    &realiser,
+                                    self.doc,
+                                    comp,
+                                    below_layers,
+                                    tau,
+                                    t,
+                                    &pixels_ref,
+                                    visited,
+                                )
+                            })
+                            .collect();
+                        let weight = 1.0 / frames.len() as f32;
+                        let avg_layers: Vec<(&Tex, f32)> =
+                            frames.iter().map(|f| (f, weight)).collect();
+                        let average = self.compositor.accumulate(
+                            self.gpu,
+                            comp.width,
+                            comp.height,
+                            &avg_layers,
+                        );
+                        let mix = ab.mix as f32;
+                        if mix >= 1.0 {
+                            average
+                        } else {
+                            self.compositor.accumulate(
+                                self.gpu,
+                                comp.width,
+                                comp.height,
+                                &[(&below, 1.0 - mix), (&average, mix)],
+                            )
+                        }
+                    }
+                } else if let Some(p) = posterize {
                     let tau = lumit_core::fx::posterize_held_time(t, p.rate, p.phase);
                     let below_layers = &comp.layers[idx + 1..];
                     let mut pixels_map = HashMap::new();
@@ -1366,6 +1459,10 @@ impl Renderer<'_> {
                         comp,
                         below_layers,
                         tau,
+                        // The true playhead: an effect in the below-stack flagged
+                        // sample_temporally == false holds here, not at `tau`
+                        // (docs/impl/temporal-rerender.md §5, K-031).
+                        t,
                         &pixels_ref,
                         visited,
                     )

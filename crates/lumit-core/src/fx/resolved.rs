@@ -420,482 +420,519 @@ pub fn resolve_stack(
     effects
         .iter()
         .filter(|e| e.enabled && e.effect.namespace == EffectNamespace::Builtin)
-        .filter_map(|e| match e.effect.match_name.as_str() {
-            "blur" => {
-                let edge = match e.param("edge") {
-                    Some(EffectValue::Choice(c)) => (*c).min(2),
-                    _ => 1,
-                };
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                // Instances saved before a mode existed carry no "mode"
-                // parameter and resolve as Gaussian.
-                let mode = match e.param("mode") {
-                    Some(EffectValue::Choice(c)) => *c,
-                    _ => 0,
-                };
-                if mode == 1 {
-                    let length_pct = e.float_at("length", lt).unwrap_or(0.0) as f32;
-                    let angle_deg = e.float_at("angle", lt).unwrap_or(0.0) as f32;
-                    Some(Resolved::DirBlur {
-                        length_px: (length_pct / 100.0 * diag_px).max(0.0),
-                        angle_deg,
-                        edge,
-                        mix,
-                    })
-                } else if mode == 2 {
-                    let cx = (e.float_at("centre_x", lt).unwrap_or(50.0) / 100.0) as f32;
-                    let cy = (e.float_at("centre_y", lt).unwrap_or(50.0) / 100.0) as f32;
-                    let amount_pct = e.float_at("amount", lt).unwrap_or(0.0) as f32;
-                    let spin = !matches!(e.param("radial_type"), Some(EffectValue::Choice(1)));
-                    Some(Resolved::RadialBlur {
-                        centre_frac: [cx, cy],
-                        amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
-                        spin,
-                        edge,
-                        mix,
-                    })
-                } else {
-                    let radius_pct = e.float_at("radius", lt)? as f32;
-                    Some(Resolved::Blur {
-                        radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
-                        edge,
-                        mix,
-                    })
-                }
-            }
-            "sharpen" => {
-                let amount = (e.float_at("amount", lt)? as f32 / 100.0).clamp(0.0, 3.0);
-                let radius_pct = e.float_at("radius", lt)? as f32;
-                let threshold =
-                    (e.float_at("threshold", lt).unwrap_or(0.05) as f32).clamp(0.0, 1.0);
-                let luma_only = match e.param("luminance_only") {
-                    Some(EffectValue::Bool(b)) => *b,
-                    _ => true,
-                };
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Sharpen {
-                    amount,
-                    radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
-                    threshold,
-                    luma_only,
-                    mix,
-                })
-            }
-            "rgb_split" => {
-                let amount_pct = e.float_at("amount", lt)? as f32;
-                let angle_deg = e.float_at("angle", lt).unwrap_or(0.0) as f32;
-                let radial = match e.param("radial") {
-                    Some(EffectValue::Bool(b)) => *b,
-                    _ => false,
-                };
-                // Instances saved before the Wavelength mode existed carry
-                // no such parameter and resolve as the classic split.
-                let wavelength = match e.param("wavelength") {
-                    Some(EffectValue::Bool(b)) => *b,
-                    _ => false,
-                };
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                let amount_px = (amount_pct / 100.0 * diag_px).max(0.0);
-                Some(if wavelength {
-                    Resolved::SpectralSplit {
-                        amount_px,
-                        angle_deg,
-                        radial,
-                        mix,
-                    }
-                } else {
-                    Resolved::RgbSplit {
-                        amount_px,
-                        angle_deg,
-                        radial,
-                        mix,
-                    }
-                })
-            }
-            "chromatic_aberration" => {
-                let amount_px =
-                    (e.float_at("amount", lt).unwrap_or(4.0) as f32 * px_scale).max(0.0);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::ChromaticAberration { amount_px, mix })
-            }
-            "flash" => {
-                // Instances saved before the marker modes existed carry no
-                // "mode" parameter and resolve as Manual — byte-identically.
-                let mode = match e.param("mode") {
-                    Some(EffectValue::Choice(c)) => *c,
-                    _ => 0,
-                };
-                let envelope = match mode {
-                    // Trigger (1) and Strobe (2): the §3.7 beat envelope
-                    // from the §1.4 context; Strobe thins the beat list to
-                    // every Nth.
-                    1 | 2 => {
-                        let duration = e.float_at("duration", lt).unwrap_or(2.0).max(0.0);
-                        let fade = matches!(e.param("shape"), Some(EffectValue::Choice(1)));
-                        let nth = if mode == 2 { flash_nth(e, lt) } else { 1 };
-                        let phase = e.float_at("phase", lt).unwrap_or(0.0);
-                        flash_beat_envelope(markers, lt, duration, fade, nth, phase)
-                    }
-                    // Manual: keyframed hits on Trigger, decaying over
-                    // Decay — the original form, untouched.
-                    _ => {
-                        let decay_s = (e.float_at("decay", lt).unwrap_or(120.0) / 1000.0).max(0.0);
-                        match e.param("trigger") {
-                            Some(EffectValue::Float(p)) => flash_envelope(p, lt, decay_s),
-                            _ => 0.0,
-                        }
-                    }
-                };
-                let intensity = e.float_at("intensity", lt).unwrap_or(100.0).max(0.0) / 100.0;
-                let colour = e.colour_at("colour", lt).unwrap_or([1.0; 4]);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Flash {
-                    strength: (envelope * intensity).clamp(0.0, 1.0) as f32,
-                    colour: colour.map(|c| c as f32),
-                    mix,
-                })
-            }
-            "colour_balance" => {
-                let rgb = |id: &str, neutral: f64| -> [f32; 3] {
-                    let c = e.colour_at(id, lt).unwrap_or([neutral; 4]);
-                    [c[0] as f32, c[1] as f32, c[2] as f32]
-                };
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::ColourBalance {
-                    lift: rgb("lift", 0.0),
-                    gamma: rgb("gamma", 1.0).map(|g| g.max(0.01)),
-                    gain: rgb("gain", 1.0),
-                    mix,
-                })
-            }
-            "saturation" => {
-                let saturation =
-                    (e.float_at("saturation", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 2.0);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Saturation { saturation, mix })
-            }
-            "matte_key" => {
-                // The colour is resolved to a scene-linear array at frame time,
-                // like Vignette's tint would be; the CPU reference and the WGSL
-                // kernel derive its chroma/hue direction from it identically.
-                // Tolerance/Softness/Spill are per cent → plain 0..1 fractions.
-                let key = e.colour_at("key", lt).unwrap_or([0.0, 0.6, 0.0, 1.0]);
-                let tol = (e.float_at("tolerance", lt).unwrap_or(20.0) as f32 / 100.0).max(0.0);
-                let soft = (e.float_at("softness", lt).unwrap_or(10.0) as f32 / 100.0).max(0.0);
-                let spill = (e.float_at("spill", lt).unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::MatteKey {
-                    key: key.map(|c| c as f32),
-                    tol,
-                    soft,
-                    spill,
-                    mix,
-                })
-            }
-            "vignette" => {
-                let amount = (e.float_at("amount", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
-                let radius = (e.float_at("radius", lt).unwrap_or(0.75) as f32).clamp(0.0, 1.0);
-                let softness = (e.float_at("softness", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
-                let roundness = (e.float_at("roundness", lt).unwrap_or(1.0) as f32).clamp(0.0, 1.0);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Vignette {
-                    amount,
-                    radius,
-                    softness,
-                    roundness,
-                    mix,
-                })
-            }
-            "exposure" => {
-                let stops = e.float_at("stops", lt).unwrap_or(0.0);
-                let factor = 2f64.powf(stops) as f32;
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Exposure { factor, mix })
-            }
-            "hue_shift" => {
-                let angle = e.float_at("angle", lt).unwrap_or(0.0);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::HueShift {
-                    m: hue_matrix(angle),
-                    mix,
-                })
-            }
-            "contrast" => {
-                // k = contrast_percent / 100; hard min 0 (no inversion),
-                // unbounded above — the schema's own honest shape.
-                let k = (e.float_at("contrast", lt).unwrap_or(100.0) as f32 / 100.0).max(0.0);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Contrast { k, mix })
-            }
-            "gamma" => {
-                // Hard floor 0.01 keeps 1/gamma finite; no ceiling — the
-                // schema's own honest shape.
-                let gamma = (e.float_at("gamma", lt).unwrap_or(1.0) as f32).max(0.01);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Gamma { gamma, mix })
-            }
-            "temperature" => {
-                // k = Temperature / 100, clamped to the ±100 hard range. The
-                // two gains are computed here so the CPU reference and the WGSL
-                // kernel multiply by byte-identical f32 factors (§1.6);
-                // Temperature 0 → k 0 → gains exactly (1.0, 1.0), the neutral
-                // point.
-                let k =
-                    (e.float_at("temperature", lt).unwrap_or(0.0) as f32 / 100.0).clamp(-1.0, 1.0);
-                let gain_r = 1.0 + 0.5 * k;
-                let gain_b = 1.0 - 0.5 * k;
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Temperature {
-                    gain_r,
-                    gain_b,
-                    mix,
-                })
-            }
-            "invert" => {
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Invert { mix })
-            }
-            "tint" => {
-                // The two mapped colours resolve to scene-linear RGB at frame
-                // time (alpha ignored); the CPU reference and the WGSL kernel
-                // read the identical numbers.
-                let rgb = |id: &str, default: [f64; 4]| -> [f32; 3] {
-                    let c = e.colour_at(id, lt).unwrap_or(default);
-                    [c[0] as f32, c[1] as f32, c[2] as f32]
-                };
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Tint {
-                    black: rgb("black", [0.0, 0.0, 0.0, 1.0]),
-                    white: rgb("white", [1.0, 1.0, 1.0, 1.0]),
-                    mix,
-                })
-            }
-            "lut" => {
-                // Only Mix is Copy-carried; the `.cube` file's parsed cube is a
-                // 3D texture threaded beside the resolved op (the caller's LUT
-                // cache), exactly as the flow field is for Motion blur. A `lut`
-                // effect always resolves to exactly one Resolved::Lut, so the
-                // ordered enabled-builtin-`lut` list stays 1:1 and in order with
-                // the Resolved::Lut ops — the whole threading contract.
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Lut { mix })
-            }
-            "dof" => {
-                // Scalars only; the depth pass (the referenced layer's rendered
-                // texture) is threaded beside the op by the caller, exactly as
-                // the LUT cube is. A `dof` effect always resolves to exactly one
-                // Resolved::Dof, so the ordered enabled-builtin-`dof` list stays
-                // 1:1 and in order with the Dof ops — the threading contract.
-                let focus = (e.float_at("focus", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
-                let range = (e.float_at("range", lt).unwrap_or(0.1) as f32).clamp(0.0, 1.0);
-                // Aperture is the px@comp master; Near/Far are the per-side
-                // radii it scales about its default 8 (unity). A pre-feature
-                // project has only `aperture` and lacks Near/Far, which then
-                // read their default 8, so each side resolves to
-                // 8·(aperture/8)·px_scale = aperture·px_scale — identical to the
-                // old single-aperture behaviour. px@comp is scaled by the §2.3
-                // preview factor so a Half preview blurs the same disc as Full.
-                let master = e.float_at("aperture", lt).unwrap_or(8.0) as f32 / 8.0;
-                let near = e.float_at("near_aperture", lt).unwrap_or(8.0) as f32;
-                let far = e.float_at("far_aperture", lt).unwrap_or(8.0) as f32;
-                // Budget cap (docs/13, docs/14): the disc gather is O(coc²) taps
-                // per pixel, and the Aperture master MULTIPLIES the per-side radii
-                // (so Aperture 150 × Near 55 becomes a ~1000 px circle of
-                // confusion), which submits quadrillions of taps and hangs the
-                // GPU — freezing the preview that renders on the UI thread. Cap
-                // the effective per-side radius so the cost stays bounded;
-                // ordinary apertures (≤ the 40 px slider) sit far below it.
-                const MAX_APERTURE_PX: f32 = 128.0;
-                let near_aperture = (near * master * px_scale).clamp(0.0, MAX_APERTURE_PX);
-                let far_aperture = (far * master * px_scale).clamp(0.0, MAX_APERTURE_PX);
-                // Depth invert (a plain Bool; absent on pre-feature projects,
-                // where it reads false — the historical, unchanged behaviour).
-                let depth_invert = matches!(e.param("depth_invert"), Some(EffectValue::Bool(true)));
-                // Diagnostic view (clamped to the shipped modes; absent on
-                // pre-feature projects → 0 Rendered, the normal output).
-                let display = match e.param("display") {
-                    Some(EffectValue::Choice(c)) => (*c).min(2),
-                    _ => 0,
-                };
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Dof {
-                    focus,
-                    range,
-                    near_aperture,
-                    far_aperture,
-                    depth_invert,
-                    display,
-                    mix,
-                })
-            }
-            "glow" => {
-                let radius_pct = e.float_at("radius", lt).unwrap_or(8.0) as f32;
-                let threshold = (e.float_at("threshold", lt).unwrap_or(1.0) as f32).max(0.0);
-                let knee = (e.float_at("knee", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
-                let intensity = (e.float_at("intensity", lt).unwrap_or(1.0) as f32).max(0.0);
-                let tint = e.colour_at("tint", lt).unwrap_or([1.0; 4]);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Glow {
-                    radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
-                    threshold,
-                    knee,
-                    intensity,
-                    tint: tint.map(|c| c as f32),
-                    mix,
-                })
-            }
-            "shake" => {
-                let amp_pct = (e.float_at("amplitude", lt).unwrap_or(1.5) as f32).max(0.0);
-                let freq = e.float_at("frequency", lt).unwrap_or(8.0).max(0.0);
-                let rot_amount = (e.float_at("rotation", lt).unwrap_or(1.0) as f32).max(0.0);
-                let pump =
-                    (e.float_at("zoom_pump", lt).unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0);
-                let auto_scale = match e.param("auto_scale") {
-                    Some(EffectValue::Bool(b)) => *b,
-                    _ => true,
-                };
-                let seed = match e.param("seed") {
-                    Some(EffectValue::Seed(s)) => *s,
-                    _ => 0,
-                };
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                // The wobble: four independent noise channels sampled at
-                // local time × frequency (§3.4) — deterministic, hop-free,
-                // identical on every machine (§2.4).
-                let x = lt * freq;
-                let amp_px = (amp_pct / 100.0 * diag_px).max(0.0);
-                Some(Resolved::Shake {
-                    offset_px: [
-                        amp_px * shake_noise(seed, 0, x) as f32,
-                        amp_px * shake_noise(seed, 1, x) as f32,
-                    ],
-                    rotation_deg: rot_amount * shake_noise(seed, 2, x) as f32,
-                    zoom: 1.0 + pump * shake_noise(seed, 3, x) as f32,
-                    amp_px,
-                    rotation_max_deg: rot_amount,
-                    zoom_min: 1.0 - pump,
-                    auto_scale,
-                    mix,
-                })
-            }
-            "block_glitch" => {
-                let intensity =
-                    (e.float_at("intensity", lt).unwrap_or(0.35) as f32).clamp(0.0, 1.0);
-                let seed = match e.param("seed") {
-                    Some(EffectValue::Seed(s)) => *s,
-                    _ => 0,
-                };
-                // Local time discretised at the fixed tick rate (§3.12
-                // status note): block hashing reads this, never raw time.
-                let tick = (lt * GLITCH_TICK_HZ).floor() as i32;
-                let block_size_px =
-                    (e.float_at("block_size", lt).unwrap_or(24.0) as f32 * px_scale).max(1.0);
-                let jitter_frac =
-                    (e.float_at("block_jitter", lt).unwrap_or(25.0) as f32 / 100.0).clamp(0.0, 1.0);
-                let amount_pct = e.float_at("block_amount", lt).unwrap_or(3.0) as f32;
-                let chan_pct = e.float_at("channel_offset", lt).unwrap_or(1.0) as f32;
-                let slice_frac =
-                    (e.float_at("slice_repeat", lt).unwrap_or(20.0) as f32 / 100.0).clamp(0.0, 1.0);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::BlockGlitch {
-                    intensity,
-                    seed,
-                    tick,
-                    block_size_px,
-                    jitter_frac,
-                    amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
-                    chan_px: (chan_pct / 100.0 * diag_px).max(0.0),
-                    slice_frac,
-                    mix,
-                })
-            }
-            "scanlines" => {
-                let intensity =
-                    (e.float_at("intensity", lt).unwrap_or(0.35) as f32).clamp(0.0, 1.0);
-                let period_px =
-                    (e.float_at("scanline_period", lt).unwrap_or(3.0) as f32 * px_scale).max(1.0);
-                let darkness = (e.float_at("scanline_darkness", lt).unwrap_or(40.0) as f32 / 100.0)
-                    .clamp(0.0, 1.0);
-                let roll_speed = e.float_at("scanline_roll", lt).unwrap_or(0.0);
-                // The scanline pattern's pixel offset at this frame (roll
-                // speed × local time × period), so the kernel never sees
-                // raw time or does its own time maths (§2.4: the CPU/GPU
-                // must agree, and f32 time would round differently near a
-                // tick boundary than f64 does — precomputing sidesteps it).
-                let roll_px = (roll_speed * lt * f64::from(period_px)) as f32;
-                let interlace = match e.param("scanline_interlace") {
-                    Some(EffectValue::Bool(b)) => *b,
-                    _ => false,
-                };
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Scanlines {
-                    intensity,
-                    period_px,
-                    darkness,
-                    roll_px,
-                    interlace,
-                    mix,
-                })
-            }
-            "datamosh" => {
-                let intensity = (e.float_at("intensity", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Datamosh { intensity, mix })
-            }
-            "echo" => {
-                // Echoes k = 1..count sit at offset -k with intensity
-                // decay^k (v1 fixed one-frame spacing); the render supplies
-                // the neighbour frame at each offset. weights[i] is the echo
-                // at offset -(i+1).
-                let count = (e.float_at("echoes", lt).unwrap_or(4.0).round() as i32).clamp(1, 8);
-                let decay = (e.float_at("decay", lt).unwrap_or(0.6) as f32).clamp(0.0, 1.0);
-                let mode = match e.param("mode") {
-                    Some(EffectValue::Choice(c)) => (*c).min(2),
-                    _ => 1,
-                };
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                let mut weights = [0.0f32; 8];
-                for (i, w) in weights.iter_mut().enumerate() {
-                    if (i as i32) < count {
-                        *w = decay.powi(i as i32 + 1);
-                    }
-                }
-                Some(Resolved::Echo { weights, mode, mix })
-            }
-            "motion_blur" => {
-                // Streak length = motion × (shutter ÷ 360); the flow field
-                // (the motion itself) is threaded to the kernel separately.
-                // Samples is the spec's integer carried as a Float row —
-                // rounded and clamped to the same 2..64 the kernel loops.
-                let shutter_frac =
-                    (e.float_at("shutter_angle", lt).unwrap_or(180.0) as f32 / 360.0).max(0.0);
-                let samples =
-                    (e.float_at("samples", lt).unwrap_or(16.0).round() as i32).clamp(2, 64);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::MotionBlur {
-                    shutter_frac,
-                    samples,
-                    mix,
-                })
-            }
-            "transform" => {
-                // px@comp parameters scale by the preview factor (§2.3) so
-                // Half preview frames exactly like Full, only softer.
-                let px = |id: &str| e.float_at(id, lt).unwrap_or(0.0) as f32 * px_scale;
-                let pct = |id: &str| e.float_at(id, lt).unwrap_or(100.0) as f32 / 100.0;
-                let opacity =
-                    (e.float_at("opacity", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
-                Some(Resolved::Transform {
-                    anchor: [px("anchor_x"), px("anchor_y")],
-                    position: [px("position_x"), px("position_y")],
-                    scale: [pct("scale_x"), pct("scale_y")],
-                    rotation_deg: e.float_at("rotation", lt).unwrap_or(0.0) as f32,
-                    opacity,
-                    mix,
-                })
-            }
-            _ => None,
+        .filter_map(|e| resolve_one(e, lt, diag_px, px_scale, markers))
+        .collect()
+}
+
+/// Resolve a layer's live stack for a held/sub-frame re-render (docs/impl/
+/// temporal-rerender.md §5): an effect flagged `sample_temporally == false`
+/// resolves at the true frame time `frame_lt` (so a particle system or other
+/// costly/stochastic effect is not re-run per held sample), while every other
+/// effect resolves at the held/sample time `sample_lt`. When `sample_lt ==
+/// frame_lt` this is byte-identical to [`resolve_stack`], so an ordinary
+/// (non-temporal) render is unchanged — the two share [`resolve_one`], differing
+/// only in which layer time each effect is handed.
+pub fn resolve_stack_temporal(
+    effects: &[EffectInstance],
+    sample_lt: f64,
+    frame_lt: f64,
+    diag_px: f32,
+    px_scale: f32,
+    markers: &MarkerContext,
+) -> Vec<Resolved> {
+    effects
+        .iter()
+        .filter(|e| e.enabled && e.effect.namespace == EffectNamespace::Builtin)
+        .filter_map(|e| {
+            let lt = if e.sample_temporally {
+                sample_lt
+            } else {
+                frame_lt
+            };
+            resolve_one(e, lt, diag_px, px_scale, markers)
         })
         .collect()
+}
+
+/// Resolve one effect instance to its flat [`Resolved`] op at layer time `lt`,
+/// or None when it is a placeholder, an unknown name, or an orchestration-only
+/// effect (Posterize time, accumulation motion blur) that has no per-pixel op.
+/// The shared core of [`resolve_stack`] and [`resolve_stack_temporal`].
+fn resolve_one(
+    e: &EffectInstance,
+    lt: f64,
+    diag_px: f32,
+    px_scale: f32,
+    markers: &MarkerContext,
+) -> Option<Resolved> {
+    match e.effect.match_name.as_str() {
+        "blur" => {
+            let edge = match e.param("edge") {
+                Some(EffectValue::Choice(c)) => (*c).min(2),
+                _ => 1,
+            };
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            // Instances saved before a mode existed carry no "mode"
+            // parameter and resolve as Gaussian.
+            let mode = match e.param("mode") {
+                Some(EffectValue::Choice(c)) => *c,
+                _ => 0,
+            };
+            if mode == 1 {
+                let length_pct = e.float_at("length", lt).unwrap_or(0.0) as f32;
+                let angle_deg = e.float_at("angle", lt).unwrap_or(0.0) as f32;
+                Some(Resolved::DirBlur {
+                    length_px: (length_pct / 100.0 * diag_px).max(0.0),
+                    angle_deg,
+                    edge,
+                    mix,
+                })
+            } else if mode == 2 {
+                let cx = (e.float_at("centre_x", lt).unwrap_or(50.0) / 100.0) as f32;
+                let cy = (e.float_at("centre_y", lt).unwrap_or(50.0) / 100.0) as f32;
+                let amount_pct = e.float_at("amount", lt).unwrap_or(0.0) as f32;
+                let spin = !matches!(e.param("radial_type"), Some(EffectValue::Choice(1)));
+                Some(Resolved::RadialBlur {
+                    centre_frac: [cx, cy],
+                    amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
+                    spin,
+                    edge,
+                    mix,
+                })
+            } else {
+                let radius_pct = e.float_at("radius", lt)? as f32;
+                Some(Resolved::Blur {
+                    radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
+                    edge,
+                    mix,
+                })
+            }
+        }
+        "sharpen" => {
+            let amount = (e.float_at("amount", lt)? as f32 / 100.0).clamp(0.0, 3.0);
+            let radius_pct = e.float_at("radius", lt)? as f32;
+            let threshold = (e.float_at("threshold", lt).unwrap_or(0.05) as f32).clamp(0.0, 1.0);
+            let luma_only = match e.param("luminance_only") {
+                Some(EffectValue::Bool(b)) => *b,
+                _ => true,
+            };
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Sharpen {
+                amount,
+                radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
+                threshold,
+                luma_only,
+                mix,
+            })
+        }
+        "rgb_split" => {
+            let amount_pct = e.float_at("amount", lt)? as f32;
+            let angle_deg = e.float_at("angle", lt).unwrap_or(0.0) as f32;
+            let radial = match e.param("radial") {
+                Some(EffectValue::Bool(b)) => *b,
+                _ => false,
+            };
+            // Instances saved before the Wavelength mode existed carry
+            // no such parameter and resolve as the classic split.
+            let wavelength = match e.param("wavelength") {
+                Some(EffectValue::Bool(b)) => *b,
+                _ => false,
+            };
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            let amount_px = (amount_pct / 100.0 * diag_px).max(0.0);
+            Some(if wavelength {
+                Resolved::SpectralSplit {
+                    amount_px,
+                    angle_deg,
+                    radial,
+                    mix,
+                }
+            } else {
+                Resolved::RgbSplit {
+                    amount_px,
+                    angle_deg,
+                    radial,
+                    mix,
+                }
+            })
+        }
+        "chromatic_aberration" => {
+            let amount_px = (e.float_at("amount", lt).unwrap_or(4.0) as f32 * px_scale).max(0.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::ChromaticAberration { amount_px, mix })
+        }
+        "flash" => {
+            // Instances saved before the marker modes existed carry no
+            // "mode" parameter and resolve as Manual — byte-identically.
+            let mode = match e.param("mode") {
+                Some(EffectValue::Choice(c)) => *c,
+                _ => 0,
+            };
+            let envelope = match mode {
+                // Trigger (1) and Strobe (2): the §3.7 beat envelope
+                // from the §1.4 context; Strobe thins the beat list to
+                // every Nth.
+                1 | 2 => {
+                    let duration = e.float_at("duration", lt).unwrap_or(2.0).max(0.0);
+                    let fade = matches!(e.param("shape"), Some(EffectValue::Choice(1)));
+                    let nth = if mode == 2 { flash_nth(e, lt) } else { 1 };
+                    let phase = e.float_at("phase", lt).unwrap_or(0.0);
+                    flash_beat_envelope(markers, lt, duration, fade, nth, phase)
+                }
+                // Manual: keyframed hits on Trigger, decaying over
+                // Decay — the original form, untouched.
+                _ => {
+                    let decay_s = (e.float_at("decay", lt).unwrap_or(120.0) / 1000.0).max(0.0);
+                    match e.param("trigger") {
+                        Some(EffectValue::Float(p)) => flash_envelope(p, lt, decay_s),
+                        _ => 0.0,
+                    }
+                }
+            };
+            let intensity = e.float_at("intensity", lt).unwrap_or(100.0).max(0.0) / 100.0;
+            let colour = e.colour_at("colour", lt).unwrap_or([1.0; 4]);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Flash {
+                strength: (envelope * intensity).clamp(0.0, 1.0) as f32,
+                colour: colour.map(|c| c as f32),
+                mix,
+            })
+        }
+        "colour_balance" => {
+            let rgb = |id: &str, neutral: f64| -> [f32; 3] {
+                let c = e.colour_at(id, lt).unwrap_or([neutral; 4]);
+                [c[0] as f32, c[1] as f32, c[2] as f32]
+            };
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::ColourBalance {
+                lift: rgb("lift", 0.0),
+                gamma: rgb("gamma", 1.0).map(|g| g.max(0.01)),
+                gain: rgb("gain", 1.0),
+                mix,
+            })
+        }
+        "saturation" => {
+            let saturation =
+                (e.float_at("saturation", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 2.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Saturation { saturation, mix })
+        }
+        "matte_key" => {
+            // The colour is resolved to a scene-linear array at frame time,
+            // like Vignette's tint would be; the CPU reference and the WGSL
+            // kernel derive its chroma/hue direction from it identically.
+            // Tolerance/Softness/Spill are per cent → plain 0..1 fractions.
+            let key = e.colour_at("key", lt).unwrap_or([0.0, 0.6, 0.0, 1.0]);
+            let tol = (e.float_at("tolerance", lt).unwrap_or(20.0) as f32 / 100.0).max(0.0);
+            let soft = (e.float_at("softness", lt).unwrap_or(10.0) as f32 / 100.0).max(0.0);
+            let spill = (e.float_at("spill", lt).unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::MatteKey {
+                key: key.map(|c| c as f32),
+                tol,
+                soft,
+                spill,
+                mix,
+            })
+        }
+        "vignette" => {
+            let amount = (e.float_at("amount", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
+            let radius = (e.float_at("radius", lt).unwrap_or(0.75) as f32).clamp(0.0, 1.0);
+            let softness = (e.float_at("softness", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
+            let roundness = (e.float_at("roundness", lt).unwrap_or(1.0) as f32).clamp(0.0, 1.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Vignette {
+                amount,
+                radius,
+                softness,
+                roundness,
+                mix,
+            })
+        }
+        "exposure" => {
+            let stops = e.float_at("stops", lt).unwrap_or(0.0);
+            let factor = 2f64.powf(stops) as f32;
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Exposure { factor, mix })
+        }
+        "hue_shift" => {
+            let angle = e.float_at("angle", lt).unwrap_or(0.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::HueShift {
+                m: hue_matrix(angle),
+                mix,
+            })
+        }
+        "contrast" => {
+            // k = contrast_percent / 100; hard min 0 (no inversion),
+            // unbounded above — the schema's own honest shape.
+            let k = (e.float_at("contrast", lt).unwrap_or(100.0) as f32 / 100.0).max(0.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Contrast { k, mix })
+        }
+        "gamma" => {
+            // Hard floor 0.01 keeps 1/gamma finite; no ceiling — the
+            // schema's own honest shape.
+            let gamma = (e.float_at("gamma", lt).unwrap_or(1.0) as f32).max(0.01);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Gamma { gamma, mix })
+        }
+        "temperature" => {
+            // k = Temperature / 100, clamped to the ±100 hard range. The
+            // two gains are computed here so the CPU reference and the WGSL
+            // kernel multiply by byte-identical f32 factors (§1.6);
+            // Temperature 0 → k 0 → gains exactly (1.0, 1.0), the neutral
+            // point.
+            let k = (e.float_at("temperature", lt).unwrap_or(0.0) as f32 / 100.0).clamp(-1.0, 1.0);
+            let gain_r = 1.0 + 0.5 * k;
+            let gain_b = 1.0 - 0.5 * k;
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Temperature {
+                gain_r,
+                gain_b,
+                mix,
+            })
+        }
+        "invert" => {
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Invert { mix })
+        }
+        "tint" => {
+            // The two mapped colours resolve to scene-linear RGB at frame
+            // time (alpha ignored); the CPU reference and the WGSL kernel
+            // read the identical numbers.
+            let rgb = |id: &str, default: [f64; 4]| -> [f32; 3] {
+                let c = e.colour_at(id, lt).unwrap_or(default);
+                [c[0] as f32, c[1] as f32, c[2] as f32]
+            };
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Tint {
+                black: rgb("black", [0.0, 0.0, 0.0, 1.0]),
+                white: rgb("white", [1.0, 1.0, 1.0, 1.0]),
+                mix,
+            })
+        }
+        "lut" => {
+            // Only Mix is Copy-carried; the `.cube` file's parsed cube is a
+            // 3D texture threaded beside the resolved op (the caller's LUT
+            // cache), exactly as the flow field is for Motion blur. A `lut`
+            // effect always resolves to exactly one Resolved::Lut, so the
+            // ordered enabled-builtin-`lut` list stays 1:1 and in order with
+            // the Resolved::Lut ops — the whole threading contract.
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Lut { mix })
+        }
+        "dof" => {
+            // Scalars only; the depth pass (the referenced layer's rendered
+            // texture) is threaded beside the op by the caller, exactly as
+            // the LUT cube is. A `dof` effect always resolves to exactly one
+            // Resolved::Dof, so the ordered enabled-builtin-`dof` list stays
+            // 1:1 and in order with the Dof ops — the threading contract.
+            let focus = (e.float_at("focus", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
+            let range = (e.float_at("range", lt).unwrap_or(0.1) as f32).clamp(0.0, 1.0);
+            // Aperture is the px@comp master; Near/Far are the per-side
+            // radii it scales about its default 8 (unity). A pre-feature
+            // project has only `aperture` and lacks Near/Far, which then
+            // read their default 8, so each side resolves to
+            // 8·(aperture/8)·px_scale = aperture·px_scale — identical to the
+            // old single-aperture behaviour. px@comp is scaled by the §2.3
+            // preview factor so a Half preview blurs the same disc as Full.
+            let master = e.float_at("aperture", lt).unwrap_or(8.0) as f32 / 8.0;
+            let near = e.float_at("near_aperture", lt).unwrap_or(8.0) as f32;
+            let far = e.float_at("far_aperture", lt).unwrap_or(8.0) as f32;
+            // Budget cap (docs/13, docs/14): the disc gather is O(coc²) taps
+            // per pixel, and the Aperture master MULTIPLIES the per-side radii
+            // (so Aperture 150 × Near 55 becomes a ~1000 px circle of
+            // confusion), which submits quadrillions of taps and hangs the
+            // GPU — freezing the preview that renders on the UI thread. Cap
+            // the effective per-side radius so the cost stays bounded;
+            // ordinary apertures (≤ the 40 px slider) sit far below it.
+            const MAX_APERTURE_PX: f32 = 128.0;
+            let near_aperture = (near * master * px_scale).clamp(0.0, MAX_APERTURE_PX);
+            let far_aperture = (far * master * px_scale).clamp(0.0, MAX_APERTURE_PX);
+            // Depth invert (a plain Bool; absent on pre-feature projects,
+            // where it reads false — the historical, unchanged behaviour).
+            let depth_invert = matches!(e.param("depth_invert"), Some(EffectValue::Bool(true)));
+            // Diagnostic view (clamped to the shipped modes; absent on
+            // pre-feature projects → 0 Rendered, the normal output).
+            let display = match e.param("display") {
+                Some(EffectValue::Choice(c)) => (*c).min(2),
+                _ => 0,
+            };
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Dof {
+                focus,
+                range,
+                near_aperture,
+                far_aperture,
+                depth_invert,
+                display,
+                mix,
+            })
+        }
+        "glow" => {
+            let radius_pct = e.float_at("radius", lt).unwrap_or(8.0) as f32;
+            let threshold = (e.float_at("threshold", lt).unwrap_or(1.0) as f32).max(0.0);
+            let knee = (e.float_at("knee", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
+            let intensity = (e.float_at("intensity", lt).unwrap_or(1.0) as f32).max(0.0);
+            let tint = e.colour_at("tint", lt).unwrap_or([1.0; 4]);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Glow {
+                radius_px: (radius_pct / 100.0 * diag_px).max(0.0),
+                threshold,
+                knee,
+                intensity,
+                tint: tint.map(|c| c as f32),
+                mix,
+            })
+        }
+        "shake" => {
+            let amp_pct = (e.float_at("amplitude", lt).unwrap_or(1.5) as f32).max(0.0);
+            let freq = e.float_at("frequency", lt).unwrap_or(8.0).max(0.0);
+            let rot_amount = (e.float_at("rotation", lt).unwrap_or(1.0) as f32).max(0.0);
+            let pump = (e.float_at("zoom_pump", lt).unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0);
+            let auto_scale = match e.param("auto_scale") {
+                Some(EffectValue::Bool(b)) => *b,
+                _ => true,
+            };
+            let seed = match e.param("seed") {
+                Some(EffectValue::Seed(s)) => *s,
+                _ => 0,
+            };
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            // The wobble: four independent noise channels sampled at
+            // local time × frequency (§3.4) — deterministic, hop-free,
+            // identical on every machine (§2.4).
+            let x = lt * freq;
+            let amp_px = (amp_pct / 100.0 * diag_px).max(0.0);
+            Some(Resolved::Shake {
+                offset_px: [
+                    amp_px * shake_noise(seed, 0, x) as f32,
+                    amp_px * shake_noise(seed, 1, x) as f32,
+                ],
+                rotation_deg: rot_amount * shake_noise(seed, 2, x) as f32,
+                zoom: 1.0 + pump * shake_noise(seed, 3, x) as f32,
+                amp_px,
+                rotation_max_deg: rot_amount,
+                zoom_min: 1.0 - pump,
+                auto_scale,
+                mix,
+            })
+        }
+        "block_glitch" => {
+            let intensity = (e.float_at("intensity", lt).unwrap_or(0.35) as f32).clamp(0.0, 1.0);
+            let seed = match e.param("seed") {
+                Some(EffectValue::Seed(s)) => *s,
+                _ => 0,
+            };
+            // Local time discretised at the fixed tick rate (§3.12
+            // status note): block hashing reads this, never raw time.
+            let tick = (lt * GLITCH_TICK_HZ).floor() as i32;
+            let block_size_px =
+                (e.float_at("block_size", lt).unwrap_or(24.0) as f32 * px_scale).max(1.0);
+            let jitter_frac =
+                (e.float_at("block_jitter", lt).unwrap_or(25.0) as f32 / 100.0).clamp(0.0, 1.0);
+            let amount_pct = e.float_at("block_amount", lt).unwrap_or(3.0) as f32;
+            let chan_pct = e.float_at("channel_offset", lt).unwrap_or(1.0) as f32;
+            let slice_frac =
+                (e.float_at("slice_repeat", lt).unwrap_or(20.0) as f32 / 100.0).clamp(0.0, 1.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::BlockGlitch {
+                intensity,
+                seed,
+                tick,
+                block_size_px,
+                jitter_frac,
+                amount_px: (amount_pct / 100.0 * diag_px).max(0.0),
+                chan_px: (chan_pct / 100.0 * diag_px).max(0.0),
+                slice_frac,
+                mix,
+            })
+        }
+        "scanlines" => {
+            let intensity = (e.float_at("intensity", lt).unwrap_or(0.35) as f32).clamp(0.0, 1.0);
+            let period_px =
+                (e.float_at("scanline_period", lt).unwrap_or(3.0) as f32 * px_scale).max(1.0);
+            let darkness = (e.float_at("scanline_darkness", lt).unwrap_or(40.0) as f32 / 100.0)
+                .clamp(0.0, 1.0);
+            let roll_speed = e.float_at("scanline_roll", lt).unwrap_or(0.0);
+            // The scanline pattern's pixel offset at this frame (roll
+            // speed × local time × period), so the kernel never sees
+            // raw time or does its own time maths (§2.4: the CPU/GPU
+            // must agree, and f32 time would round differently near a
+            // tick boundary than f64 does — precomputing sidesteps it).
+            let roll_px = (roll_speed * lt * f64::from(period_px)) as f32;
+            let interlace = match e.param("scanline_interlace") {
+                Some(EffectValue::Bool(b)) => *b,
+                _ => false,
+            };
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Scanlines {
+                intensity,
+                period_px,
+                darkness,
+                roll_px,
+                interlace,
+                mix,
+            })
+        }
+        "datamosh" => {
+            let intensity = (e.float_at("intensity", lt).unwrap_or(0.5) as f32).clamp(0.0, 1.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Datamosh { intensity, mix })
+        }
+        "echo" => {
+            // Echoes k = 1..count sit at offset -k with intensity
+            // decay^k (v1 fixed one-frame spacing); the render supplies
+            // the neighbour frame at each offset. weights[i] is the echo
+            // at offset -(i+1).
+            let count = (e.float_at("echoes", lt).unwrap_or(4.0).round() as i32).clamp(1, 8);
+            let decay = (e.float_at("decay", lt).unwrap_or(0.6) as f32).clamp(0.0, 1.0);
+            let mode = match e.param("mode") {
+                Some(EffectValue::Choice(c)) => (*c).min(2),
+                _ => 1,
+            };
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            let mut weights = [0.0f32; 8];
+            for (i, w) in weights.iter_mut().enumerate() {
+                if (i as i32) < count {
+                    *w = decay.powi(i as i32 + 1);
+                }
+            }
+            Some(Resolved::Echo { weights, mode, mix })
+        }
+        "motion_blur" => {
+            // Streak length = motion × (shutter ÷ 360); the flow field
+            // (the motion itself) is threaded to the kernel separately.
+            // Samples is the spec's integer carried as a Float row —
+            // rounded and clamped to the same 2..64 the kernel loops.
+            let shutter_frac =
+                (e.float_at("shutter_angle", lt).unwrap_or(180.0) as f32 / 360.0).max(0.0);
+            let samples = (e.float_at("samples", lt).unwrap_or(16.0).round() as i32).clamp(2, 64);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::MotionBlur {
+                shutter_frac,
+                samples,
+                mix,
+            })
+        }
+        "transform" => {
+            // px@comp parameters scale by the preview factor (§2.3) so
+            // Half preview frames exactly like Full, only softer.
+            let px = |id: &str| e.float_at(id, lt).unwrap_or(0.0) as f32 * px_scale;
+            let pct = |id: &str| e.float_at(id, lt).unwrap_or(100.0) as f32 / 100.0;
+            let opacity =
+                (e.float_at("opacity", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            let mix = (e.float_at("mix", lt).unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
+            Some(Resolved::Transform {
+                anchor: [px("anchor_x"), px("anchor_y")],
+                position: [px("position_x"), px("position_y")],
+                scale: [pct("scale_x"), pct("scale_y")],
+                rotation_deg: e.float_at("rotation", lt).unwrap_or(0.0) as f32,
+                opacity,
+                mix,
+            })
+        }
+        _ => None,
+    }
 }

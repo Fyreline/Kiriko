@@ -1585,6 +1585,83 @@ pub const BUILTINS: &[EffectSchema] = &[
             },
         ],
     },
+    // Accumulation motion blur (docs/08 §3.26, docs/impl/temporal-rerender.md):
+    // the expensive, correct motion blur — it renders the WHOLE scene below it
+    // several times at in-between moments and averages the finished frames, so
+    // footage motion, animated effects, depth passes and everything else are all
+    // correct per sample (no blurred-depth artefact). NOT a per-pixel op: like
+    // Posterize time it changes *what time the layers below it render at*, so it
+    // is detected and executed at the frame-orchestration layer (the adjustment
+    // re-render seam in `draws`/`gpu` and export's `render_comp_linear`), never in
+    // `run_ops`; `resolve_stack` deliberately has no arm for it, so it resolves to
+    // nothing. An **adjustment** effect (docs/08 §1.5): it processes everything
+    // below, so "apply to all layers" is just the effect on a full-frame
+    // adjustment layer. Category Temporal, cost Heavy (≈ N× a full comp render).
+    // The sub-frame sample times reuse `MotionBlur::sample_offsets` (the same
+    // centred shutter maths per-layer motion blur uses), so `τ_k = t + off_k·dt`;
+    // the N finished below-composites are averaged by the hardware
+    // additive-at-1/N pass (`Compositor::accumulate`). Mix blends the averaged
+    // result against the frame-time composite. Boundaries as Posterize (K-125):
+    // temporal effects inside the sampled below-stack hold to stills.
+    EffectSchema {
+        match_name: "accumulation_mb",
+        label: "Accumulation motion blur",
+        version: 1,
+        category: FxCategory::Temporal,
+        traits: EffectTraits {
+            cost: CostClass::Heavy,
+            roi: Roi::FullFrame,
+            // The below-stack is re-rendered at each sub-frame time from the SAME
+            // held decode (footage is held, docs/impl/temporal-rerender.md §2), so
+            // no neighbour window is requested — the decode planner is never
+            // re-entered.
+            temporal: &[0],
+            premultiplied: true,
+            seeded: false,
+            beat_input: false,
+        },
+        params: &[
+            ParamSchema {
+                id: "samples",
+                label: "Samples",
+                // Sub-frame renders of the scene below across the open shutter
+                // (≥ 2 to blur). The schema has no integer kind, so this is a
+                // Float row (as Echo's Echoes and flow Motion blur's Samples are);
+                // the detector rounds and clamps. Heavy — each sample is a full
+                // comp re-render — so a tasteful default of 8.
+                kind: ParamKind::Float {
+                    default: 8.0,
+                    slider: (2.0, 32.0),
+                    hard: (Some(2.0), Some(64.0)),
+                },
+            },
+            ParamSchema {
+                id: "shutter_angle",
+                label: "Shutter angle",
+                // Degrees: the fraction of the frame interval the shutter is open
+                // is shutter ÷ 360, so the samples span that much of the motion.
+                // 180° (half a frame) is the film-standard look.
+                kind: ParamKind::Float {
+                    default: 180.0,
+                    slider: (0.0, 720.0),
+                    hard: (Some(0.0), Some(720.0)),
+                },
+            },
+            ParamSchema {
+                id: "shutter_phase",
+                label: "Shutter phase",
+                // Degrees: where the open interval sits relative to the frame
+                // time. -90 centres the samples on the frame (pairing with a 180
+                // angle to open a quarter-frame either side), the AE default.
+                kind: ParamKind::Float {
+                    default: -90.0,
+                    slider: (-360.0, 360.0),
+                    hard: (Some(-720.0), Some(720.0)),
+                },
+            },
+            MIX_PARAM,
+        ],
+    },
     // Motion blur (flow) / RSMB-class (docs/08 §3.2): synthesised motion blur
     // from real optical flow. Game capture has no natural blur; this estimates
     // the per-pixel motion between the current source frame and the next
