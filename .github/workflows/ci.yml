@@ -93,10 +93,14 @@ jobs:
         with:
           key: ffmpeg-${{ steps.ffver.outputs.v }}
       # Engine crates must hold the line; the threshold may rise, never fall.
-      # UI crates join the gate once egui_kittest harness tests land.
+      # The FFmpeg-free engine crates are all gated (measured 87–99% locally).
+      # lumit-gpu is held out while its kernel tests skip on adapterless runners;
+      # UI crates join once the egui_kittest harness lands.
       - run: >
-          cargo llvm-cov -p lumit-core -p lumit-project
-          --fail-under-lines 75
+          cargo llvm-cov
+          -p lumit-core -p lumit-project -p lumit-eval
+          -p lumit-cache -p lumit-flow -p lumit-text
+          --fail-under-lines 80
 
   no-hex-outside-theme:
     name: design-token lint (no hex literals outside the theme module)

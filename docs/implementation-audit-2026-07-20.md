@@ -597,7 +597,7 @@ several binding rules are violated or their promised enforcement doesn't exist.
 | §6 | Golden-frame EXR tests per platform | Not implemented | No EXR fixtures, no CI step | — |
 | §6 | cargo-fuzz on `.lum`/journal/OFX on a schedule | Not implemented | No fuzz dir or job | — |
 | §6 | Perf regression gates | Not implemented | See 13 | — |
-| §6 | Engine-crate coverage gate | Partial | Only `lumit-core` + `lumit-project` gated at 75%; other engine crates excluded | — |
+| §6 | Engine-crate coverage gate | Partial | Only `lumit-core` + `lumit-project` gated at 75%; other engine crates excluded | ✅ Done · gate extended to all six FFmpeg-free engine crates (`+eval/cache/flow/text`) and threshold ratcheted 75→80 (measured 93.7% combined locally via `cargo llvm-cov`; lowest crate 87%). `lumit-gpu` held out while its kernel tests skip on adapterless runners |
 | §7 | `rust_2024_idioms`, `clippy::pedantic` | Not implemented | Absent from workspace lints | — |
 | §7 | i18n from day one | Not implemented | Raw string literals everywhere | — |
 | §7 | CI greps glossary banned terms | Not implemented | No such step | — |
@@ -645,7 +645,7 @@ The standing rules over-claim.
 | Phase 4: expressions, OFX host, LFX, AE Bridge/importer, migration first-run | Not implemented | See 11/12; no QuickJS, no host, no importer, no first-run screen | — |
 | Phases 5–6 | Future-by-design | Doc marks them Ongoing / "specified when we get there" | — |
 | Standing rule: "performance gates run in CI on every merge" | **Contradicted** | No perf job exists in `ci.yml` | — |
-| Standing rule: every feature lands with tests + glossary compliance | Partial | Tests are widespread and a coverage gate exists (2 of 11 crates); glossary compliance not CI-checked; **and CI is currently red on `main`** (see cross-cutting findings) | — |
+| Standing rule: every feature lands with tests + glossary compliance | Partial | Tests are widespread and a coverage gate exists (2 of 11 crates); glossary compliance not CI-checked; **and CI is currently red on `main`** (see cross-cutting findings) | ◑ Partial · coverage gate now covers 6 of 11 crates (all FFmpeg-free engine crates, ≥80%); the `main`-red compositor test is fixed on the PR branch (fp32 accumulator); glossary CI grep still open (needs careful scoping of context-sensitive terms) |
 | Gates 0–3 runtime criteria (4K60 scrub, pixel parity, Twixtor-comparable flow, six-hour soak) | Unverifiable | Need hardware/runtime; no harness measures them | — |
 
 ---
