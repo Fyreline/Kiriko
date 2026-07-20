@@ -710,9 +710,6 @@ impl AppState {
     #[cfg(feature = "media")]
     pub fn request_preview_audio(&mut self) {
         let Some(id) = self.preview_item else { return };
-        if self.audio_cache.contains_key(&id) {
-            return;
-        }
         let has_audio = matches!(
             self.media.map.get(&id),
             Some(media::MediaStatus::Ready { probe, .. }) if probe.audio.is_some()
@@ -725,15 +722,38 @@ impl AppState {
             return;
         };
         let path = PathBuf::from(&f.media.absolute_path);
+        self.request_footage_audio(id, path);
+    }
+
+    /// Decode one footage item's whole audio into the byte-budgeted cache on
+    /// a background thread — the single decode both the footage preview and
+    /// the comp mix draw from. Idempotent: cached, in-flight and failed items
+    /// are not re-spawned (the failed set is cleared when a project is
+    /// opened, so a fixed path gets retried after a relink-and-reopen).
+    #[cfg(feature = "media")]
+    pub fn request_footage_audio(&mut self, id: Uuid, path: PathBuf) {
+        if self.audio_cache.contains_key(&id)
+            || self.audio_decode_pending.contains(&id)
+            || self.audio_decode_failed.contains(&id)
+        {
+            return;
+        }
         let rate = self
             .ensure_audio_engine()
             .map(|e| e.device_rate())
             .unwrap_or(48_000);
+        self.audio_decode_pending.insert(id);
         let tx = self.audio_tx.clone();
         std::thread::spawn(move || {
             let result = lumit_media::audio::decode_all(&path, rate).map_err(|e| e.to_string());
             let _ = tx.send((id, result));
         });
+    }
+
+    /// Resize the decoded-audio budget (Settings → Performance).
+    #[cfg(feature = "media")]
+    pub fn set_audio_cache_budget(&mut self, bytes: usize) {
+        self.audio_cache.set_budget(bytes);
     }
 
     #[cfg(feature = "media")]
@@ -754,11 +774,24 @@ impl AppState {
     #[cfg(feature = "media")]
     pub fn poll_audio(&mut self) {
         while let Ok((id, result)) = self.audio_rx.try_recv() {
+            self.audio_decode_pending.remove(&id);
             match result {
                 Ok(buffer) => {
-                    self.audio_cache.insert(id, std::sync::Arc::new(buffer));
+                    let cached = super::CachedAudio(std::sync::Arc::new(buffer));
+                    if !self.audio_cache.insert(id, cached) {
+                        // Larger than the whole audio budget: don't retry every
+                        // frame; the comp mix falls back to decode-per-bake.
+                        self.audio_decode_failed.insert(id);
+                        self.error = Some(
+                            "audio is larger than the audio cache budget (Settings → Performance)"
+                                .into(),
+                        );
+                    }
                 }
-                Err(e) => self.error = Some(format!("audio decode: {e}")),
+                Err(e) => {
+                    self.audio_decode_failed.insert(id);
+                    self.error = Some(format!("audio decode: {e}"));
+                }
             }
         }
     }
@@ -796,6 +829,7 @@ impl AppState {
                 continue;
             };
             jobs.push(crate::export::AudioJob {
+                item: *item,
                 path: PathBuf::from(&f.media.absolute_path),
                 in_s: layer.in_point.0.to_f64(),
                 out_s: layer.out_point.0.to_f64(),
@@ -826,12 +860,56 @@ impl AppState {
         }
         let duration_s = comp.duration.0.to_f64();
         let sig = super::audio_jobs_signature(&jobs, duration_s);
-        // Remember the bake we are about to spawn so [`Self::sync_comp_audio`]
-        // does not re-spawn the same one every frame while it decodes.
-        self.audio_preparing = Some((comp_id, sig));
+        if self.audio_preparing == Some((comp_id, sig)) {
+            return; // this exact mix is already on its way
+        }
+        // Fast path: mix from the byte-budgeted decoded-audio cache, so an
+        // audio edit (solo, mute, trim) re-sums in seconds instead of
+        // re-decoding whole files. Missing items kick off their one shared
+        // decode and the mix waits (sync_comp_audio retries every frame);
+        // items that can't be cached (decode failed, or bigger than the whole
+        // budget) drop to the legacy decode-per-bake path.
+        let mut decoded: Vec<(
+            std::sync::Arc<lumit_media::AudioBuffer>,
+            crate::export::AudioJob,
+        )> = Vec::with_capacity(jobs.len());
+        let mut fallback = false;
+        let mut waiting = false;
+        for job in &jobs {
+            if self.audio_decode_failed.contains(&job.item) {
+                fallback = true;
+                break;
+            }
+            // Clone the Arc out first so the cache borrow ends before the
+            // &mut self decode request below.
+            let hit = self
+                .audio_cache
+                .get(&job.item)
+                .filter(|c| c.0.rate == rate)
+                .map(|c| std::sync::Arc::clone(&c.0));
+            match hit {
+                Some(buffer) => decoded.push((buffer, job.clone())),
+                None => {
+                    waiting = true;
+                    self.request_footage_audio(job.item, job.path.clone());
+                }
+            }
+        }
         let tx = self.comp_audio_tx.clone();
+        if fallback {
+            self.audio_preparing = Some((comp_id, sig));
+            std::thread::spawn(move || {
+                let samples = crate::export::mixdown(&jobs, rate, duration_s);
+                let _ = tx.send((comp_id, sig, lumit_media::AudioBuffer { rate, samples }));
+            });
+            return;
+        }
+        if waiting {
+            return; // decodes in flight; retried next frame with the cache warmer
+        }
+        self.audio_preparing = Some((comp_id, sig));
         std::thread::spawn(move || {
-            let samples = crate::export::mixdown(&jobs, rate, duration_s);
+            let samples = crate::export::mixdown_prepared(&decoded, rate, duration_s);
             let _ = tx.send((comp_id, sig, lumit_media::AudioBuffer { rate, samples }));
         });
     }

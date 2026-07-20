@@ -435,6 +435,12 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                 let mut reveal = false;
                 let mut toggle_grid = false;
                 let mut toggle_wave = false;
+                #[cfg_attr(not(feature = "media"), allow(unused_mut, unused_variables))]
+                let mut beat_sens = app.beat_sensitivity;
+                #[cfg_attr(not(feature = "media"), allow(unused_mut, unused_variables))]
+                let mut detect_beats = false;
+                #[cfg_attr(not(feature = "media"), allow(unused_mut, unused_variables))]
+                let mut clear_beats = false;
                 bg.context_menu(|ui| {
                     if ui.button("Composition settings\u{2026}").clicked() {
                         open_settings = true;
@@ -464,6 +470,24 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                         toggle_wave = true;
                         ui.close_menu();
                     }
+                    // Beat detection lives where the markers land (docs/09 §5):
+                    // a 0–100 sensitivity slider (higher = more beats) and the
+                    // detect action, reachable from empty lane space.
+                    #[cfg(feature = "media")]
+                    {
+                        ui.separator();
+                        ui.add(
+                            egui::Slider::new(&mut beat_sens, 0..=100).text("Beat sensitivity"),
+                        );
+                        if ui.button("Detect beats").clicked() {
+                            detect_beats = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Clear beat markers").clicked() {
+                            clear_beats = true;
+                            ui.close_menu();
+                        }
+                    }
                 });
                 if toggle_grid {
                     app.timeline_grid =
@@ -475,6 +499,18 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                 }
                 if toggle_wave {
                     app.show_audio_bar = !app.show_audio_bar;
+                }
+                #[cfg(feature = "media")]
+                {
+                    app.beat_sensitivity = beat_sens;
+                    if detect_beats {
+                        let delta =
+                            lumit_audio::beat::delta_from_sensitivity(app.beat_sensitivity);
+                        app.detect_beats(comp_id, delta);
+                    }
+                    if clear_beats {
+                        app.clear_beat_markers();
+                    }
                 }
                 if open_settings {
                     app.open_comp_settings(comp_id);

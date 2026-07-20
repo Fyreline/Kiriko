@@ -78,6 +78,12 @@ pub(crate) struct PerformanceSettings {
     /// Video-memory (VRAM) frame-cache budget, in mebibytes (the GPU
     /// display-texture tier, `GpuViewer::vram`, docs/06 §5).
     pub vram_cache_mb: u32,
+    /// Decoded-audio budget, in mebibytes: how much RAM whole-file decoded
+    /// audio (the buffers playback mixes from) may hold. Defaults to half of
+    /// the machine's memory — a feature film's decoded audio runs to
+    /// gigabytes, and this cap is what stops it eating all of RAM (owner
+    /// decision after a real out-of-memory on a movie-length comp).
+    pub audio_cache_mb: u32,
     /// Whether Lumit fills the frame cache around the playhead while idle
     /// (docs/06 §5.4). On by default; off trades a colder cache for zero
     /// background decode/render work when the machine is busy elsewhere.
@@ -164,12 +170,24 @@ impl Default for PerformanceSettings {
             disk_cache_mb: 50 * 1024,
             // Matches `gpu::VRAM_TIER_CAP` (512 MiB).
             vram_cache_mb: 512,
+            audio_cache_mb: default_audio_cache_mb(),
             // Matches today's unconditional idle-fill behaviour.
             background_fill: true,
             // Matches today's unconditional beside-the-project behaviour.
             cache_root: None,
         }
     }
+}
+
+/// Half of the machine's memory, in mebibytes — the decoded-audio budget's
+/// default (floored at 1 GiB so a small machine still plays something,
+/// capped so the u32 can't wrap on a huge one). Queried once when defaults
+/// are built; the user adjusts it in Settings → Performance thereafter.
+fn default_audio_cache_mb() -> u32 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let half_mb = sys.total_memory() / 2 / (1024 * 1024);
+    u32::try_from(half_mb).unwrap_or(u32::MAX).max(1024)
 }
 
 /// Application-wide export settings (Settings → Export, docs/07-UI-SPEC §15,
@@ -569,6 +587,30 @@ impl Shell {
                 self.settings.vram_cache_mb = vram;
                 self.apply_cache_budgets();
             }
+
+            settings_divider(ui, theme);
+            let mut audio = self.settings.audio_cache_mb;
+            settings_row(
+                ui,
+                theme,
+                "Audio decode budget",
+                Some(
+                    "How much RAM whole-file decoded audio may hold. \
+                     Long films decode to gigabytes; this cap keeps them bounded.",
+                ),
+                |ui| {
+                    ui.label(egui::RichText::new("MB").color(theme.text_muted));
+                    ui.add(
+                        egui::DragValue::new(&mut audio)
+                            .speed(256)
+                            .range(1024..=1_048_576),
+                    );
+                },
+            );
+            if audio != self.settings.audio_cache_mb {
+                self.settings.audio_cache_mb = audio;
+                self.apply_cache_budgets();
+            }
         });
 
         settings_group(ui, theme, "Cache", |ui| {
@@ -702,6 +744,8 @@ impl Shell {
             if let Some(gpu) = &mut self.gpu {
                 gpu.set_vram_cap(vram);
             }
+            let audio = (self.settings.audio_cache_mb as usize).saturating_mul(1024 * 1024);
+            self.app.set_audio_cache_budget(audio);
         }
     }
 

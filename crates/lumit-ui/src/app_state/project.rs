@@ -72,6 +72,14 @@ impl AppState {
                     .spawn_probe(f.id, PathBuf::from(&f.media.absolute_path));
             }
         }
+        // A different project means different footage: drop the decoded-audio
+        // cache and let failed decodes retry against the new paths.
+        #[cfg(feature = "media")]
+        {
+            self.audio_cache.clear();
+            self.audio_decode_pending.clear();
+            self.audio_decode_failed.clear();
+        }
         self.journal = JournalFile::for_document(doc.id);
         self.selected_comp = doc.items.iter().find_map(|i| match i {
             ProjectItem::Composition(c) => Some(c.id),

@@ -55,15 +55,24 @@ impl Shell {
                 MenuAction::AddMarker => self.app.add_marker_at_playhead(),
                 MenuAction::ClearBeatMarkers => self.app.clear_beat_markers(),
                 MenuAction::DetectBeats => {
+                    // Honours the 0–100 sensitivity slider (docs/09 §5; the
+                    // slider itself lives in the timeline's context menu —
+                    // native menus can't host one).
                     #[cfg(feature = "media")]
                     if let Some(id) = self.app.preview_comp.or(self.app.selected_comp) {
-                        self.app.detect_beats(id, 1.5);
+                        let delta =
+                            lumit_audio::beat::delta_from_sensitivity(self.app.beat_sensitivity);
+                        self.app.detect_beats(id, delta);
                     }
                 }
                 MenuAction::DetectBeatsMore => {
+                    // "More markers": the slider's setting nudged 20 points up.
                     #[cfg(feature = "media")]
                     if let Some(id) = self.app.preview_comp.or(self.app.selected_comp) {
-                        self.app.detect_beats(id, 1.1);
+                        let delta = lumit_audio::beat::delta_from_sensitivity(
+                            self.app.beat_sensitivity.saturating_add(20).min(100),
+                        );
+                        self.app.detect_beats(id, delta);
                     }
                 }
                 MenuAction::AddMaskRectangle => self.add_mask_to_selected(ShapeKind::Rectangle),

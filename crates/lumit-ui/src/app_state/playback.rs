@@ -326,7 +326,11 @@ impl AppState {
         let Some(fps) = self.preview_fps() else {
             return;
         };
-        let Some(buffer) = self.audio_cache.get(&id).cloned() else {
+        let Some(buffer) = self
+            .audio_cache
+            .get(&id)
+            .map(|c| std::sync::Arc::clone(&c.0))
+        else {
             self.request_preview_audio(); // will be ready on a later press
             return;
         };

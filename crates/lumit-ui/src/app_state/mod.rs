@@ -450,6 +450,22 @@ impl lumit_cache::ByteSized for CachedCompFrame {
     }
 }
 
+/// A whole-file decoded audio buffer in the byte-budgeted audio cache — the
+/// shared copy playback mixes from and the footage preview plays. Wrapped so
+/// the cache can size it (a movie's decoded audio runs to gigabytes; the
+/// budget in Settings → Performance keeps the total bounded, which is what
+/// stops a long film eating all of RAM).
+#[cfg(feature = "media")]
+#[derive(Clone)]
+pub struct CachedAudio(pub std::sync::Arc<lumit_media::AudioBuffer>);
+
+#[cfg(feature = "media")]
+impl lumit_cache::ByteSized for CachedAudio {
+    fn byte_size(&self) -> usize {
+        self.0.samples.len() * std::mem::size_of::<f32>() + 32
+    }
+}
+
 /// See [`AppState::stamper`].
 #[cfg(feature = "media")]
 pub struct PreviewStamper<'a> {
@@ -657,8 +673,20 @@ pub struct AppState {
     pub realtime_ctrl: lumit_eval::schedule::RealtimeController,
     #[cfg(feature = "media")]
     audio_engine: Option<lumit_audio::AudioEngine>,
+    /// Byte-budgeted whole-file decoded audio, keyed by footage item — shared
+    /// by the footage preview and the comp-mix path so a file is decoded once,
+    /// and bounded so long films cannot eat all of RAM (Settings →
+    /// Performance → Audio decode budget).
     #[cfg(feature = "media")]
-    audio_cache: std::collections::HashMap<Uuid, std::sync::Arc<lumit_media::AudioBuffer>>,
+    audio_cache: lumit_cache::ByteLru<Uuid, CachedAudio>,
+    /// Items whose decode is in flight (spawn guard).
+    #[cfg(feature = "media")]
+    audio_decode_pending: std::collections::HashSet<Uuid>,
+    /// Items whose decode failed or whose buffer exceeds the cache budget —
+    /// the comp mix falls back to the legacy decode-per-bake path for these
+    /// instead of retrying every frame.
+    #[cfg(feature = "media")]
+    audio_decode_failed: std::collections::HashSet<Uuid>,
     #[cfg(feature = "media")]
     audio_loaded: Option<Uuid>,
     #[cfg(feature = "media")]
@@ -1031,7 +1059,11 @@ impl Default for AppState {
             #[cfg(feature = "media")]
             audio_engine: None,
             #[cfg(feature = "media")]
-            audio_cache: std::collections::HashMap::new(),
+            // Conservative fallback budget; Settings → Performance resizes
+            // this at startup to its half-of-system-RAM default (K-100).
+            audio_cache: lumit_cache::ByteLru::new(2 * 1024 * 1024 * 1024),
+            audio_decode_pending: std::collections::HashSet::new(),
+            audio_decode_failed: std::collections::HashSet::new(),
             #[cfg(feature = "media")]
             audio_loaded: None,
             #[cfg(feature = "media")]

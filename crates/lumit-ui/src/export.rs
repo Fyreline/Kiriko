@@ -57,6 +57,9 @@ pub struct ItemInfo {
 /// preview mix uses, so export audio matches playback).
 #[derive(Clone, PartialEq)]
 pub struct AudioJob {
+    /// The footage item the audio comes from — the key the preview path uses
+    /// to reuse an already-decoded buffer instead of re-decoding the file.
+    pub item: uuid::Uuid,
     pub path: PathBuf,
     pub in_s: f64,
     pub out_s: f64,
@@ -233,6 +236,30 @@ pub fn mixdown(jobs: &[AudioJob], rate: u32, duration_s: f64) -> Vec<f32> {
                 .map(|buf| (buf, job))
         })
         .collect();
+    let borrowed: Vec<(&lumit_media::AudioBuffer, &AudioJob)> =
+        decoded.iter().map(|(b, j)| (b, *j)).collect();
+    mix_decoded(&borrowed, rate, duration_s)
+}
+
+/// As [`mixdown`], but over already-decoded buffers — the preview path's
+/// fast re-mix (docs/09 §2 lazy-decode direction): a solo/mute/trim edit
+/// re-sums cached buffers in seconds instead of re-decoding whole files.
+pub fn mixdown_prepared(
+    decoded: &[(std::sync::Arc<lumit_media::AudioBuffer>, AudioJob)],
+    rate: u32,
+    duration_s: f64,
+) -> Vec<f32> {
+    let borrowed: Vec<(&lumit_media::AudioBuffer, &AudioJob)> =
+        decoded.iter().map(|(b, j)| (b.as_ref(), j)).collect();
+    mix_decoded(&borrowed, rate, duration_s)
+}
+
+/// The shared placement + sum over decoded buffers (each already at `rate`).
+fn mix_decoded(
+    decoded: &[(&lumit_media::AudioBuffer, &AudioJob)],
+    rate: u32,
+    duration_s: f64,
+) -> Vec<f32> {
     let total_frames = (duration_s * f64::from(rate)).round().max(0.0) as usize;
     let placements: Vec<lumit_audio::mix::PlacedAudio> = decoded
         .iter()
