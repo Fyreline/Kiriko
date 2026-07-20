@@ -128,11 +128,14 @@ fn feed_comp(
         h.update(&comp.motion_blur.samples.to_le_bytes());
     }
     // Draw order is content: iterate the stack as rendered. Layers outside
-    // their span or hidden contribute nothing — presence is gated, never
-    // hashed, so trimming a bar without crossing `t` changes no key.
+    // their span, hidden, or muted by someone else's solo (K-105) contribute
+    // nothing — presence is gated, never hashed, so trimming a bar without
+    // crossing `t` changes no key, and soloing the only contributing layer
+    // (same picture) keeps its cached frames valid.
+    let any_solo = lumit_core::model::any_solo(comp);
     for layer in &comp.layers {
         let in_span = t >= layer.in_point.0.to_f64() && t < layer.out_point.0.to_f64();
-        if !layer.switches.visible || !in_span {
+        if !layer.switches.visible || !in_span || (any_solo && !layer.switches.solo) {
             continue;
         }
         if matches!(layer.kind, LayerKind::Camera { .. }) {
@@ -867,6 +870,28 @@ mod tests {
         assert_eq!(key(&doc, &a, 1.0), key(&doc, &b, 1.0));
         // And deterministic across calls.
         assert_eq!(key(&doc, &a, 1.0), key(&doc, &a, 1.0));
+    }
+
+    /// Solo changes which layers render (K-105), so it must change the key —
+    /// the RAM/disk frame cache would otherwise replay the pre-solo picture.
+    /// Gated like visibility, never hashed: soloing every contributing layer
+    /// draws the same picture, so those keys (and caches) are shared.
+    #[test]
+    fn solo_gates_layers_out_of_the_key() {
+        let doc = Document::new();
+        let mut comp = comp_with(vec![
+            text_layer("top", 0.0, 5.0, 0.0),
+            text_layer("under", 0.0, 5.0, 0.0),
+        ]);
+        let both = key(&doc, &comp, 1.0);
+        comp.layers[0].switches.solo = true;
+        assert_ne!(
+            both,
+            key(&doc, &comp, 1.0),
+            "solo mutes the other layer, so the two-layer key must retire"
+        );
+        comp.layers[1].switches.solo = true;
+        assert_eq!(both, key(&doc, &comp, 1.0));
     }
 
     /// Timeline position is not content: sliding a static layer's span and

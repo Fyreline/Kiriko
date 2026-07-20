@@ -286,9 +286,13 @@ Default column order, all reorderable and hideable per workspace:
 6. **Parent** dropdown + pick-whip.
 7. Optional columns: in, out, duration, stretch.
 
-A row of small icons sits over the outline, level with the time ruler, labelling the switch
-columns (eye over visibility, "Layer" over the names, the flow glyph, "3D", and a speaker
-over mute). Right-clicking a layer's name opens the **layer menu** — rename, add an effect
+**Shipped arrangement (K-168, pass 5):** the columns sit in After Effects' five clusters,
+left to right — 1 visibility · audio · solo · lock; 2 label-colour chip · index · name;
+3 flow-or-collapse · fx bypass · motion blur · 3D; 4 matte · blend; 5 parent (dropdown; the
+pick-whip is a follow-up). Shy, quality and preserve-underlying-transparency await their
+backing machinery (see K-168); reorder/hide-per-workspace and the optional in/out/duration
+columns remain open. A row of small icons sits over the outline, level with the time ruler,
+labelling each cluster. Right-clicking a layer's name opens the **layer menu** — rename, add an effect
 (by category) or a mask, duplicate, delete, and the solo/enable toggles — so the things you
 do to a layer live in one place rather than scattered buttons. The thin divider between the
 outline and the lanes is a drag handle that sets the outline width.

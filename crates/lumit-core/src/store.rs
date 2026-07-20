@@ -726,6 +726,39 @@ mod tests {
         store.undo().unwrap();
         assert!(vis(&store));
 
+        // Lock and label (K-168) round-trip the same way.
+        let lock_label = |s: &DocumentStore| {
+            let doc = s.snapshot();
+            let l = doc
+                .comp(comp_id)
+                .unwrap()
+                .layers
+                .iter()
+                .find(|l| l.id == layer_id)
+                .unwrap()
+                .clone();
+            (l.switches.locked, l.label)
+        };
+        store
+            .commit(Op::SetLayerLocked {
+                comp: comp_id,
+                layer: layer_id,
+                locked: true,
+            })
+            .unwrap();
+        store
+            .commit(Op::SetLayerLabel {
+                comp: comp_id,
+                layer: layer_id,
+                label: 3,
+            })
+            .unwrap();
+        assert_eq!(lock_label(&store), (true, 3));
+        store.undo().unwrap();
+        assert_eq!(lock_label(&store), (true, 0));
+        store.undo().unwrap();
+        assert_eq!(lock_label(&store), (false, 0));
+
         store.undo().unwrap();
         store.undo().unwrap();
         let doc = store.snapshot();
