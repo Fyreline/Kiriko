@@ -583,6 +583,7 @@ impl Shell {
         #[cfg(not(target_os = "macos"))]
         self.shortcuts(ctx);
         self.keyframe_clipboard_shortcuts(ctx);
+        self.global_shortcuts(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.app.project_title()));
 
         #[cfg(not(target_os = "macos"))]

@@ -99,6 +99,21 @@ impl Shell {
         }
     }
 
+    /// Cross-platform global shortcuts (both platforms, unlike the non-macOS
+    /// menu accelerators in [`Self::shortcuts`] / the macOS native menu).
+    /// Shift+F3 toggles the timeline's graph editor (docs/07-UI-SPEC §5).
+    /// Skipped while a text field holds focus so typing is never stolen.
+    pub(super) fn global_shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        if ctx.memory(|m| m.focused()).is_some() {
+            return;
+        }
+        const GRAPH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
+        if ctx.input_mut(|i| i.consume_shortcut(&GRAPH)) {
+            self.app.timeline_graph_mode = !self.app.timeline_graph_mode;
+        }
+    }
+
     #[cfg(not(target_os = "macos"))]
     pub(super) fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut, Modifiers};

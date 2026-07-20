@@ -402,7 +402,7 @@ whole documented subsystems are absent.
 | 4.5 | Snapping to edit points/in-out/keyframes/playhead/work area; Ctrl suspend; indication | Partial | Markers/beats snapping + whole-frame magnet only | — |
 | 4.6 | `=`/`-`/`Shift+=`/`\` zoom keys; Ctrl-scrub audio; edge-follow scroll | Partial | Wheel routing exists; keys unbound; no audio scrub | — |
 | 4.7 | `[`/`]`, Alt+[/], Ctrl+D | Not implemented | Unbound; duplicate via menu only | — |
-| 5 | Graph toggled by Shift+F3; per-property include toggle | Contradicted | Button in timeline row (`bottom_bar.rs:70-84`); selected-property only | — |
+| 5 | Graph toggled by Shift+F3; per-property include toggle | Contradicted | Button in timeline row (`bottom_bar.rs:70-84`); selected-property only | ◑ Partial · ⚠ CI-compiled (can't build lumit-ui here) · **Shift+F3** now toggles the graph editor via a new cross-platform `global_shortcuts` handler (the bottom-bar button stays too). The per-property include toggle (graph still shows the selected property only) is unchanged |
 | 5.1 | Acceleration graph; auto/stacked/ghosted views | Not implemented | Value + Speed lenses only | — |
 | 5.3 | Ease-in/out `Shift+F9`/`Ctrl+Shift+F9`; auto-bezier; numeric keyframe entry; `F` fit; box scale | Partial | `F9` easy-ease + Linear/Bezier/Hold buttons only | — |
 | 6 | Effect Controls solo/reset/rename/copy-to-layer | Partial | Panel + enable/reorder/eyedropper exist; those extras not evident | — |
