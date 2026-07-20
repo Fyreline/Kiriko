@@ -152,6 +152,25 @@ impl AppState {
         }
     }
 
+    /// The recovery dialogue's third option (docs/10-FILE-FORMAT.md §4): open an
+    /// autosave instead of replaying the interrupted journal or taking the last
+    /// save. Choosing the autosave abandons the interrupted session's journal, so
+    /// it is cleared; the loaded state is marked dirty (it differs from the last
+    /// on-disk save) and keeps the project's own path, so the next Save writes
+    /// back to the project rather than the autosave file.
+    pub fn recover_from_autosave(&mut self, autosave_path: PathBuf) {
+        let Some(pending) = self.pending_recovery.take() else {
+            return;
+        };
+        if let Some(journal) = JournalFile::for_document(pending.doc.id) {
+            let _ = journal.clear();
+        }
+        match lumit_project::open(&autosave_path) {
+            Ok((doc, _manifest)) => self.install(doc, Some(pending.path), true),
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
     pub fn save(&mut self) {
         let path = match &self.path {
             Some(p) => Some(p.clone()),

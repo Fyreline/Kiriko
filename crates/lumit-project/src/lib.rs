@@ -157,6 +157,24 @@ pub fn autosave(doc: &Document, project_path: &Path, keep: usize) -> Result<Path
     Ok(newest)
 }
 
+/// The newest autosave beside `project_path`, if any exists — the crash-recovery
+/// dialogue's third option (docs/10-FILE-FORMAT.md §4: last save + journal, last
+/// save, or an autosave). [`autosave`] rotates so slot 1 is always the newest, so
+/// that is the one offered. `None` when no autosave has been written yet.
+#[must_use]
+pub fn latest_autosave(project_path: &Path) -> Option<PathBuf> {
+    let dir = project_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("autosaves");
+    let stem = project_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let slot1 = dir.join(format!("{stem}.autosave-1.lum"));
+    slot1.is_file().then_some(slot1)
+}
+
 /// Where a document's sidecar journal lives (docs/10-FILE-FORMAT.md §3–4).
 pub fn journal_path(doc_id: Uuid) -> Option<PathBuf> {
     let dirs = directories::ProjectDirs::from("dev", "Lumit", "Lumit")?;
@@ -410,6 +428,25 @@ mod tests {
         assert_eq!(newest.extra["gen"], serde_json::json!(6));
         let (oldest, _) = open(&autos.join("edit.autosave-5.lum")).unwrap();
         assert_eq!(oldest.extra["gen"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn latest_autosave_finds_the_newest_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("edit.lum");
+        // Nothing written yet.
+        assert!(latest_autosave(&project).is_none());
+        // After an autosave, slot 1 (the newest) is offered.
+        let mut doc = Document::new();
+        doc.extra.insert("gen".into(), serde_json::json!(42));
+        autosave(&doc, &project, 5).unwrap();
+        let found = latest_autosave(&project).expect("an autosave now exists");
+        assert_eq!(
+            found,
+            dir.path().join("autosaves").join("edit.autosave-1.lum")
+        );
+        let (loaded, _) = open(&found).unwrap();
+        assert_eq!(loaded.extra["gen"], serde_json::json!(42));
     }
 
     #[test]
