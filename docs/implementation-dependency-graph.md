@@ -101,7 +101,7 @@ flowchart TD
 
   subgraph SCACHE["Cache tiers"]
     FP16DISK["fp16 LZ4 planes + colourspace marker on disk (06 §5.4)"]
-    GREEDY["GreedyDual eviction, pinning, demotion (06 §5.3)"]
+    GREEDY["✅ GreedyDual eviction + pinning (06 §5.3) — ByteLru now evicts by<br/>staleness × size ÷ recompute-cost (the 'stale × cheap × large' rule),<br/>reduces to LRU for equal size/cost so callers are unchanged; pin/unpin<br/>protects the displayed frame + playhead window, bounded overage when only<br/>pins remain. Cost hints via insert_with_cost. Tested. Remaining: caller<br/>adoption (pass real costs / pin the playhead window) + VRAM→RAM demotion<br/>(waits on the VRAM tier)"]
     SQLIDX["index.db SQLite cache index (06 §5.4)"]
     VRAMTIER["VRAM cache tier (06 §5.1)"]
     CACHEBAR3["Cache-bar third tier + all-mint ramp (15 §6.3)"]
