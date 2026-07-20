@@ -13,10 +13,10 @@
 //!
 //! Scope: Source (solids), Transform (identity passthrough — placement
 //! resolution stays with the adapter's owner), Composite (all blend modes via
-//! the adapter's `BlendMode` → `Blend` map, per-layer opacity), CompOutput
-//! (over the comp background). Retime, masks and adjustments are later slices.
-//! Skips cleanly when no GPU adapter is present, like every other lumit-gpu
-//! test.
+//! the adapter's `BlendMode` → `Blend` map, per-layer opacity, and layer-mask
+//! coverage), Masks (coverage applied at Composite), CompOutput (over the comp
+//! background). Retime and adjustments are later slices. Skips cleanly when no
+//! GPU adapter is present, like every other lumit-gpu test.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -127,6 +127,11 @@ struct GpuKernels {
     background: [f64; 4],
     /// layer id → resolved placement (defaults to full-frame identity).
     layers: HashMap<Uuid, Placement>,
+    /// layer id → its rasterised mask coverage (alpha), applied at Composite
+    /// via `CompositeLayer::layer_mask`. The production adapter rasterises the
+    /// layer's mask shapes here; the test uploads a ready alpha texture. Absent
+    /// = no mask (fully visible).
+    masks: HashMap<Uuid, wgpu::Texture>,
 }
 
 impl GpuKernels {
@@ -175,6 +180,13 @@ impl KernelExecutor for GpuKernels {
                 .first()
                 .copied()
                 .ok_or_else(|| err("transform needs an input".into())),
+            // Masks pass the frame through here; the coverage is applied at
+            // Composite via `layer_mask`, exactly as the shipped renderer does
+            // (the shader multiplies the layer's alpha by the mask's alpha).
+            NodeKind::Masks { .. } => inputs
+                .first()
+                .copied()
+                .ok_or_else(|| err("masks needs an input".into())),
             NodeKind::Composite { layer, blend, .. } => {
                 let placement = self
                     .layers
@@ -204,6 +216,7 @@ impl KernelExecutor for GpuKernels {
                 // hand-off already supplies as the seed.
                 let mut top_layer = self.placed(top, placement);
                 top_layer.blend = blend_of(*blend);
+                top_layer.layer_mask = self.masks.get(layer);
                 let out = self.compositor.composite_seeded(
                     &self.ctx,
                     w,
@@ -363,7 +376,15 @@ impl Rig {
             size: self.size,
             background,
             layers,
+            masks: HashMap::new(),
         }
+    }
+
+    /// Upload an `w×h` RGBA mask; only its alpha channel is read as coverage
+    /// (the shader samples `layer_mask.a`). Aligning the mask to comp size
+    /// keeps the coverage crisp — texel centres land on comp-pixel centres.
+    fn mask(&self, rgba: &[u8], w: u32, h: u32) -> wgpu::Texture {
+        self.colour.upload_srgb8(&self.ctx, rgba, w, h)
     }
 
     /// sRGB bytes of one produced frame (via the display transform, exactly
@@ -528,6 +549,86 @@ fn two_layers_blend_in_linear_light_through_the_seams() {
 /// opaque solids on separate channels (red on top, green below) add to a frame
 /// that carries *both* channels — the give-away that the top blended with the
 /// bottom rather than replacing it (Normal would drop the green).
+/// A layer mask gates the layer through the seams: a full-frame red solid
+/// under a mask that is opaque on the left half and transparent on the right
+/// shows red on the left and the background on the right. The `Masks` node
+/// passes the frame through; the coverage lands at Composite via `layer_mask`,
+/// the same route the shipped renderer uses. Proves the mask vocabulary widens
+/// the skeleton without touching the executor (which stays semantics-blind).
+#[test]
+fn a_layer_mask_gates_the_layer_through_the_seams() {
+    let Some(rig) = Rig::new((8, 8)) else { return };
+    let (solid, layer, comp) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    let mut source = rig.source(HashMap::from([(solid, [255, 0, 0, 255])]));
+    // 8×8 mask aligned to the comp: left four columns opaque (alpha 255),
+    // right four transparent (alpha 0). RGB is ignored — only .a is read.
+    let mut mask_px = Vec::with_capacity(8 * 8 * 4);
+    for _y in 0..8 {
+        for x in 0..8 {
+            let a = if x < 4 { 255 } else { 0 };
+            mask_px.extend_from_slice(&[255, 255, 255, a]);
+        }
+    }
+    let mask_tex = rig.mask(&mask_px, 8, 8);
+    let mut kernels = rig.kernels([0.0, 0.0, 0.0, 1.0], HashMap::new());
+    kernels.masks.insert(layer, mask_tex);
+    let mut cache = MapCache::default();
+    // source → masks → transform → composite → output.
+    let node = |kind, inputs| Node { kind, inputs };
+    let graph = EvalGraph {
+        nodes: vec![
+            node(
+                NodeKind::Source {
+                    source: SourceRef::Solid(solid),
+                },
+                vec![],
+            ),
+            node(NodeKind::Masks { count: 1 }, vec![0]),
+            node(NodeKind::Transform { layer }, vec![1]),
+            node(
+                NodeKind::Composite {
+                    layer,
+                    blend: lumit_core::model::BlendMode::Normal,
+                    has_matte: false,
+                },
+                vec![2],
+            ),
+            node(
+                NodeKind::CompOutput {
+                    comp,
+                    width: 8,
+                    height: 8,
+                },
+                vec![3],
+            ),
+        ],
+        output: 4,
+    };
+    let token = Epoch::new().token();
+    let out = render_frame(
+        &graph,
+        0.0,
+        None,
+        &mut source,
+        &mut kernels,
+        &mut cache,
+        &token,
+    )
+    .expect("skeleton renders");
+    let px = rig.readback(out);
+    for y in 0..8usize {
+        for x in 0..8usize {
+            let p = &px[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4];
+            let expected: [u8; 4] = if x < 4 {
+                [255, 0, 0, 255] // masked-in: the red solid
+            } else {
+                [0, 0, 0, 255] // masked-out: the background shows
+            };
+            assert_eq!(p, expected, "pixel ({x},{y})");
+        }
+    }
+}
+
 #[test]
 fn a_blend_mode_carries_through_the_seams() {
     let Some(rig) = Rig::new((8, 8)) else { return };
