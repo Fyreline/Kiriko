@@ -589,7 +589,7 @@ several binding rules are violated or their promised enforcement doesn't exist.
 | §2 | `RationalTime{num:i64,den:i32}` in crate `lumit-time` | Partial | Sound newtypes exist, but as `Rational{i64,i64}` in `lumit-core/src/time.rs`; no `lumit-time` crate | — |
 | §2 | `FrameIndex(i64)` distinct type | Not implemented | Frames are bare `i64`/`usize` | — |
 | §4 | Deny `todo!`/`unimplemented!`/`indexing_slicing`/`arithmetic_side_effects` | Not implemented | Workspace lints deny only unwrap/expect/panic (`Cargo.toml:10-13`) | — |
-| §4 | No panicking indexing in hot paths | Violated | `&self.nodes[id]` (`graph.rs:87`); realtime audio callback indexes `buffer.samples[…]` (`lumit-audio/src/lib.rs:146-147`) | — |
+| §4 | No panicking indexing in hot paths | Violated | `&self.nodes[id]` (`graph.rs:87`); realtime audio callback indexes `buffer.samples[…]` (`lumit-audio/src/lib.rs:146-147`) | ◑ Partial · `graph.rs` node accessor now returns `Option<&Node>` via `.get()` (eval builds + 46 tests green locally) — panic path removed. Audio-callback index still open (can't build lumit-audio here) |
 | §4 | `DeviceLost` recoverable, never a crash | Not implemented | No handling | — |
 | §5 | Pooled frame allocations accounted to the governor | Not implemented | Ad-hoc `Vec`s; no pool/governor | — |
 | §5 | No unbounded queues without a decision entry | Violated | `mpsc::channel()` (unbounded) for beats/audio/comp-audio (`playback.rs:151`, `previewing.rs:709,795`) — drained latest-wins, but unbounded and unlogged | — |
