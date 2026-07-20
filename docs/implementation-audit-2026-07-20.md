@@ -458,7 +458,7 @@ missing or hardcoded.
 | 3.1 | Master limiter: hard safety clip at −0.3 dBFS true peak | Contradicted | Plain ±1.0 sample clamp (`mix.rs:49-51`); no true-peak logic | — |
 | 3.1/6 | Per-layer gain (volume keyframes) | Not implemented | Mix gain hardwired `1.0` (`export.rs:238`); no volume property in the model | — |
 | 6 | Fade-in/out commands | Not implemented | No fade code | — |
-| 6 | Audio solo silences non-soloed audio | Partial | Mute works; audio path never consults `solo` — soloing does not silence other audio | ✅ Done · afc7136 · CI-pending · 👁 review by ear |
+| 6 | Audio solo silences non-soloed audio | Partial | Mute works; audio path never consults `solo` — soloing does not silence other audio | ✅ Done · afc7136 · CI-green · 👁 review by ear |
 | 6 | Audio layer kind; detach-audio | Not implemented | Audio only via footage layers; no detach command | — |
 | 3.4 | Audio scrubbing (windowed grain, on by default) | Not implemented | Scrubbing pauses audio (`playback.rs:268`) | — |
 | 3.2 | Device-change stream rebuild ("MUST NOT desync") | Not implemented | One stream built once; error callback is a no-op | — |
@@ -626,7 +626,7 @@ spellings) all check out. Gaps:
 | §7.1 | Documented type scale (20px transport, 13px values, 24px+ display) | Partial | Applied styles are Heading 16 / Body 12 / Button 12 / Small 11 / Mono 12 (`theme.rs:685-704`) | — |
 | §9 | Contrast floors CI-checked from theme values | Not implemented | No contrast test or job | — |
 | §9 | AccessKit wired from day one (roles, landmarks, timeline tree) | Not implemented | Zero accesskit references | — |
-| §10 | Errors as fig-tinted banners | Partial | Single status line tinted `warning` (kraft), reused for success text (`app_update.rs:216,922-927`) | ✅ Done · afc7136 · CI-pending · 👁 review look |
+| §10 | Errors as fig-tinted banners | Partial | Single status line tinted `warning` (kraft), reused for success text (`app_update.rs:216,922-927`) | ✅ Done · afc7136 · CI-green · 👁 review look |
 
 ---
 
