@@ -259,14 +259,23 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(texel.rgb * a, a);
 }
 
-// Accumulation motion blur (docs/08 §3.26, docs/impl/temporal-rerender.md §3).
-// The inputs are already-PREMULTIPLIED comp composites (the below-stack rendered
-// at each sub-frame time), so — unlike fs_layer, which premultiplies a
-// straight-alpha source — this must NOT re-multiply by alpha. It scales the
-// premultiplied texel (colour AND alpha) by the per-sample weight params.x and
-// lets the pure-additive blend sum them, so N frames at weight 1/N give the
-// premultiplied arithmetic mean. Drawn 1:1 at comp size (identity placement).
+// fp32 accumulation (docs/06 §4). The combine sums its weighted premultiplied
+// sub-frames in an Rgba32Float target, so a still scene averages back to itself
+// bit-for-bit (an fp16 target rounds the 0.75·v partial sum and drifts a LSB on
+// fractional coverage). Each pass reads the running sum (accum_prev, an
+// unfilterable float read by textureLoad — never sampled) and adds this
+// sub-frame's weighted premultiplied texel; the host ping-pongs two fp32 targets.
+@group(0) @binding(6) var accum_prev: texture_2d<f32>;
+
 @fragment
-fn fs_accumulate(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(src, samp, in.uv) * layer.params.x;
+fn fs_accumulate_f32(in: VsOut) -> @location(0) vec4<f32> {
+    let prev = textureLoad(accum_prev, vec2<i32>(in.pos.xy), 0);
+    return prev + textureSample(src, samp, in.uv) * layer.params.x;
+}
+
+// Resolve the fp32 running sum back into the working (fp16) format — the single,
+// final rounding, for downstream compositing and display.
+@fragment
+fn fs_copy_f32(in: VsOut) -> @location(0) vec4<f32> {
+    return textureLoad(accum_prev, vec2<i32>(in.pos.xy), 0);
 }
