@@ -8,6 +8,7 @@ import 'package:lumit_flutter/main.dart';
 import 'package:lumit_flutter/shell/splash.dart';
 import 'package:lumit_flutter/state/dock.dart';
 import 'package:lumit_flutter/state/workspace.dart';
+import 'package:lumit_flutter/theme/theme.dart';
 
 Future<void> pumpApp(WidgetTester tester) async {
   await tester.binding.setSurfaceSize(const Size(1280, 800));
@@ -62,11 +63,16 @@ void main() {
     expect(find.text('Lumit'), findsNothing, reason: 'the splash gives way');
   });
 
-  testWidgets('a click skips the boot splash', (tester) async {
+  testWidgets('the splash absorbs clicks instead of letting them through',
+      (tester) async {
     await tester.binding.setSurfaceSize(const Size(1280, 800));
     await tester.pumpWidget(LumitApp(workspace: Workspace()));
     await tester.pump();
-    await tester.tap(find.text('Lumit'));
+    // A click during boot must reach nothing — not the splash (no skip),
+    // not the app behind it (owner feedback, 2026-07-21).
+    await tester.tap(find.text('Lumit'), warnIfMissed: false);
+    await tester.pump();
+    expect(find.text('Lumit'), findsOneWidget, reason: 'no click-to-skip');
     await tester.pumpAndSettle();
     expect(find.text('Lumit'), findsNothing);
   });
@@ -87,7 +93,7 @@ void main() {
     expect(find.text('Flutter frontend — phase F0'), findsOneWidget);
   });
 
-  testWidgets('Window → Settings… opens the Settings window on Appearance',
+  testWidgets('Window → Settings… opens the Settings window on General',
       (tester) async {
     await pumpApp(tester);
 
@@ -96,7 +102,12 @@ void main() {
     await tester.tap(find.text('Settings…'));
     await tester.pumpAndSettle();
 
+    // Opens on General (owner request 2026-07-21; the egui window opened on
+    // Appearance — a recorded deviation).
     expect(find.text('Settings'), findsOneWidget);
+    expect(find.text('Autosave'), findsOneWidget);
+    await tester.tap(find.text('Appearance').first);
+    await tester.pumpAndSettle();
     expect(find.text('Colour scheme'), findsOneWidget);
     expect(find.text('Panel shape'), findsOneWidget);
 
@@ -212,5 +223,39 @@ void main() {
     await tester.pump();
     expect(accentEdged().length, 1,
         reason: 'exactly one pane wears the accent edge after a click');
+  });
+
+  testWidgets('the settings dropdowns open and apply their pick',
+      (tester) async {
+    // Regression (owner report, 2026-07-21): opening a BareDropdown inside
+    // the Settings window forced an infinite width, and every later click
+    // failed with "Cannot hit test a render box with no size".
+    final ws = Workspace();
+    await pumpWith(tester, ws);
+
+    await tester.tap(find.text('Window'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Settings…'));
+    await tester.pumpAndSettle();
+
+    // The window opens on General (owner request); go to Appearance.
+    expect(find.text('Autosave'), findsOneWidget);
+    await tester.tap(find.text('Appearance').first);
+    await tester.pumpAndSettle();
+
+    // Colour scheme: open the dropdown, pick Gruvbox dark, watch it apply.
+    await tester.tap(find.text('Dark').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Gruvbox dark'), findsOneWidget);
+    await tester.tap(find.text('Gruvbox dark'));
+    await tester.pumpAndSettle();
+    expect(ws.colorScheme, LumitColorScheme.gruvboxDark);
+
+    // Panel shape: same path, different dropdown.
+    await tester.tap(find.text('Sharp'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Round'));
+    await tester.pumpAndSettle();
+    expect(ws.themeShape, ThemeShape.round);
   });
 }

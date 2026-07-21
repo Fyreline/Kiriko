@@ -210,18 +210,23 @@ class BareDropdown<T> extends StatelessWidget {
         final picked = await showLumitPopup<T>(
           context: context,
           position: origin + Offset(0, box.size.height + 2),
+          // IntrinsicWidth bounds the stretch: a float in the overlay has
+          // unbounded width, and a stretched Column inside one otherwise
+          // forces an infinite width (the settings-dropdown crash).
           builder: (close) => FloatSurface(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                for (final o in options)
-                  MenuRow(
-                    selected: o == value,
-                    onPressed: () => close(o),
-                    child: Text(label(o)),
-                  ),
-              ],
+            child: IntrinsicWidth(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final o in options)
+                    MenuRow(
+                      selected: o == value,
+                      onPressed: () => close(o),
+                      child: Text(label(o)),
+                    ),
+                ],
+              ),
             ),
           ),
         );

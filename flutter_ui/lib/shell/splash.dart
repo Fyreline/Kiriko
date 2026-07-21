@@ -29,8 +29,8 @@ class SplashOverlay extends StatefulWidget {
 
 class _SplashOverlayState extends State<SplashOverlay>
     with SingleTickerProviderStateMixin {
-  static const _perLine = Duration(milliseconds: 150);
-  static const _hold = Duration(milliseconds: 400);
+  static const _perLine = Duration(milliseconds: 180);
+  static const _hold = Duration(milliseconds: 600);
 
   late final AnimationController _controller = AnimationController(
     vsync: this,
@@ -60,10 +60,10 @@ class _SplashOverlayState extends State<SplashOverlay>
   @override
   Widget build(BuildContext context) {
     final t = ThemeScope.of(context).theme;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      // A click skips the boot card.
-      onTap: () => _controller.value = 1.0,
+    // Deliberately not clickable and fully opaque: the egui splash is the
+    // window until boot ends, so nothing of the application shows through
+    // and no input reaches it (owner feedback, 2026-07-21).
+    return AbsorbPointer(
       child: ColoredBox(
         color: t.surface0,
         child: Center(

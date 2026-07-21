@@ -112,9 +112,20 @@ Recorded 2026-07-21, from the owner:
    not reproduce. Owner notes there are probably more of this kind — add
    them here as they surface.
 
+5. **Full editor-colour customisation (design change, post-parity).** The
+   accent picker should eventually live in a more advanced appearance
+   submenu where every editor colour can be edited, not just the accent
+   (owner, 2026-07-21; matches the long-standing theme-customisation wish).
+   The single accent picker stays until then.
+
 ## Known deliberate deviations
 
 - No migration of the eframe-persisted workspace; the Flutter frontend starts
   from defaults (03-ARCHITECTURE §Persistence).
+- The Settings window opens on General, not Appearance (owner request,
+  2026-07-21).
+- The splash is not skippable by click (matches egui, where the boot card is
+  the window; an early click-to-skip experiment was removed on owner
+  feedback, 2026-07-21).
 - Menus animate per AnimationLevel (egui's could not animate at all).
 - macOS native menu bar deferred with the rest of the macOS pass.

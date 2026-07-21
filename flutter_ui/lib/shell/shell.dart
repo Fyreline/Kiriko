@@ -222,8 +222,10 @@ class _ShellBodyState extends State<_ShellBody> {
               onClose: () => setState(() => paletteOpen = false),
             ),
           if (!splashDone)
-            SplashOverlay(
-              onDone: () => setState(() => splashDone = true),
+            Positioned.fill(
+              child: SplashOverlay(
+                onDone: () => setState(() => splashDone = true),
+              ),
             ),
         ],
       ),

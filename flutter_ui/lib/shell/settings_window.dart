@@ -44,7 +44,9 @@ class SettingsWindow extends StatefulWidget {
 }
 
 class _SettingsWindowState extends State<SettingsWindow> {
-  SettingsPage _page = SettingsPage.appearance;
+  // Opens on General by owner request (2026-07-21) — a recorded deviation
+  // from the egui window, which always opens on Appearance.
+  SettingsPage _page = SettingsPage.general;
 
   Workspace get ws => widget.workspace;
 
