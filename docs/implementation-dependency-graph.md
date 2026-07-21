@@ -100,7 +100,7 @@ flowchart TD
   end
 
   subgraph SCACHE["Cache tiers"]
-    FP16DISK["fp16 LZ4 planes + colourspace marker on disk (06 §5.4)"]
+    FP16DISK["fp16 LZ4 planes + colourspace marker on disk (06 §5.4) —<br/>the disk tier ALREADY does LZ4 + a magic/format/colourspace/size<br/>header for RGBA8 (today's producible format); the fp16-planes format<br/>tag is blocked on the working fp16 frame reaching the CPU, i.e. the<br/>pixel-pass migration — not a standalone task"]
     GREEDY["✅ GreedyDual eviction + pinning (06 §5.3) — ByteLru now evicts by<br/>staleness × size ÷ recompute-cost (the 'stale × cheap × large' rule),<br/>reduces to LRU for equal size/cost so callers are unchanged; pin/unpin<br/>protects the displayed frame + playhead window, bounded overage when only<br/>pins remain. Cost hints via insert_with_cost. Tested. Remaining: caller<br/>adoption (pass real costs / pin the playhead window) + VRAM→RAM demotion<br/>(waits on the VRAM tier)"]
     SQLIDX["index.db SQLite cache index (06 §5.4)"]
     VRAMTIER["VRAM cache tier (06 §5.1)"]
@@ -323,3 +323,23 @@ flowchart TD
 Free-standing boxes (no arrows) are good gap-fillers between the chains — e.g. GreedyDual
 eviction, scopes-on-GPU, cargo-deny/toolchain pinning, the smooth-zoom effect, journal
 compaction, device-change audio rebuild.
+
+## Engine-local vs wired work (status)
+
+A run of engine-crate work has landed and is CI-green: the render-spine walking skeleton now
+covers all blend modes, layer masks and adjustment-layer effects through the trait seams;
+GreedyDual cache eviction + pinning; the bounded undo journal (§5 compaction); the whole
+file-format engine chain (content fingerprint → 4-step relink resolver → collect-for-sharing →
+schema-migration framework); the deterministic stress fixture + a document-scale benchmark; and
+a new `lumit-keymap` crate carrying the full §15 binding table with conflict detection. All were
+built and tested **locally** (engine crates + lumit-gpu on lavapipe) and verified in CI.
+
+What remains is, by nature, **not cleanly engine-local** — it needs one of: the pixel-pass
+**migration** (switching preview/export onto the executor, which also unblocks the fp16 disk
+format, the ROI/DoD protocol, the export compiler and the per-node profiler); **lumit-ui**
+wiring (the relink dialogue, collect/keymap/settings surfaces, the Preview/Audio panels, viewer
+chrome, gizmos, workspaces); **GPU** work (VRAM tier, texture pool → governor → degradation
+ladder, device-loss recovery); **media/FFmpeg** (persistent decoders, hardware decode, the
+colour-management pass, proxies) or **audio/ALSA** (gains, fades, streaming windows); or an
+**owner decision** (razor-on-C, the Adjustment-layer colour, the glossary CI gate). Those are
+picked up in the app crate (built via CI) or once the migration lands.
