@@ -260,6 +260,83 @@ class AppStateStub extends ChangeNotifier {
             : '$failed items could not be imported';
   }
 
+  /// The first composition in the current snapshot — the active comp the Viewer
+  /// and Timeline read (nested comps are searched too). Null when there is no
+  /// bridge/snapshot or no composition yet.
+  BridgeComp? get frontComp {
+    final snap = snapshot;
+    if (snap == null) return null;
+    return _firstComp(snap.items);
+  }
+
+  BridgeComp? _firstComp(List<BridgeItem> items) {
+    for (final item in items) {
+      if (item.kind == BridgeItemKind.composition && item.comp != null) {
+        return item.comp;
+      }
+      final nested = _firstComp(item.children);
+      if (nested != null) return nested;
+    }
+    return null;
+  }
+
+  // --- Snapshot-v2 op pass-throughs ---------------------------------------
+  //
+  // The Timeline and editor panels drive these; each routes to the engine,
+  // refreshes the held snapshot and surfaces any error in the error tint. With
+  // no bridge they are quiet no-ops (the placeholder build has no document).
+
+  /// Flip a layer's switch (`visible`, `audible`, `locked`, `solo`,
+  /// `motion_blur`, `fx`, `three_d`, `collapse`).
+  void setLayerSwitch(
+      String compId, String layerId, String switchName, bool value) {
+    final b = bridge;
+    if (b == null) return;
+    _applyOp(b.setLayerSwitch(compId, layerId, switchName, value));
+  }
+
+  /// Edit a layer's span at [frame] (`move_in`, `move_out`, `trim_in`,
+  /// `trim_out`).
+  void editLayerSpan(String compId, String layerId, String edit, int frame) {
+    final b = bridge;
+    if (b == null) return;
+    _applyOp(b.editLayerSpan(compId, layerId, edit, frame));
+  }
+
+  /// Set one transform property to a static [value] (snake_case `TransformProp`
+  /// name, e.g. `position_x`, `opacity`).
+  void setTransform(
+      String compId, String layerId, String property, double value) {
+    final b = bridge;
+    if (b == null) return;
+    _applyOp(b.setTransform(compId, layerId, property, value));
+  }
+
+  /// Drop a user marker on the composition timeline at [frame].
+  void addMarker(String compId, int frame) {
+    final b = bridge;
+    if (b == null) return;
+    _applyOp(b.addMarker(compId, frame));
+  }
+
+  /// Decode one footage frame for the Viewer's CPU path, or null when there is
+  /// no bridge or the frame cannot be decoded.
+  DecodedFrame? decodeFrame(String itemId, int frame) =>
+      bridge?.decodeFrame(itemId, frame);
+
+  /// Apply a fine-grained op reply: refresh the snapshot on success (no chatty
+  /// notice — these are direct manipulations, not menu actions), surface any
+  /// failure in the error tint.
+  void _applyOp(BridgeReply reply) {
+    if (reply.ok) {
+      _adoptSnapshot(reply.snapshot);
+      errorNotice = null;
+    } else {
+      errorNotice = reply.error;
+    }
+    notifyListeners();
+  }
+
   /// Adopt a snapshot into the held state (undo/redo flags follow it).
   void _adoptSnapshot(BridgeSnapshot? snap) {
     if (snap == null) return;

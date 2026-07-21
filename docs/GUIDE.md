@@ -2263,3 +2263,26 @@ Rust build uses). Then, from `flutter_ui/`: `flutter run -d windows` to launch,
 `flutter test` for the tests, `flutter analyze` for the lint pass. The bridge
 library builds separately with `cargo build -p lumit-bridge`, which drops
 `lumit_bridge.dll` in `target/debug/` where the Flutter app looks for it.
+
+**What the bridge carries now (v0.2).** The first bridge only described the
+project as a tree of item names. It now also carries the *inside* of things, so
+the Viewer, Timeline and property editors have something to draw. Ask for the
+document and each composition comes back with its size, frame rate, total frame
+count, its stack of layers (each with a name, a kind, the frames it starts and
+ends on, and its row of switches — visible, locked, solo and the rest), and any
+markers on its timeline. Each piece of footage comes back with its resolution,
+rate and length once Lumit has *probed* the file (read its vital statistics),
+plus a plain status word — `ok`, `missing` (the file has moved), or `unprobed`
+(not looked at yet). The frontend can also make small edits — flip a switch,
+nudge a layer's start or end to the playhead, set a transform value, drop a
+marker — and each goes through the same undo machinery the egui app uses, so one
+press of undo takes it back. All of that is still ordinary text (JSON) crossing
+the bridge. The one exception is the actual picture: a single video frame is far
+too big to send as text, so when the Viewer asks to decode a frame the engine
+hands back a raw block of pixels instead. Dart *copies those pixels out
+immediately and then hands the block straight back to the engine to free* — the
+same "borrow it, copy it, give it back" manners the text replies already use, so
+neither side is left holding memory the other owns. Reading video needs FFmpeg,
+which is bundled behind an on-by-default switch (the `media` feature); turn it
+off and the app still builds and runs, footage just reads as "unprobed" and no
+frames decode.

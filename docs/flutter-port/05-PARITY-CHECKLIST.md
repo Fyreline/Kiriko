@@ -81,7 +81,28 @@ where the row is logic).
 ## Phase F2 — Viewer (not started)
 
 - ☐ Shared-texture path (D3D11 interop) + `Texture` widget
-- ☐ CPU RGBA fallback
+- ◑ CPU RGBA fallback — bridge side done: `lumit_bridge_decode_frame` returns a
+  Rust-owned tightly-packed RGBA8 buffer (freed by `lumit_bridge_free_buffer`,
+  the copy-then-free contract), behind the default-on `media` feature; Dart's
+  `decodeFrame` copies the pixels into a `DecodedFrame`. Viewer wiring (blitting
+  it through a `ui.Image`) is another agent's work
+
+## Bridge v0.2 data + ops (done, feeds F2/F3/F4)
+
+- ☑ Snapshot v2 (additive): comps carry `{width,height,fps,frame_count,layers,
+  markers}`; footage carries `status` (ok/missing/unprobed/failed) and, once
+  probed, `media` `{duration_frames,fps,width,height,audio}`. Frames are integers
+  from the comp's own rate (rational time). Layer `kind`/`switches` mirror the
+  model names. Typed Dart classes (`BridgeComp`/`BridgeLayer`/`BridgeSwitches`/
+  `BridgeMedia`/`BridgeFps`) parse it; `AppStateStub.frontComp` resolves the
+  active comp
+- ☑ Layer/transform/marker ops through the real undo path: `set_layer_switch`,
+  `edit_layer_span`, `set_transform`, `add_marker` (each one `lumit-core` op, one
+  undo step, full snapshot back). Dart pass-throughs refresh the snapshot and
+  surface failures on the error tint
+- ◑ Footage probing on import/open (`media` feature): resolution, rate, frame
+  count and status carried in the snapshot; missing files probe to `missing`,
+  never an error. Synchronous at this phase; not yet off-thread, no thumbnails
 - ☐ Transport + resolution picker + realtime tier readout
 - ☐ Missing-footage slate (generated colour bars + item path)
 - ☐ Eyedropper magnifier; transform overlays

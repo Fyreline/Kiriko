@@ -75,6 +75,44 @@ The contract v0 pins, unchanged when codegen replaces it:
   Flutter test) keeps its F0 placeholder behaviour. The bridge is an
   enhancement, never a hard dependency of the chrome.
 
+#### Bridge v0.2 — the data the Viewer, Timeline and editors need
+
+v0.2 extends v0 without breaking it (the ABI number rises 1 → 2; every reply
+keeps the fields it had):
+
+- **Snapshot v2 is strictly additive.** Each composition item gains a `comp`
+  block (`width`, `height`, `fps` as the model's exact `{num, den}`,
+  `frame_count`, `layers`, `markers`); each footage item gains a `status`
+  (`ok` / `missing` / `unprobed` / `failed`) and, once probed, a `media` block
+  (`duration_frames`, `fps`, `width`, `height`, `audio`). Frames are integers
+  derived from the composition's *own* frame rate on rational time (a layer's
+  `in_frame`/`out_frame` is the frame containing its in/out point; `frame_count`
+  is duration ÷ one frame, rounded) — f64 time is never threaded across the
+  seam. Layer `kind` and `switches` mirror `LayerKind`/`Switches` name-for-name.
+- **New ops, one undo step each.** `set_layer_switch`, `edit_layer_span`,
+  `set_transform` and `add_marker` each map onto the real, unit-tested
+  `lumit-core` op (`SetLayer*`, `SetLayerSpan`/`edit_layer_span`,
+  `SetTransformProperty`, `SetCompMarkers`), so undo/redo is one clean step and
+  the reply is the full refreshed snapshot. Switch and transform names are the
+  model's own field names.
+- **The binary frame-buffer contract.** `decode_frame(item_id, frame, out_w,
+  out_h, out_len) → *mut u8` is the one call that does **not** return JSON: a
+  video frame is far too large to encode as text. It returns a Rust-owned block
+  of tightly-packed RGBA8 (null on failure, with the out-pointers zeroed) and
+  writes the frame's width/height/length into the out-pointers. Dart copies the
+  pixels out and hands the pointer **and its exact length** back to
+  `free_buffer` — the mirror of the string contract, one boxed slice freed as a
+  whole. This is the F2 CPU path; the shared-texture path stays future work.
+- **The `media` feature gate.** Probing and decoding live behind a default-on
+  `media` cargo feature that pulls `lumit-media` (FFmpeg). `--no-default-features`
+  drops it entirely — the crate still builds and tests without FFmpeg (CI
+  parity), footage simply reports `unprobed` and `decode_frame` returns null.
+- **Synchronous probe caveat.** At this phase footage is probed *synchronously*
+  on import and on open (building/loading the frame index on the calling thread),
+  where the egui frontend probes on a background thread. Acceptable while the
+  first files are small and imported one at a time; the bridge will move probing
+  off-thread once the command surface stabilises.
+
 ## The Viewer texture path (Phase F2)
 
 Windows first, matching the project's priorities:

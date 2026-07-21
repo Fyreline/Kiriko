@@ -3,6 +3,7 @@
 // bridge behaves exactly as the F0 placeholder did.
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumit_flutter/bridge/bridge.dart';
@@ -20,6 +21,16 @@ class _FakeBridge implements DocumentBridge {
   final List<String> imported = [];
   int saveCalls = 0;
   String? lastSavePath;
+
+  // Snapshot-v2 op records.
+  final List<String> ops = [];
+
+  /// When set, the next op returns this error instead of a snapshot.
+  String? nextOpError;
+
+  /// What [decodeFrame] should return (null by default).
+  DecodedFrame? decodeResult;
+  final List<String> decoded = [];
 
   BridgeSnapshot _snap() => BridgeSnapshot(
         items: List.of(items),
@@ -83,6 +94,41 @@ class _FakeBridge implements DocumentBridge {
       children: const [],
     ));
     return BridgeReply.ok(_snap());
+  }
+
+  BridgeReply _op(String record) {
+    ops.add(record);
+    final err = nextOpError;
+    if (err != null) {
+      nextOpError = null;
+      return BridgeReply.err(err);
+    }
+    return BridgeReply.ok(_snap());
+  }
+
+  @override
+  BridgeReply setLayerSwitch(
+          String compId, String layerId, String switchName, bool value) =>
+      _op('switch:$compId/$layerId/$switchName=$value');
+
+  @override
+  BridgeReply editLayerSpan(
+          String compId, String layerId, String edit, int frame) =>
+      _op('span:$compId/$layerId/$edit@$frame');
+
+  @override
+  BridgeReply setTransform(
+          String compId, String layerId, String property, double value) =>
+      _op('transform:$compId/$layerId/$property=$value');
+
+  @override
+  BridgeReply addMarker(String compId, int frame) =>
+      _op('marker:$compId@$frame');
+
+  @override
+  DecodedFrame? decodeFrame(String itemId, int frame) {
+    decoded.add('$itemId@$frame');
+    return decodeResult;
   }
 }
 
@@ -318,6 +364,191 @@ void main() {
       final app = AppStateStub(
           bridge: fake, lastProjectPath: '/no/such/place/gone.lum');
       expect(app.snapshot!.path, isNull, reason: 'nothing was reopened');
+    });
+  });
+
+  group('Snapshot v2 parsing', () {
+    // A comp (two layers, switches, markers) plus a probed footage item, in the
+    // exact shape the Rust bridge emits.
+    const json = '''
+    {
+      "ok": true,
+      "items": [
+        {
+          "id": "c1", "name": "Scene", "kind": "composition", "children": [],
+          "comp": {
+            "width": 1920, "height": 1080,
+            "fps": {"num": 60, "den": 1}, "frame_count": 300,
+            "layers": [
+              {
+                "id": "l0", "index": 0, "name": "top", "kind": "footage",
+                "in_frame": 60, "out_frame": 240, "label": 2,
+                "switches": {
+                  "visible": true, "audible": true, "locked": false,
+                  "three_d": false, "collapse": false, "fx": true,
+                  "solo": true, "motion_blur": false
+                }
+              },
+              {
+                "id": "l1", "index": 1, "name": "bg", "kind": "solid",
+                "in_frame": 0, "out_frame": 300, "label": 0,
+                "switches": {
+                  "visible": false, "audible": true, "locked": true,
+                  "three_d": true, "collapse": false, "fx": true,
+                  "solo": false, "motion_blur": true
+                }
+              }
+            ],
+            "markers": [120, 240]
+          }
+        },
+        {
+          "id": "f1", "name": "clip.mp4", "kind": "footage", "children": [],
+          "status": "ok",
+          "media": {
+            "duration_frames": 150, "fps": {"num": 30000, "den": 1001},
+            "width": 1280, "height": 720, "audio": true
+          }
+        }
+      ],
+      "can_undo": true, "can_redo": false, "path": null
+    }''';
+
+    test('a composition parses its size, rate, layers and markers', () {
+      final snap = BridgeReply.parse(json).snapshot!;
+      final comp = snap.items[0].comp!;
+      expect(comp.width, 1920);
+      expect(comp.height, 1080);
+      expect(comp.fps.num, 60);
+      expect(comp.fps.den, 1);
+      expect(comp.fps.fps, 60.0);
+      expect(comp.frameCount, 300);
+      expect(comp.markers, [120, 240]);
+      expect(comp.layers.length, 2);
+
+      final top = comp.layers[0];
+      expect(top.index, 0);
+      expect(top.name, 'top');
+      expect(top.kind, BridgeLayerKind.footage);
+      expect(top.inFrame, 60);
+      expect(top.outFrame, 240);
+      expect(top.label, 2);
+      expect(top.switches.solo, isTrue);
+      expect(top.switches.visible, isTrue);
+
+      final bg = comp.layers[1];
+      expect(bg.kind, BridgeLayerKind.solid);
+      expect(bg.switches.visible, isFalse);
+      expect(bg.switches.locked, isTrue);
+      expect(bg.switches.threeD, isTrue);
+      expect(bg.switches.motionBlur, isTrue);
+    });
+
+    test('a footage item parses its status and media metadata', () {
+      final snap = BridgeReply.parse(json).snapshot!;
+      final footage = snap.items[1];
+      expect(footage.kind, BridgeItemKind.footage);
+      expect(footage.status, BridgeMediaStatus.ok);
+      final media = footage.media!;
+      expect(media.durationFrames, 150);
+      expect(media.fps.num, 30000);
+      expect(media.fps.den, 1001);
+      expect(media.width, 1280);
+      expect(media.height, 720);
+      expect(media.audio, isTrue);
+    });
+
+    test('an unprobed footage item has a status but no media block', () {
+      final snap = BridgeReply.parse(
+        '{"ok":true,"items":[{"id":"f","name":"x.mp4","kind":"footage",'
+        '"children":[],"status":"unprobed"}],'
+        '"can_undo":false,"can_redo":false,"path":null}',
+      ).snapshot!;
+      expect(snap.items[0].status, BridgeMediaStatus.unprobed);
+      expect(snap.items[0].media, isNull);
+    });
+
+    test('unknown layer kinds and statuses degrade rather than throwing', () {
+      final snap = BridgeReply.parse(
+        '{"ok":true,"items":[{"id":"c","name":"C","kind":"composition",'
+        '"children":[],"comp":{"width":1,"height":1,"fps":{"num":1,"den":1},'
+        '"frame_count":1,"layers":[{"id":"l","index":0,"name":"n",'
+        '"kind":"nebula","in_frame":0,"out_frame":1,"label":0,"switches":{}}],'
+        '"markers":[]}}],"can_undo":false,"can_redo":false,"path":null}',
+      ).snapshot!;
+      expect(snap.items[0].comp!.layers[0].kind, BridgeLayerKind.unknown);
+      // Absent switch fields fall back to their model defaults.
+      expect(snap.items[0].comp!.layers[0].switches.visible, isTrue);
+      expect(snap.items[0].comp!.layers[0].switches.solo, isFalse);
+    });
+  });
+
+  group('AppStateStub snapshot-v2 op pass-throughs (fake bridge)', () {
+    test('frontComp resolves the first composition in the snapshot', () {
+      final fake = _FakeBridge();
+      final app = AppStateStub(bridge: fake);
+      expect(app.frontComp, isNull, reason: 'no comp yet');
+      // A snapshot carrying a comp makes frontComp resolve it.
+      app.snapshot = BridgeReply.parse(
+        '{"ok":true,"items":[{"id":"c1","name":"Scene","kind":"composition",'
+        '"children":[],"comp":{"width":640,"height":480,"fps":{"num":24,'
+        '"den":1},"frame_count":48,"layers":[],"markers":[]}}],'
+        '"can_undo":false,"can_redo":false,"path":null}',
+      ).snapshot;
+      expect(app.frontComp, isNotNull);
+      expect(app.frontComp!.width, 640);
+      expect(app.frontComp!.fps.num, 24);
+    });
+
+    test('the ops route to the bridge and refresh the snapshot', () {
+      final fake = _FakeBridge()..newComposition('Scene');
+      final app = AppStateStub(bridge: fake);
+      app.setLayerSwitch('c1', 'l0', 'solo', true);
+      app.editLayerSpan('c1', 'l0', 'move_in', 120);
+      app.setTransform('c1', 'l0', 'opacity', 42.0);
+      app.addMarker('c1', 90);
+      expect(fake.ops, [
+        'switch:c1/l0/solo=true',
+        'span:c1/l0/move_in@120',
+        'transform:c1/l0/opacity=42.0',
+        'marker:c1@90',
+      ]);
+      expect(app.snapshot, isNotNull);
+      expect(app.errorNotice, isNull);
+    });
+
+    test('an op failure surfaces on the error tint, no snapshot change', () {
+      final fake = _FakeBridge()..newComposition('Scene');
+      final app = AppStateStub(bridge: fake);
+      fake.nextOpError = 'set transform: unknown property';
+      app.setTransform('c1', 'l0', 'wobble', 1.0);
+      expect(app.errorNotice, 'set transform: unknown property');
+    });
+
+    test('the ops are quiet no-ops without a bridge', () {
+      final app = AppStateStub();
+      // None of these throw or touch a null bridge.
+      app.setLayerSwitch('c', 'l', 'solo', true);
+      app.editLayerSpan('c', 'l', 'trim_in', 0);
+      app.setTransform('c', 'l', 'opacity', 1.0);
+      app.addMarker('c', 0);
+      expect(app.decodeFrame('f', 0), isNull);
+      expect(app.errorNotice, isNull);
+    });
+
+    test('decodeFrame passes through to the bridge and returns its frame', () {
+      final fake = _FakeBridge()
+        ..decodeResult = DecodedFrame(
+          width: 2,
+          height: 1,
+          rgba: Uint8List.fromList([1, 2, 3, 4, 5, 6, 7, 8]),
+        );
+      final app = AppStateStub(bridge: fake);
+      final frame = app.decodeFrame('f1', 7);
+      expect(fake.decoded, ['f1@7']);
+      expect(frame, isNotNull);
+      expect(frame!.width, 2);
+      expect(frame.rgba.length, 8);
     });
   });
 }

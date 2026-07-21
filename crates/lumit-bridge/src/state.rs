@@ -1,0 +1,818 @@
+//! The shared engine state and the pure state transitions.
+//!
+//! # In plain terms
+//!
+//! Everything the Flutter client can *do* to the document is a function here.
+//! Each one takes the engine state (or nothing) and returns the reply JSON as a
+//! `String`; it holds no lock and touches no global, so the tests drive their
+//! own [`Bridge`] in full isolation and the exported C functions in [`crate::ffi`]
+//! route the one shared instance through them. Mutations go through the real
+//! [`lumit_core::ops::Op`] path and [`DocumentStore`], so undo/redo works exactly
+//! as it does in the egui frontend.
+
+use crate::err_json;
+use crate::media::MediaCache;
+use crate::snapshot::snapshot_value;
+use lumit_core::anim::Animation;
+use lumit_core::markers::Marker;
+use lumit_core::model::{
+    Composition, Document, Folder, FootageItem, LinearColour, MediaRef, ProjectItem, TransformProp,
+};
+use lumit_core::ops::{AutoFolderKind, Op, SpanEdit};
+use lumit_core::store::DocumentStore;
+use lumit_core::time::{Duration, FrameRate, Rational};
+use serde_json::json;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use uuid::Uuid;
+
+/// The engine-side state one Flutter client drives: the document store (which
+/// owns the document and its undo/redo history, exactly as `lumit-ui`'s
+/// `AppState` does), the path the project was loaded from or last saved to, and
+/// the cached media-probe results ([`MediaCache`], populated on import/open when
+/// the `media` feature is on).
+pub(crate) struct Bridge {
+    pub store: DocumentStore,
+    pub path: Option<PathBuf>,
+    pub media: MediaCache,
+}
+
+impl Bridge {
+    pub fn new() -> Self {
+        Self {
+            store: DocumentStore::new(Document::new()),
+            path: None,
+            media: MediaCache::default(),
+        }
+    }
+}
+
+/// The single process-wide client state (single-client assumption). The lock is
+/// only ever held for the duration of one pure state transition below — never
+/// across anything that could re-enter the bridge — so it cannot deadlock.
+static BRIDGE: OnceLock<Mutex<Bridge>> = OnceLock::new();
+
+/// Run `f` against the shared bridge state. A previous panic that poisoned the
+/// lock is recovered from (the caught panic already produced an error reply;
+/// the state itself is a valid `Document`), so one bad call never wedges the
+/// bridge for the rest of the session.
+pub(crate) fn with_bridge<R>(f: impl FnOnce(&mut Bridge) -> R) -> R {
+    let mutex = BRIDGE.get_or_init(|| Mutex::new(Bridge::new()));
+    let mut guard = mutex.lock().unwrap_or_else(|poison| poison.into_inner());
+    f(&mut guard)
+}
+
+/// `{"ok":true,"version":"…","abi":2}` — stateless.
+pub(crate) fn version() -> String {
+    json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "abi": crate::ABI_VERSION,
+    })
+    .to_string()
+}
+
+/// The current document as the panels read it (snapshot v2 — see [`crate::snapshot`]).
+pub(crate) fn snapshot(bridge: &Bridge) -> String {
+    snapshot_value(bridge).to_string()
+}
+
+pub(crate) fn new_project(bridge: &mut Bridge) -> String {
+    bridge.store = DocumentStore::new(Document::new());
+    bridge.path = None;
+    bridge.media.clear();
+    snapshot(bridge)
+}
+
+pub(crate) fn open_project(bridge: &mut Bridge, path: &str) -> String {
+    let path = PathBuf::from(path);
+    match lumit_project::open(&path) {
+        Ok((doc, _manifest)) => {
+            bridge.store = DocumentStore::new(doc);
+            bridge.path = Some(path);
+            bridge.media.clear();
+            refresh_media(bridge);
+            snapshot(bridge)
+        }
+        Err(e) => err_json(format!("open project: {e}")),
+    }
+}
+
+/// Save to `path`; an empty `path` means "save to the loaded path" and errors
+/// when there is none yet (bridge v0 has no file dialog to ask for one). The
+/// written document is rebased against its folder exactly as `lumit-ui`'s Save
+/// does, so no machine-specific path reaches the file (K-173).
+pub(crate) fn save_project(bridge: &mut Bridge, path: &str) -> String {
+    let target = if path.is_empty() {
+        match &bridge.path {
+            Some(p) => p.clone(),
+            None => {
+                return err_json(
+                    "save project: no path yet — this project has never been saved, so a path is required",
+                );
+            }
+        }
+    } else {
+        PathBuf::from(path)
+    };
+    let dir = target.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let doc = lumit_project::rebase_for_save(&bridge.store.snapshot(), dir);
+    match lumit_project::save(&doc, &target) {
+        Ok(()) => {
+            bridge.path = Some(target);
+            snapshot(bridge)
+        }
+        Err(e) => err_json(format!("save project: {e}")),
+    }
+}
+
+/// Create a composition and file it in the "Compositions" auto-folder, as one
+/// undo step — the same op path `lumit-ui`'s `confirm_comp_dialog` commits, so
+/// undo removes it cleanly. An empty `name` becomes "Comp N" (N counting the
+/// compositions already present).
+pub(crate) fn new_composition(bridge: &mut Bridge, name: &str) -> String {
+    let doc = bridge.store.snapshot();
+    let name = if name.trim().is_empty() {
+        let existing = doc
+            .items
+            .iter()
+            .filter(|i| matches!(i, ProjectItem::Composition(_)))
+            .count();
+        format!("Comp {}", existing + 1)
+    } else {
+        name.to_owned()
+    };
+
+    let (frame_rate, duration) = match (FrameRate::new(60, 1), Rational::new(30, 1)) {
+        (Ok(fr), Ok(dur)) => (fr, Duration(dur)),
+        _ => return err_json("new composition: could not build the default frame rate"),
+    };
+
+    // Ensure the Compositions auto-folder exists (tracked by id, like the egui
+    // frontend: renaming or nesting it keeps it the Compositions folder).
+    let mut ops: Vec<Op> = Vec::new();
+    let folder_id = match doc
+        .auto_folders
+        .compositions
+        .filter(|id| doc.folder(*id).is_some())
+    {
+        Some(id) => id,
+        None => {
+            let id = Uuid::now_v7();
+            ops.push(Op::AddItem {
+                index: doc.items.len(),
+                item: Box::new(ProjectItem::Folder(Folder {
+                    id,
+                    name: "Compositions".into(),
+                    children: Vec::new(),
+                    extra: serde_json::Map::new(),
+                })),
+            });
+            ops.push(Op::SetAutoFolder {
+                kind: AutoFolderKind::Compositions,
+                folder: Some(id),
+            });
+            id
+        }
+    };
+
+    let comp = Composition {
+        id: Uuid::now_v7(),
+        name,
+        width: 1920,
+        height: 1080,
+        frame_rate,
+        duration,
+        background: LinearColour::BLACK,
+        work_area: None,
+        layers: Vec::new(),
+        markers: Vec::new(),
+        motion_blur: lumit_core::model::MotionBlur::default(),
+        extra: serde_json::Map::new(),
+    };
+    let comp_id = comp.id;
+
+    // The comp's index accounts for any AddItem ops queued ahead of it.
+    let added = ops
+        .iter()
+        .filter(|o| matches!(o, Op::AddItem { .. }))
+        .count();
+    ops.push(Op::AddItem {
+        index: doc.items.len() + added,
+        item: Box::new(ProjectItem::Composition(comp)),
+    });
+
+    // File it into the folder. The folder may have been created earlier in this
+    // same batch (so it is absent from `doc`), in which case its children start
+    // empty — matching `lumit-ui`'s `file_into_folder_op`.
+    let mut children = doc
+        .folder(folder_id)
+        .map(|f| f.children.clone())
+        .unwrap_or_default();
+    children.push(comp_id);
+    ops.push(Op::SetFolderChildren {
+        folder: folder_id,
+        children,
+    });
+
+    match bridge.store.commit(Op::Batch { ops }) {
+        Ok(_) => snapshot(bridge),
+        Err(e) => err_json(format!("new composition: {e}")),
+    }
+}
+
+/// Add a footage item for `path` as one undo step — the same op `lumit-ui`'s
+/// `import_paths` commits for each picked file. Footage has no auto-folder (only
+/// solids and comps do), so this mirrors the egui frontend exactly: a single
+/// [`Op::AddItem`] appended to the flat item list, and undo removes it.
+///
+/// # In plain terms
+///
+/// This records that a media file belongs to the project. With the `media`
+/// feature on it then *probes* the file synchronously (reads its resolution,
+/// frame rate and frame count, and builds/loads the frame index) so the Project
+/// panel can show the details straight away; the result is cached in the
+/// [`MediaCache`] and carried in the snapshot. A file that is not on disk probes
+/// to "missing" — that is a normal state (relink), never an error reply.
+pub(crate) fn import_footage(bridge: &mut Bridge, path: &str) -> String {
+    if path.trim().is_empty() {
+        return err_json("import footage: no path given");
+    }
+    let file = PathBuf::from(path);
+    // The item's name is the file's own name, exactly as `import_paths` derives
+    // it (falling back to "footage" for a path with no final component).
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "footage".into());
+    let item = FootageItem {
+        id: Uuid::now_v7(),
+        name: name.clone(),
+        media: MediaRef {
+            // Import stores the bare name as the relative path; Save rebases it
+            // against the project folder (K-173), just as the egui frontend does.
+            relative_path: name,
+            absolute_path: file.to_string_lossy().into_owned(),
+            fingerprint: None,
+            extra: serde_json::Map::new(),
+        },
+        extra: serde_json::Map::new(),
+    };
+    let index = bridge.store.snapshot().items.len();
+    match bridge.store.commit(Op::AddItem {
+        index,
+        item: Box::new(ProjectItem::Footage(item)),
+    }) {
+        Ok(_) => {
+            refresh_media(bridge);
+            snapshot(bridge)
+        }
+        Err(e) => err_json(format!("import footage: {e}")),
+    }
+}
+
+pub(crate) fn undo(bridge: &mut Bridge) -> String {
+    match bridge.store.undo() {
+        Ok(_) => snapshot(bridge),
+        Err(e) => err_json(format!("undo: {e}")),
+    }
+}
+
+pub(crate) fn redo(bridge: &mut Bridge) -> String {
+    match bridge.store.redo() {
+        Ok(_) => snapshot(bridge),
+        Err(e) => err_json(format!("redo: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot-v2 ops: switches, spans, transforms, markers. Each maps onto the
+// real, unit-tested lumit-core op so undo/redo is one clean step, and each
+// returns the full refreshed snapshot on success (the panels re-read wholesale).
+// ---------------------------------------------------------------------------
+
+/// Flip one of a layer's switches. `switch_name` is the model's own field name:
+/// `visible`, `audible`, `locked`, `solo`, `motion_blur`, `fx`, `three_d`, or
+/// `collapse`. Each routes through the matching `SetLayer*` op.
+pub(crate) fn set_layer_switch(
+    bridge: &mut Bridge,
+    comp_id: &str,
+    layer_id: &str,
+    switch_name: &str,
+    value: bool,
+) -> String {
+    let (comp, layer) = match parse_comp_layer(comp_id, layer_id) {
+        Ok(pair) => pair,
+        Err(e) => return err_json(format!("set layer switch: {e}")),
+    };
+    let op = match switch_name {
+        "visible" => Op::SetLayerVisible {
+            comp,
+            layer,
+            visible: value,
+        },
+        "audible" => Op::SetLayerAudible {
+            comp,
+            layer,
+            audible: value,
+        },
+        "locked" => Op::SetLayerLocked {
+            comp,
+            layer,
+            locked: value,
+        },
+        "solo" => Op::SetLayerSolo {
+            comp,
+            layer,
+            solo: value,
+        },
+        "motion_blur" => Op::SetLayerMotionBlur {
+            comp,
+            layer,
+            motion_blur: value,
+        },
+        "fx" => Op::SetLayerFx {
+            comp,
+            layer,
+            fx: value,
+        },
+        "three_d" => Op::SetLayerThreeD {
+            comp,
+            layer,
+            three_d: value,
+        },
+        "collapse" => Op::SetLayerCollapse {
+            comp,
+            layer,
+            collapse: value,
+        },
+        other => return err_json(format!("set layer switch: unknown switch '{other}'")),
+    };
+    commit(bridge, op, "set layer switch")
+}
+
+/// Edit a layer's span relative to the playhead `frame`. `edit` is one of
+/// `move_in`, `move_out`, `trim_in`, `trim_out`, mapped onto lumit-core's
+/// tested [`SpanEdit`]/[`lumit_core::ops::edit_layer_span`]. The new
+/// `(in, out, start_offset)` is committed as one [`Op::SetLayerSpan`].
+pub(crate) fn edit_layer_span(
+    bridge: &mut Bridge,
+    comp_id: &str,
+    layer_id: &str,
+    edit: &str,
+    frame: i64,
+) -> String {
+    let (comp, layer) = match parse_comp_layer(comp_id, layer_id) {
+        Ok(pair) => pair,
+        Err(e) => return err_json(format!("edit layer span: {e}")),
+    };
+    let span_edit = match edit {
+        "move_in" => SpanEdit::MoveIn,
+        "move_out" => SpanEdit::MoveOut,
+        "trim_in" => SpanEdit::TrimIn,
+        "trim_out" => SpanEdit::TrimOut,
+        other => return err_json(format!("edit layer span: unknown edit '{other}'")),
+    };
+    let doc = bridge.store.snapshot();
+    let Some(c) = doc.comp(comp) else {
+        return err_json("edit layer span: unknown composition");
+    };
+    let Some(l) = c.layers.iter().find(|l| l.id == layer) else {
+        return err_json("edit layer span: unknown layer");
+    };
+    let playhead = match c.frame_rate.time_of_frame(frame) {
+        Ok(t) => t,
+        Err(e) => return err_json(format!("edit layer span: {e}")),
+    };
+    let Some((in_point, out_point, start_offset)) = lumit_core::ops::edit_layer_span(
+        l.in_point,
+        l.out_point,
+        l.start_offset,
+        playhead,
+        span_edit,
+    ) else {
+        return err_json("edit layer span: the edit would collapse the layer");
+    };
+    commit(
+        bridge,
+        Op::SetLayerSpan {
+            comp,
+            layer,
+            in_point,
+            out_point,
+            start_offset,
+        },
+        "edit layer span",
+    )
+}
+
+/// Set one transform property to a static `value`. `property` is one of the
+/// snake_case names mirroring [`TransformProp`]: `anchor_x`, `anchor_y`,
+/// `position_x`, `position_y`, `position_z`, `scale_x`, `scale_y`, `rotation`,
+/// `rotation_x`, `rotation_y`, `opacity`. Committed as [`Op::SetTransformProperty`]
+/// with a [`Animation::Static`], replacing whatever animation was there (the
+/// coarse-grained op the graph editor later refines).
+pub(crate) fn set_transform(
+    bridge: &mut Bridge,
+    comp_id: &str,
+    layer_id: &str,
+    property: &str,
+    value: f64,
+) -> String {
+    let (comp, layer) = match parse_comp_layer(comp_id, layer_id) {
+        Ok(pair) => pair,
+        Err(e) => return err_json(format!("set transform: {e}")),
+    };
+    let prop = match property {
+        "anchor_x" => TransformProp::AnchorX,
+        "anchor_y" => TransformProp::AnchorY,
+        "position_x" => TransformProp::PositionX,
+        "position_y" => TransformProp::PositionY,
+        "position_z" => TransformProp::PositionZ,
+        "scale_x" => TransformProp::ScaleX,
+        "scale_y" => TransformProp::ScaleY,
+        "rotation" => TransformProp::Rotation,
+        "rotation_x" => TransformProp::RotationX,
+        "rotation_y" => TransformProp::RotationY,
+        "opacity" => TransformProp::Opacity,
+        other => return err_json(format!("set transform: unknown property '{other}'")),
+    };
+    commit(
+        bridge,
+        Op::SetTransformProperty {
+            comp,
+            layer,
+            prop,
+            animation: Animation::Static(value),
+        },
+        "set transform",
+    )
+}
+
+/// Drop a plain user marker on the composition timeline at `frame`. Committed as
+/// [`Op::SetCompMarkers`] (the whole list, trivially invertible), so undo removes
+/// exactly the one added.
+pub(crate) fn add_marker(bridge: &mut Bridge, comp_id: &str, frame: i64) -> String {
+    let comp = match Uuid::parse_str(comp_id) {
+        Ok(id) => id,
+        Err(_) => return err_json("add marker: composition id is not a valid UUID"),
+    };
+    let doc = bridge.store.snapshot();
+    let Some(c) = doc.comp(comp) else {
+        return err_json("add marker: unknown composition");
+    };
+    let time = match c.frame_rate.time_of_frame(frame) {
+        Ok(t) => t,
+        Err(e) => return err_json(format!("add marker: {e}")),
+    };
+    let mut markers = c.markers.clone();
+    markers.push(Marker::user(Uuid::now_v7(), time.0));
+    commit(bridge, Op::SetCompMarkers { comp, markers }, "add marker")
+}
+
+/// The on-disk path a footage item points at this session (the absolute path
+/// when known, else the stored relative one). `None` when `item_id` is not a
+/// footage item. Used by the frame-decode path in [`crate::ffi`] and the probe
+/// path — both `media`-feature only.
+#[cfg(feature = "media")]
+pub(crate) fn footage_path(bridge: &Bridge, item_id: &str) -> Option<PathBuf> {
+    let id = Uuid::parse_str(item_id).ok()?;
+    match bridge.store.snapshot().item(id)? {
+        ProjectItem::Footage(f) => Some(footage_pathbuf(f)),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "media")]
+fn footage_pathbuf(f: &FootageItem) -> PathBuf {
+    if f.media.absolute_path.is_empty() {
+        PathBuf::from(&f.media.relative_path)
+    } else {
+        PathBuf::from(&f.media.absolute_path)
+    }
+}
+
+/// Commit `op`, returning the refreshed snapshot on success or a calm error
+/// reply prefixed with `ctx` on failure.
+fn commit(bridge: &mut Bridge, op: Op, ctx: &str) -> String {
+    match bridge.store.commit(op) {
+        Ok(_) => snapshot(bridge),
+        Err(e) => err_json(format!("{ctx}: {e}")),
+    }
+}
+
+/// Parse a composition id and a layer id together, with a shared calm message.
+fn parse_comp_layer(comp_id: &str, layer_id: &str) -> Result<(Uuid, Uuid), String> {
+    let comp =
+        Uuid::parse_str(comp_id).map_err(|_| "composition id is not a valid UUID".to_owned())?;
+    let layer = Uuid::parse_str(layer_id).map_err(|_| "layer id is not a valid UUID".to_owned())?;
+    Ok((comp, layer))
+}
+
+/// Probe every footage item not already in the cache (synchronous, `media`
+/// feature only). Without the feature this is a no-op and every footage item
+/// reports status "unprobed".
+fn refresh_media(bridge: &mut Bridge) {
+    #[cfg(feature = "media")]
+    {
+        let doc = bridge.store.snapshot();
+        for item in &doc.items {
+            if let ProjectItem::Footage(f) = item {
+                if bridge.media.get(&f.id).is_none() {
+                    let status = crate::media::probe_path(&footage_pathbuf(f));
+                    bridge.media.insert(f.id, status);
+                }
+            }
+        }
+    }
+    // Referenced only under the feature; keep the parameter honest either way.
+    let _ = bridge;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn parse(s: &str) -> Value {
+        serde_json::from_str(s).expect("reply is valid JSON")
+    }
+
+    /// Build a document with one comp holding one footage layer, returning the
+    /// bridge, comp id and layer id. Drives the real ops, so the layer is a
+    /// genuine `Op::AddLayer` the snapshot then serialises.
+    fn comp_with_layer() -> (Bridge, Uuid, Uuid) {
+        let mut b = Bridge::new();
+        // A comp (through the real batch), then read its id back from the tree.
+        new_composition(&mut b, "Scene");
+        let doc = b.store.snapshot();
+        let comp_id = doc
+            .items
+            .iter()
+            .find_map(|i| match i {
+                ProjectItem::Composition(c) => Some(c.id),
+                _ => None,
+            })
+            .expect("a composition exists");
+        // Add a footage layer straight through the store.
+        let footage = FootageItem {
+            id: Uuid::now_v7(),
+            name: "clip.mp4".into(),
+            media: MediaRef {
+                relative_path: "clip.mp4".into(),
+                absolute_path: String::new(),
+                fingerprint: None,
+                extra: serde_json::Map::new(),
+            },
+            extra: serde_json::Map::new(),
+        };
+        let footage_id = footage.id;
+        b.store
+            .commit(Op::AddItem {
+                index: 0,
+                item: Box::new(ProjectItem::Footage(footage)),
+            })
+            .unwrap();
+        let layer = lumit_core::model::Layer {
+            id: Uuid::now_v7(),
+            name: "clip.mp4".into(),
+            kind: lumit_core::model::LayerKind::Footage {
+                item: footage_id,
+                retime: None,
+            },
+            in_point: lumit_core::time::CompTime(Rational::new(0, 1).unwrap()),
+            out_point: lumit_core::time::CompTime(Rational::new(5, 1).unwrap()),
+            start_offset: lumit_core::time::CompTime(Rational::new(0, 1).unwrap()),
+            transform: lumit_core::model::TransformGroup::default(),
+            matte: None,
+            parent: None,
+            label: 0,
+            volume_db: lumit_core::anim::Property::zero(),
+            blend: Default::default(),
+            masks: Vec::new(),
+            effects: Vec::new(),
+            switches: lumit_core::model::Switches::default(),
+            extra: serde_json::Map::new(),
+        };
+        let layer_id = layer.id;
+        b.store
+            .commit(Op::AddLayer {
+                comp: comp_id,
+                index: 0,
+                layer: Box::new(layer),
+            })
+            .unwrap();
+        (b, comp_id, layer_id)
+    }
+
+    #[test]
+    fn version_reports_the_abi() {
+        let v = parse(&version());
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["abi"], json!(crate::ABI_VERSION));
+        assert_eq!(v["abi"], json!(2));
+    }
+
+    #[test]
+    fn new_project_shows_an_empty_document() {
+        let mut b = Bridge::new();
+        let snap = parse(&new_project(&mut b));
+        assert_eq!(snap["ok"], json!(true));
+        assert_eq!(snap["items"], json!([]));
+        assert_eq!(snap["can_undo"], json!(false));
+        assert_eq!(snap["path"], Value::Null);
+    }
+
+    #[test]
+    fn new_composition_lists_it_nested_and_enables_undo() {
+        let mut b = Bridge::new();
+        let snap = parse(&new_composition(&mut b, "Intro"));
+        assert_eq!(snap["can_undo"], json!(true));
+        let items = snap["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["kind"], json!("folder"));
+        let children = items[0]["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0]["kind"], json!("composition"));
+        assert_eq!(children[0]["name"], json!("Intro"));
+    }
+
+    #[test]
+    fn import_footage_lists_the_item_and_undoes() {
+        let mut b = Bridge::new();
+        let snap = parse(&import_footage(&mut b, "/media/clips/shot.mp4"));
+        let items = snap["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["kind"], json!("footage"));
+        assert_eq!(items[0]["name"], json!("shot.mp4"));
+        // Footage always carries a status; without a real file it is missing
+        // (media feature) or unprobed (no feature) — never absent.
+        assert!(items[0].get("status").is_some(), "footage carries a status");
+        let after_undo = parse(&undo(&mut b));
+        assert_eq!(after_undo["items"], json!([]));
+    }
+
+    #[test]
+    fn import_footage_with_an_empty_path_is_a_calm_error() {
+        let mut b = Bridge::new();
+        let reply = parse(&import_footage(&mut b, "   "));
+        assert_eq!(reply["ok"], json!(false));
+        assert!(reply["error"].as_str().unwrap().contains("no path"));
+        assert_eq!(parse(&snapshot(&b))["items"], json!([]));
+    }
+
+    #[test]
+    fn set_layer_switch_flips_and_undoes() {
+        let (mut b, comp, layer) = comp_with_layer();
+        // Solo defaults false; set it true through the op.
+        let snap = parse(&set_layer_switch(
+            &mut b,
+            &comp.to_string(),
+            &layer.to_string(),
+            "solo",
+            true,
+        ));
+        assert_eq!(snap["ok"], json!(true));
+        // Find the layer's switches in the snapshot and confirm solo flipped.
+        let solo_of = |snap: &Value| -> bool {
+            let comp_item = find_comp(snap);
+            comp_item["comp"]["layers"][0]["switches"]["solo"] == json!(true)
+        };
+        assert!(solo_of(&snap), "solo is now set");
+        // Undo restores it.
+        let after = parse(&undo(&mut b));
+        assert!(!solo_of(&after), "undo clears the switch");
+    }
+
+    #[test]
+    fn set_layer_switch_rejects_an_unknown_switch() {
+        let (mut b, comp, layer) = comp_with_layer();
+        let reply = parse(&set_layer_switch(
+            &mut b,
+            &comp.to_string(),
+            &layer.to_string(),
+            "nebula",
+            true,
+        ));
+        assert_eq!(reply["ok"], json!(false));
+        assert!(reply["error"].as_str().unwrap().contains("unknown switch"));
+    }
+
+    #[test]
+    fn edit_layer_span_moves_the_in_point_to_the_playhead() {
+        let (mut b, comp, layer) = comp_with_layer();
+        // The comp runs at 60 fps; move the in point to frame 120 (comp-time 2s).
+        let snap = parse(&edit_layer_span(
+            &mut b,
+            &comp.to_string(),
+            &layer.to_string(),
+            "move_in",
+            120,
+        ));
+        assert_eq!(snap["ok"], json!(true));
+        let comp_item = find_comp(&snap);
+        // in_frame is derived from the comp's fps: 2s × 60 = 120.
+        assert_eq!(comp_item["comp"]["layers"][0]["in_frame"], json!(120));
+        // The move keeps the 5s duration, so out lands at frame 120 + 300 = 420.
+        assert_eq!(comp_item["comp"]["layers"][0]["out_frame"], json!(420));
+    }
+
+    #[test]
+    fn edit_layer_span_rejects_a_degenerate_trim() {
+        let (mut b, comp, layer) = comp_with_layer();
+        // Trimming the in point past the out point (out is 5s = frame 300) is
+        // rejected as degenerate, not applied.
+        let reply = parse(&edit_layer_span(
+            &mut b,
+            &comp.to_string(),
+            &layer.to_string(),
+            "trim_in",
+            600,
+        ));
+        assert_eq!(reply["ok"], json!(false));
+        assert!(reply["error"].as_str().unwrap().contains("collapse"));
+    }
+
+    #[test]
+    fn set_transform_round_trips_a_value() {
+        let (mut b, comp, layer) = comp_with_layer();
+        let snap = parse(&set_transform(
+            &mut b,
+            &comp.to_string(),
+            &layer.to_string(),
+            "opacity",
+            42.0,
+        ));
+        assert_eq!(snap["ok"], json!(true));
+        // The value round-trips through the store: read the opacity back.
+        let doc = b.store.snapshot();
+        let c = doc.comp(comp).unwrap();
+        let l = c.layers.iter().find(|l| l.id == layer).unwrap();
+        assert_eq!(l.transform.opacity.value_at(0.0), 42.0);
+        // Undo restores the default (100).
+        undo(&mut b);
+        let doc = b.store.snapshot();
+        let l = doc
+            .comp(comp)
+            .unwrap()
+            .layers
+            .iter()
+            .find(|l| l.id == layer)
+            .unwrap();
+        assert_eq!(l.transform.opacity.value_at(0.0), 100.0);
+    }
+
+    #[test]
+    fn set_transform_rejects_an_unknown_property() {
+        let (mut b, comp, layer) = comp_with_layer();
+        let reply = parse(&set_transform(
+            &mut b,
+            &comp.to_string(),
+            &layer.to_string(),
+            "wobble",
+            1.0,
+        ));
+        assert_eq!(reply["ok"], json!(false));
+        assert!(reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown property"));
+    }
+
+    #[test]
+    fn add_marker_appears_in_the_comp_snapshot_as_a_frame() {
+        let (mut b, comp, _layer) = comp_with_layer();
+        let snap = parse(&add_marker(&mut b, &comp.to_string(), 90));
+        assert_eq!(snap["ok"], json!(true));
+        let comp_item = find_comp(&snap);
+        assert_eq!(comp_item["comp"]["markers"], json!([90]));
+        // Undo removes it.
+        let after = parse(&undo(&mut b));
+        assert_eq!(find_comp(&after)["comp"]["markers"], json!([]));
+    }
+
+    #[test]
+    fn ops_on_a_bad_uuid_are_calm_errors() {
+        let mut b = Bridge::new();
+        let reply = parse(&set_transform(&mut b, "not-a-uuid", "nope", "opacity", 1.0));
+        assert_eq!(reply["ok"], json!(false));
+        assert!(reply["error"].as_str().unwrap().contains("UUID"));
+    }
+
+    /// Locate the single composition item in a snapshot (nested one level under
+    /// the auto-folder).
+    fn find_comp(snap: &Value) -> Value {
+        for item in snap["items"].as_array().unwrap() {
+            if item["kind"] == json!("composition") {
+                return item.clone();
+            }
+            for child in item["children"].as_array().unwrap() {
+                if child["kind"] == json!("composition") {
+                    return child.clone();
+                }
+            }
+        }
+        panic!("no composition in snapshot");
+    }
+}

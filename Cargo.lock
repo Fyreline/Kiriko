@@ -2696,6 +2696,7 @@ name = "lumit-bridge"
 version = "0.1.0"
 dependencies = [
  "lumit-core",
+ "lumit-media",
  "lumit-project",
  "serde",
  "serde_json",
