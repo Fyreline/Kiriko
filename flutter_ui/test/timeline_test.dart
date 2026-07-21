@@ -130,6 +130,12 @@ class _TimelineFake implements DocumentBridge {
   @override
   BridgeReply addSequenceLayer(String compId) => _op('add_sequence:$compId');
   @override
+  BridgeReply addFootageLayer(String compId, String itemId) =>
+      _op('add_footage:$compId/$itemId');
+  @override
+  BridgeReply reorderLayer(String compId, String layerId, int newIndex) =>
+      _op('reorder:$compId/$layerId->$newIndex');
+  @override
   BridgeReply deleteLayer(String compId, String layerId) =>
       _op('delete_layer:$compId/$layerId');
   @override
@@ -691,6 +697,30 @@ void main() {
         isTrue,
       );
     });
+
+    testWidgets('dragging a layer outline down reorders to a lower index',
+        (tester) async {
+      final fake = _TimelineFake();
+      final app = AppStateStub(bridge: fake);
+      await tester.pumpWidget(_host(app));
+      // hero (l0) is the top row; drag its outline name down past the backdrop
+      // (l1) row so it should land at index 1.
+      await tester.drag(find.text('hero'), const Offset(0, 30));
+      await tester.pumpAndSettle();
+      expect(fake.ops, contains('reorder:c0/l0->1'));
+    });
+
+    testWidgets('dragging a layer outline up reorders to the top',
+        (tester) async {
+      final fake = _TimelineFake();
+      final app = AppStateStub(bridge: fake);
+      await tester.pumpWidget(_host(app));
+      // backdrop (l1) is the bottom row; drag its outline name up above the hero
+      // (l0) row so it should land at index 0.
+      await tester.drag(find.text('backdrop'), const Offset(0, -30));
+      await tester.pumpAndSettle();
+      expect(fake.ops, contains('reorder:c0/l1->0'));
+    });
   });
 
   // The perf pass (K-176): pure playhead motion must not rebuild the layer rows
@@ -725,9 +755,12 @@ void main() {
 
       // Capture the live LayerRow instances. A StatelessWidget that its parent
       // did not rebuild stays the SAME object, so identity proves no rebuild.
-      final heroBefore = tester.widget<LayerRow>(find.byKey(const ValueKey('l0')));
-      final backdropBefore =
-          tester.widget<LayerRow>(find.byKey(const ValueKey('l1')));
+      // (Rows are keyed by a per-id GlobalKey the body owns, so find by the
+      // layer id on the widget rather than a ValueKey.)
+      Finder rowFor(String id) =>
+          find.byWidgetPredicate((w) => w is LayerRow && w.layer.id == id);
+      final heroBefore = tester.widget<LayerRow>(rowFor('l0'));
+      final backdropBefore = tester.widget<LayerRow>(rowFor('l1'));
 
       var appNotifies = 0;
       app.addListener(() => appNotifies++);
@@ -737,9 +770,8 @@ void main() {
         await tester.pump();
       }
 
-      final heroAfter = tester.widget<LayerRow>(find.byKey(const ValueKey('l0')));
-      final backdropAfter =
-          tester.widget<LayerRow>(find.byKey(const ValueKey('l1')));
+      final heroAfter = tester.widget<LayerRow>(rowFor('l0'));
+      final backdropAfter = tester.widget<LayerRow>(rowFor('l1'));
 
       expect(identical(heroBefore, heroAfter), isTrue,
           reason: 'the hero layer row was not rebuilt over 10 playhead advances');

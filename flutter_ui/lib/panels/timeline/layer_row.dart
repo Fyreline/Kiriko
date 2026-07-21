@@ -36,6 +36,16 @@ class LayerRow extends StatefulWidget {
   /// Toggle the outline twirl (the body owns the open set).
   final VoidCallback onToggleOpen;
 
+  /// A vertical drag on the outline reorders the layer stack. The body owns the
+  /// drag: [onReorderStart] names the grabbed layer, [onReorderUpdate] reports
+  /// the pointer's global position (for the live insertion indicator and the
+  /// target index), and [onReorderEnd]/[onReorderCancel] finish it. Null when
+  /// reorder is not wired (e.g. a locked layer refuses to start).
+  final void Function(String layerId)? onReorderStart;
+  final void Function(Offset globalPos)? onReorderUpdate;
+  final VoidCallback? onReorderEnd;
+  final VoidCallback? onReorderCancel;
+
   const LayerRow({
     super.key,
     required this.app,
@@ -48,6 +58,10 @@ class LayerRow extends StatefulWidget {
     required this.markers,
     required this.open,
     required this.onToggleOpen,
+    this.onReorderStart,
+    this.onReorderUpdate,
+    this.onReorderEnd,
+    this.onReorderCancel,
   });
 
   @override
@@ -175,6 +189,10 @@ class _LayerRowState extends State<LayerRow> {
               width: widget.outlineWidth,
               open: widget.open,
               onToggleOpen: widget.onToggleOpen,
+              onReorderStart: widget.onReorderStart,
+              onReorderUpdate: widget.onReorderUpdate,
+              onReorderEnd: widget.onReorderEnd,
+              onReorderCancel: widget.onReorderCancel,
             ),
           ),
           Expanded(
@@ -229,6 +247,10 @@ class _OutlineCell extends StatelessWidget {
   final double width;
   final bool open;
   final VoidCallback onToggleOpen;
+  final void Function(String layerId)? onReorderStart;
+  final void Function(Offset globalPos)? onReorderUpdate;
+  final VoidCallback? onReorderEnd;
+  final VoidCallback? onReorderCancel;
 
   const _OutlineCell({
     required this.app,
@@ -240,6 +262,10 @@ class _OutlineCell extends StatelessWidget {
     required this.width,
     required this.open,
     required this.onToggleOpen,
+    this.onReorderStart,
+    this.onReorderUpdate,
+    this.onReorderEnd,
+    this.onReorderCancel,
   });
 
   @override
@@ -303,6 +329,14 @@ class _OutlineCell extends StatelessWidget {
         layer: layer,
         position: d.globalPosition,
       ),
+      // A vertical drag on the outline reorders the layer stack (the body draws
+      // the insertion line and commits on release). A locked layer refuses.
+      onVerticalDragStart: layer.switches.locked
+          ? null
+          : (_) => onReorderStart?.call(layer.id),
+      onVerticalDragUpdate: (d) => onReorderUpdate?.call(d.globalPosition),
+      onVerticalDragEnd: (_) => onReorderEnd?.call(),
+      onVerticalDragCancel: () => onReorderCancel?.call(),
       child: Container(
         color: selected ? t.surface2 : null,
         child: Row(

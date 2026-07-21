@@ -36,8 +36,19 @@ List<PaletteCommand> paletteCommands({
   required Workspace workspace,
   required VoidCallback openSettings,
   VoidCallback? openExport,
-}) =>
-    [
+}) {
+  // Run an add-layer op against the front composition, or surface a calm notice
+  // when none is open — mirroring the menu bar's `_addLayer`.
+  void addLayer(void Function(String compId) op) {
+    final compId = app.frontCompIdResolved;
+    if (compId == null) {
+      app.setNotice('Open a composition to add a layer to');
+      return;
+    }
+    op(compId);
+  }
+
+  return [
       PaletteCommand('Save project', app.save),
       PaletteCommand('Undo', app.undo),
       PaletteCommand('Redo', app.redo),
@@ -45,15 +56,21 @@ List<PaletteCommand> paletteCommands({
       PaletteCommand('Open project…', app.openProject),
       PaletteCommand('Import footage…', app.importFootage),
       PaletteCommand('New composition', app.newComposition),
-      PaletteCommand('Add solid layer', () => app.engine('Add solid layer')),
-      PaletteCommand('Add text layer', () => app.engine('Add text layer')),
-      PaletteCommand('Add camera layer', () => app.engine('Add camera layer')),
+      PaletteCommand('Add solid layer', () => addLayer(app.addSolidLayer)),
+      PaletteCommand('Add text layer', () => addLayer(app.addTextLayer)),
+      PaletteCommand('Add camera layer', () => addLayer(app.addCameraLayer)),
       PaletteCommand(
-          'Add adjustment layer', () => app.engine('Add adjustment layer')),
+          'Add adjustment layer', () => addLayer(app.addAdjustmentLayer)),
       PaletteCommand(
-          'Add sequence layer', () => app.engine('Add sequence layer')),
-      PaletteCommand('Add marker at playhead',
-          () => app.engine('Add marker at playhead')),
+          'Add sequence layer', () => addLayer(app.addSequenceLayer)),
+      PaletteCommand('Add marker at playhead', () {
+        final compId = app.frontCompIdResolved;
+        if (compId != null) {
+          app.addMarker(compId, app.previewFrame);
+        } else {
+          app.setNotice('Open a composition to add a marker to');
+        }
+      }),
       // The dialogue when a bridge is present (wired by the shell); the F0
       // notice otherwise, so the placeholder build behaves as before.
       PaletteCommand('Export comp…',
@@ -65,6 +82,7 @@ List<PaletteCommand> paletteCommands({
         PaletteCommand('Colour scheme: ${s.label}',
             () => workspace.setScheme(s)),
     ];
+}
 
 class CommandPalette extends StatefulWidget {
   final List<PaletteCommand> commands;

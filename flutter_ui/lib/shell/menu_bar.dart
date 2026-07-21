@@ -67,11 +67,12 @@ class LumitMenuBar extends StatelessWidget {
           _menu(context, 'Composition', [
             _Item('New composition',
                 () => showNewCompositionDialog(context, app)),
-            _Item('Add solid layer', () => app.engine('Add solid layer')),
-            _Item('Add text layer', () => app.engine('Add text layer')),
-            _Item('Add camera layer', () => app.engine('Add camera layer')),
-            _Item('Add adjustment layer', () => app.engine('Add adjustment layer')),
-            _Item('Add sequence layer', () => app.engine('Add sequence layer')),
+            _Item('Add solid layer', () => _addLayer(app.addSolidLayer)),
+            _Item('Add text layer', () => _addLayer(app.addTextLayer)),
+            _Item('Add camera layer', () => _addLayer(app.addCameraLayer)),
+            _Item('Add adjustment layer',
+                () => _addLayer(app.addAdjustmentLayer)),
+            _Item('Add sequence layer', () => _addLayer(app.addSequenceLayer)),
             _Item.divider(),
             _Item('Cut clip at playhead', () => app.engine('Cut clip at playhead')),
             _Item('Delete clip at playhead', () => app.engine('Delete clip at playhead')),
@@ -109,6 +110,17 @@ class LumitMenuBar extends StatelessWidget {
 
   Widget _menu(BuildContext context, String title, List<_Item> items) =>
       _MenuButton(title: title, items: items);
+
+  /// Run an add-layer op against the front composition, resolving its id first;
+  /// with no composition open, surface a calm notice rather than doing nothing.
+  void _addLayer(void Function(String compId) op) {
+    final compId = app.frontCompIdResolved;
+    if (compId == null) {
+      app.setNotice('Open a composition to add a layer to');
+      return;
+    }
+    op(compId);
+  }
 
   /// Open the export dialogue stamped with [preset] when a bridge is present;
   /// without one, keep the F0 notice ([fallbackNotice]) so the placeholder

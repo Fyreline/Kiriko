@@ -2305,6 +2305,12 @@ exactly what the egui frontend does under the hood (the same defaults, the same
 op), so the two front doors can never drift apart, and every reply is still the
 whole document as text (JSON) so the panels just re-read it.
 
+**Placing footage and restacking layers.** You can now build a composition from
+the Flutter side: double-click a footage clip in the Project panel (or drag it
+onto the timeline) and it becomes a new layer at the top of the stack — sized and
+centred exactly as the egui app would place it — and you can drag a layer row's
+name up or down to restack it, just like moving a track in any editor.
+
 **The Viewer showing real frames, and the scopes reading them (F2).** The Viewer
 now shows actual pictures. It works out which footage the playhead is sitting
 over — the topmost visible footage layer whose span covers the current frame —

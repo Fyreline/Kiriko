@@ -135,6 +135,12 @@ class _FakeBridge implements DocumentBridge {
   BridgeReply addAdjustmentLayer(String compId) => _op('add_adjustment:$compId');
   @override
   BridgeReply addSequenceLayer(String compId) => _op('add_sequence:$compId');
+  @override
+  BridgeReply addFootageLayer(String compId, String itemId) =>
+      _op('add_footage:$compId/$itemId');
+  @override
+  BridgeReply reorderLayer(String compId, String layerId, int newIndex) =>
+      _op('reorder:$compId/$layerId->$newIndex');
 
   @override
   BridgeReply deleteLayer(String compId, String layerId) =>
@@ -821,6 +827,42 @@ void main() {
         'remove_effect:c1/l0/e1',
       ]);
       expect(app.errorNotice, isNull);
+    });
+
+    test('addFootageLayer and reorderLayer route to the bridge', () {
+      final fake = _FakeBridge()..newComposition('Scene');
+      final app = AppStateStub(bridge: fake);
+      app.addFootageLayer('c1', 'f7');
+      app.reorderLayer('c1', 'l2', 0);
+      expect(fake.ops, [
+        'add_footage:c1/f7',
+        'reorder:c1/l2->0',
+      ]);
+      expect(app.errorNotice, isNull);
+    });
+
+    test('addFootageToFrontComp places into the front comp', () {
+      final fake = _FakeBridge();
+      final app = AppStateStub(bridge: fake);
+      // Seed a snapshot whose composition carries a comp block so the front comp
+      // resolves (the bare fake's newComposition omits it).
+      app.snapshot = BridgeReply.parse(
+        '{"ok":true,"items":[{"id":"c1","name":"Scene",'
+        '"kind":"composition","children":[],"comp":{"width":1920,'
+        '"height":1080,"fps":{"num":60,"den":1},"frame_count":100,'
+        '"layers":[],"markers":[]}}],"can_undo":false,"can_redo":false,'
+        '"path":null}',
+      ).snapshot;
+      app.addFootageToFrontComp('f9');
+      expect(fake.ops, ['add_footage:c1/f9']);
+    });
+
+    test('addFootageToFrontComp with no comp surfaces a calm notice', () {
+      final fake = _FakeBridge(); // no composition
+      final app = AppStateStub(bridge: fake);
+      app.addFootageToFrontComp('f9');
+      expect(fake.ops, isEmpty);
+      expect(app.notice, contains('Open a composition'));
     });
 
     test('listEffects passes through to the bridge', () {

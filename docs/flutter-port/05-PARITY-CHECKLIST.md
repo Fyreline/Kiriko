@@ -531,7 +531,7 @@ The owner wants right-click menus everywhere egui offers one. Per-surface audit
 | Lane / property keyframe | Timeline lane key: right-click removes; graph-editor key: Easy ease · Linear · Hold · Unify handles · Delete key (`shell/graph.rs:1676`) | Property-row key right-click **removes only** (`panels/timeline/property_row.dart:137`) | **partial** — interpolation-set menu (Easy ease/Linear/Hold/Unify) missing; the graph-editor's own key right-click is entirely absent (`graph_editor.dart` has no `onSecondaryTap`) |
 | Empty timeline lane | Composition settings · Reveal in project · Show time grid · Beat sensitivity slider + Detect beats · Clear beat markers (`timeline/panel.rs:384`) | none | **whole menu missing** |
 | Comp-tab strip (empty space) | Pop out timeline (`shell/panels.rs:1139`) | none (`panels/timeline/comp_tabs.dart` is tap-only) | **missing** |
-| Project row | Composition settings · Relink… (missing footage) · Find missing footage · Move to root · Delete (`shell/panels.rs:909`) | none — the Project panel is display-only (`panels/project_panel.dart`) | **whole menu missing** |
+| Project row | Composition settings · Relink… (missing footage) · Find missing footage · Move to root · Delete (`shell/panels.rs:909`) | Composition settings… · Relink… · Find missing footage · Move to root · Delete (`panels/project_panel.dart` `showProjectContextMenu`) | **parity of items** — Comp settings wired to the dialogue; Relink / Find missing / Move to root / Delete are honest notice stubs (no bridge ops yet) |
 | Viewer toolbar Shape tool | Rectangle / Ellipse / Star mask shape (`shell/app_update.rs:971`) | none — the Viewer has no draw-tool row | **missing** |
 | Value field (DragValue) | egui built-in Reset / Copy / Paste on every drag box | none (`DragValueField`) | **missing** (minor) |
 | Dock tab pill (inside a tab group) | none (egui gives only bare panes a menu) | none | parity |
@@ -566,9 +566,11 @@ cause of the owner's impression** (both to verify live): the Project panel canno
 open or reorder comps and no menu path adds a layer (see the sweep gaps), so what
 the owner sees is whatever fixed order the loaded `.lum` already holds, with no
 way to move a row — i.e. an *inability to reorder*, not a wrong render order.
-Layer reorder-by-drag exists in egui (`panel.rs:799-814`, `Op::MoveLayer`) but
-has **no bridge op and no Flutter UI** (neither `crates/lumit-bridge/src` nor
-`flutter_ui/lib` mentions `move_layer`/`reorder`).
+Layer reorder-by-drag exists in egui (`panel.rs:799-814`, `Op::ReorderLayer`).
+**Now shipped in the port** (see "Layer & footage placement" above): the bridge
+`reorder_layer` op and a vertical-drag-on-outline reorder in the Flutter timeline
+with a live insertion indicator — so the owner can move a row, not just view a
+fixed order.
 
 ## Parity sweep gaps (2026-07-22 audit — newly recorded)
 
@@ -577,22 +579,32 @@ is a genuine miss (fires even with a live bridge) unless marked otherwise.
 
 ### Layer & footage placement (the biggest hole)
 
-- ☐ **No UI path to add a layer.** The menu bar and command palette "Add solid /
-  text / camera / adjustment / sequence layer" items call `app.engine(…)` — the
-  F0 stub notice — **even with a live bridge** (`shell/menu_bar.dart:70-74`,
-  `shell/command_palette.dart:48-56`), although `AppStateStub.addSolidLayer …
-  addSequenceLayer` and the bridge ops behind them exist and are tested
-  (`state/app_state.dart:552-567`; `add_*_layer` in `crates/lumit-bridge`). They
-  are defined but **called from nowhere in the UI**.
-- ☐ **Footage cannot be placed into a comp at all (MAJOR).** There is no
-  drag-from-Project-to-timeline (no `Draggable`/`DragTarget` anywhere in
-  `flutter_ui/lib`), and the add-layer menu items are stubs (above). Combined,
-  **a composition cannot gain its first layer from the Flutter UI** — only
-  Duplicate/Delete of an already-present layer work. A comp only has layers if the
-  loaded `.lum` already carried them.
-- ☐ **Layer reorder-by-drag missing** (also the subject of desk-test item 2): egui
-  drags a row to restack (`shell/timeline/panel.rs:799-814` → `Op::MoveLayer`);
-  the bridge exposes **no** reorder op and Flutter has no reorder UI.
+- ☑ **Add-layer menu + palette wired.** The Composition menu ("Add solid / text /
+  camera / adjustment / sequence layer") and the matching command-palette entries
+  now route to the real `AppStateStub.addSolidLayer … addSequenceLayer` ops for
+  the front comp; with no composition open they surface a calm notice rather than
+  the F0 stub (`shell/menu_bar.dart` `_addLayer`, `shell/command_palette.dart`
+  `addLayer`). The palette's "Add marker at playhead" is wired too. Widget-tested
+  (menu add-solid → `add_solid:<front comp>`).
+- ☑ **Footage can be placed into a comp.** New bridge export
+  `add_footage_layer(comp_id, item_id)` (ABI 5) mirrors egui's
+  `add_footage_to_comp` (`crates/lumit-ui/src/app_state/layers.rs:60`): a Footage
+  layer at index 0, the media's own duration/size when probed (else the full
+  comp), anchored on the media centre placed at the comp centre. Journal-backed,
+  full-snapshot reply, in-crate tests (add → footage layer with `source_item_id`;
+  undo removes). The Flutter UI places it two ways: **double-click** a Project
+  footage row (`addFootageToFrontComp`), and **drag** a Project footage row onto
+  the Timeline lane (`Draggable`/`DragTarget`, `FootageDragData`). Both go to the
+  top of the stack, mirroring egui (in-point at comp 0, not the drop frame).
+- ☑ **Layer reorder-by-drag shipped.** New bridge export
+  `reorder_layer(comp_id, layer_id, new_index)` (ABI 5) commits the real
+  `Op::ReorderLayer` (`crates/lumit-core/src/ops.rs:64`; 0 = top, clamps
+  out-of-range). Rust tests: bottom→top round-trips through undo; an out-of-range
+  index clamps to the end. Flutter: a **vertical drag on a layer row's outline**
+  reorders (live insertion-line indicator, commit on release), the target index
+  computed from the other rows' centres exactly as egui's `layer_row_centers`
+  (`panel.rs:1770`). The lane's horizontal grip/trim drags stay distinct.
+  Widget-tested for both up and down moves.
 - ☐ **Razor / clip editing missing.** "Cut clip at playhead" and "Delete clip at
   playhead" are menu stubs (`shell/menu_bar.dart:76-77`); no bridge op. Sequence-
   layer sub-clip editing likewise absent.
@@ -601,15 +613,19 @@ is a genuine miss (fires even with a live bridge) unless marked otherwise.
   has no beat op. egui hosts these in the empty-lane context menu and the
   Composition menu.
 
-### Project panel (display-only)
+### Project panel (interactive)
 
-- ☐ **Project panel is read-only** (`panels/project_panel.dart`): no selection, no
-  click / double-click to **open a composition**, no context menu (see item 1),
-  no footage thumbnail, no "Relink…" button, no missing-footage badge, no
-  Composition-settings entry, no rename / delete / move-to-folder, no drag. egui's
-  equivalent (`shell/panels.rs`) offers all of these. (The existing F1 row already
-  notes "thumbnails, relink, missing badge, selection/drag" — this widens it to
-  open-comp and the context menu.)
+- ◐ **Project panel is now interactive** (`panels/project_panel.dart`): a click
+  **selects** (highlight, `selectedProjectItem`), a **double-click** opens a
+  composition (`frontCompSelect`) or places a footage item into the front comp as
+  a layer (`addFootageToFrontComp`), a footage row is **Draggable** onto the
+  Timeline, and a **right-click** raises the egui project menu (Composition
+  settings…, Relink…, Find missing footage, Move to root, Delete). Composition
+  settings opens the existing dialogue (fronting that comp first); the other four
+  are honest notice stubs — **Delete** has no delete-item bridge op yet (state.rs
+  / edits.rs carry only `delete_layer`), and Relink / Find missing footage /
+  Move to root await their engine ops. Widget-tested. Still open: thumbnails, the
+  missing-footage badge, rename, and the four stubbed menu ops.
 
 ### Settings & window
 
@@ -658,8 +674,8 @@ not a true gap); "**stub**" = fires even with a live bridge.
 | String | Fires from | Status / awaits |
 |---|---|---|
 | New project / New composition / Undo / Redo / Save / Open project / Import footage | `state/app_state.dart:327-410` | no-bridge fallback (the real op runs when a bridge is present) |
-| Add solid / text / camera / adjustment / sequence layer | menu bar (`menu_bar.dart:70-74`) + palette (`command_palette.dart:48-56`) | **stub** — repoint to `app.addSolidLayer` … `addSequenceLayer` (already defined) |
-| Add marker at playhead | palette (`command_palette.dart:56`) | **stub** in the palette (the menu-bar copy is wired to `app.addMarker`) |
+| ~~Add solid / text / camera / adjustment / sequence layer~~ | menu bar + palette | **WIRED** — routed to `app.addSolidLayer` … `addSequenceLayer` on the front comp (no comp → notice) |
+| ~~Add marker at playhead~~ (palette) | palette | **WIRED** — the palette copy now calls `app.addMarker` on the front comp (no comp → notice) |
 | Export comp | palette default / `shell/shell.dart:120` | fallback when no export opener is wired in that context |
 | Cut clip at playhead / Delete clip at playhead | menu bar (`menu_bar.dart:76-77`) | **stub** — awaits a razor bridge op |
 | Detect beats (sensitivity N) / Clear beat markers | menu bar (`menu_bar.dart:87-89`) | **stub** — awaits a beat-detection bridge op |

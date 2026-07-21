@@ -120,6 +120,12 @@ class _GraphFake implements DocumentBridge {
   @override
   BridgeReply addSequenceLayer(String compId) => _op('add_sequence');
   @override
+  BridgeReply addFootageLayer(String compId, String itemId) =>
+      _op('add_footage');
+  @override
+  BridgeReply reorderLayer(String compId, String layerId, int newIndex) =>
+      _op('reorder');
+  @override
   BridgeReply deleteLayer(String compId, String layerId) => _op('delete');
   @override
   BridgeReply duplicateLayer(String compId, String layerId) => _op('dup');

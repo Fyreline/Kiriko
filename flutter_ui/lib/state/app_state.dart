@@ -17,6 +17,16 @@ import '../panels/preview_source.dart';
 import 'file_dialogs.dart';
 import 'workspace.dart';
 
+/// The payload carried when a Project-panel footage row is dragged onto the
+/// Timeline lane (Flutter's [Draggable]/[DragTarget]): the footage item's id and
+/// its name (for the drag feedback label). Shared by the Project and Timeline
+/// panels so the drop can place it as a layer through `addFootageLayer`.
+class FootageDragData {
+  final String itemId;
+  final String name;
+  const FootageDragData(this.itemId, this.name);
+}
+
 /// One pending export in the Dart-side queue — a `VecDeque` mirror of
 /// export_actions.rs. The egui side snapshots the whole document at QUEUE time;
 /// the bridge can only snapshot at START time, so a Dart queue item carries the
@@ -215,6 +225,10 @@ class AppStateStub extends ChangeNotifier {
   /// layer). Null when nothing is selected.
   String? selectedLayer;
 
+  /// The selected Project-panel item, by its snapshot item id. Drives the row
+  /// highlight; null when nothing is selected there.
+  String? selectedProjectItem;
+
   /// Which composition the Timeline/Viewer front, by snapshot item id. Null
   /// means "the first composition in the snapshot" — the [frontComp] fallback.
   String? frontCompId;
@@ -312,6 +326,14 @@ class AppStateStub extends ChangeNotifier {
     if (selectedLayer == id) return;
     selectedLayer = id;
     _scheduleSessionPersist();
+    notifyListeners();
+  }
+
+  /// Select a Project-panel item by its snapshot item id (a row click), or null
+  /// to clear. Drives the row highlight.
+  void selectProjectItem(String? id) {
+    if (selectedProjectItem == id) return;
+    selectedProjectItem = id;
     notifyListeners();
   }
 
@@ -565,6 +587,28 @@ class AppStateStub extends ChangeNotifier {
   /// Add an (empty) Sequence layer to [compId].
   void addSequenceLayer(String compId) =>
       _bridgeOp((b) => b.addSequenceLayer(compId));
+
+  /// Place the project footage item [itemId] into [compId] as a new Footage
+  /// layer (top of the stack).
+  void addFootageLayer(String compId, String itemId) =>
+      _bridgeOp((b) => b.addFootageLayer(compId, itemId));
+
+  /// Place the footage item [itemId] into the front composition as a new layer
+  /// (the Project panel's double-click / drag-drop). No front comp surfaces a
+  /// calm notice rather than silently doing nothing.
+  void addFootageToFrontComp(String itemId) {
+    final compId = frontCompIdResolved;
+    if (compId == null) {
+      setNotice('Open a composition to place footage into');
+      return;
+    }
+    addFootageLayer(compId, itemId);
+  }
+
+  /// Reorder a layer within its composition to [newIndex] (0 = top) — the
+  /// Timeline drag-reorder.
+  void reorderLayer(String compId, String layerId, int newIndex) =>
+      _bridgeOp((b) => b.reorderLayer(compId, layerId, newIndex));
 
   /// Delete a layer from its composition.
   void deleteLayer(String compId, String layerId) =>

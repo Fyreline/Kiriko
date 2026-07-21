@@ -1093,6 +1093,15 @@ abstract class DocumentBridge {
   /// Add an (empty) Sequence layer to [compId].
   BridgeReply addSequenceLayer(String compId);
 
+  /// Place the project footage item [itemId] into [compId] as a new Footage
+  /// layer (top of the stack; the media's own duration/size when it has probed,
+  /// else the full comp). An error reply when [itemId] is not a footage item.
+  BridgeReply addFootageLayer(String compId, String itemId);
+
+  /// Reorder a layer within its composition to [newIndex] (0 = top). The op
+  /// clamps an out-of-range index into range rather than failing.
+  BridgeReply reorderLayer(String compId, String layerId, int newIndex);
+
   /// Delete a layer from its composition.
   BridgeReply deleteLayer(String compId, String layerId);
 
@@ -1285,6 +1294,8 @@ class LumitBridge implements DocumentBridge, CompRenderBridge {
   final _StrArgDart _addCameraLayer;
   final _StrArgDart _addAdjustmentLayer;
   final _StrArgDart _addSequenceLayer;
+  final _Str2Dart _addFootageLayer;
+  final _Str2IntDart _reorderLayer;
   final _Str2Dart _deleteLayer;
   final _Str2Dart _duplicateLayer;
   final _CompSettingsDart _setCompSettings;
@@ -1381,6 +1392,12 @@ class LumitBridge implements DocumentBridge, CompRenderBridge {
         ),
         _addSequenceLayer = lib.lookupFunction<_StrArgC, _StrArgDart>(
           'lumit_bridge_add_sequence_layer',
+        ),
+        _addFootageLayer = lib.lookupFunction<_Str2C, _Str2Dart>(
+          'lumit_bridge_add_footage_layer',
+        ),
+        _reorderLayer = lib.lookupFunction<_Str2IntC, _Str2IntDart>(
+          'lumit_bridge_reorder_layer',
         ),
         _deleteLayer = lib.lookupFunction<_Str2C, _Str2Dart>(
           'lumit_bridge_delete_layer',
@@ -1697,6 +1714,23 @@ class LumitBridge implements DocumentBridge, CompRenderBridge {
   @override
   BridgeReply addSequenceLayer(String compId) =>
       _compArgOp(_addSequenceLayer, compId);
+
+  @override
+  BridgeReply addFootageLayer(String compId, String itemId) =>
+      _twoStrOp(_addFootageLayer, compId, itemId);
+
+  @override
+  BridgeReply reorderLayer(String compId, String layerId, int newIndex) {
+    final c = compId.toNativeUtf8();
+    final l = layerId.toNativeUtf8();
+    try {
+      return BridgeReply.parse(
+          _readReply(_reorderLayer(c.cast(), l.cast(), newIndex)));
+    } finally {
+      malloc.free(c);
+      malloc.free(l);
+    }
+  }
 
   @override
   BridgeReply deleteLayer(String compId, String layerId) =>

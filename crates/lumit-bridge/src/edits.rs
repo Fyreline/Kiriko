@@ -13,6 +13,8 @@
 //! same wholesale-re-read contract v0.2 established.
 
 use crate::err_json;
+#[cfg(feature = "media")]
+use crate::media::MediaStatus;
 use crate::state::{commit, parse_comp_layer, parse_transform_prop, Bridge};
 use lumit_core::anim::{Animation, Keyframe, SideInterp};
 use lumit_core::model::{
@@ -284,6 +286,101 @@ pub(crate) fn add_sequence_layer(bridge: &mut Bridge, comp_id: &str) -> String {
         centred_transform(f64::from(c.width), f64::from(c.height), c.width, c.height),
     );
     add_top_layer(bridge, comp, layer, "add sequence layer")
+}
+
+/// Place a project footage item into a composition as a new Footage layer —
+/// `lumit-ui`'s `add_footage_to_comp`. The layer takes the media's own full
+/// duration (frame-exact via the comp grid) when the media has probed, else the
+/// full comp; its anchor sits on the media's natural centre placed at the comp
+/// centre (so it appears centred and pivots about its middle, the AE model); and
+/// it inserts at the top of the stack (index 0). One [`Op::AddLayer`], undoable.
+/// `item_id` must be a footage item in the project, else a calm error.
+pub(crate) fn add_footage_layer(bridge: &mut Bridge, comp_id: &str, item_id: &str) -> String {
+    let ctx = "add footage layer";
+    let (comp, c) = match resolve_comp(bridge, comp_id, ctx) {
+        Ok(pair) => pair,
+        Err(e) => return err_json(e),
+    };
+    let item = match Uuid::parse_str(item_id) {
+        Ok(id) => id,
+        Err(_) => return err_json(format!("{ctx}: footage item id is not a valid UUID")),
+    };
+    let doc = bridge.store.snapshot();
+    // The referenced item must exist and be footage (mirrors the egui guard).
+    let Some(ProjectItem::Footage(f)) = doc.item(item) else {
+        return err_json(format!("{ctx}: unknown footage item"));
+    };
+    let name = f.name.clone();
+
+    // Span: the media's full duration in comp frames when probed, else the full
+    // comp. Natural size: the media's video resolution when probed, else the comp
+    // size. Both fall back to the comp with `--no-default-features` (no probe).
+    let comp_dur = c.duration.0;
+    #[cfg(feature = "media")]
+    let (out, nat_w, nat_h) = match bridge.media.get(&item) {
+        Some(MediaStatus::Ok(info)) => {
+            // Media duration in seconds → comp frames, exactly as the egui path
+            // converts `probe.duration_seconds * comp fps`. The bridge stores the
+            // decodable frame count at the media's own rate, so seconds is
+            // `frames * fps_den / fps_num` (0 when there is no video track).
+            let media_secs = if info.fps_num > 0 {
+                info.duration_frames as f64 * f64::from(info.fps_den) / f64::from(info.fps_num)
+            } else {
+                0.0
+            };
+            let frames = (media_secs * c.frame_rate.fps()).round() as i64;
+            let out = c
+                .frame_rate
+                .time_of_frame(frames.max(1))
+                .map(|t| t.0)
+                .unwrap_or(comp_dur);
+            let (nat_w, nat_h) = if info.width > 0 && info.height > 0 {
+                (f64::from(info.width), f64::from(info.height))
+            } else {
+                (f64::from(c.width), f64::from(c.height))
+            };
+            (out, nat_w, nat_h)
+        }
+        _ => (comp_dur, f64::from(c.width), f64::from(c.height)),
+    };
+    #[cfg(not(feature = "media"))]
+    let (out, nat_w, nat_h) = (comp_dur, f64::from(c.width), f64::from(c.height));
+
+    let layer = base_layer(
+        name,
+        LayerKind::Footage { item, retime: None },
+        out,
+        centred_transform(nat_w, nat_h, c.width, c.height),
+    );
+    add_top_layer(bridge, comp, layer, ctx)
+}
+
+/// Reorder a layer within its composition to a new stack index (0 = top) —
+/// `lumit-ui`'s timeline drag-reorder (`Op::ReorderLayer`). `new_index` is the
+/// target position in the list once the layer is lifted out (`Vec::insert`
+/// semantics); the op clamps it into range, so an out-of-range value lands the
+/// layer at the nearest end rather than failing. One undoable step.
+pub(crate) fn reorder_layer(
+    bridge: &mut Bridge,
+    comp_id: &str,
+    layer_id: &str,
+    new_index: i64,
+) -> String {
+    let (comp, layer) = match parse_comp_layer(comp_id, layer_id) {
+        Ok(pair) => pair,
+        Err(e) => return err_json(format!("reorder layer: {e}")),
+    };
+    // A negative index clamps to the top (0); the op itself clamps the upper end.
+    let new_index = usize::try_from(new_index).unwrap_or(0);
+    commit(
+        bridge,
+        Op::ReorderLayer {
+            comp,
+            layer,
+            new_index,
+        },
+        "reorder layer",
+    )
 }
 
 /// Delete a layer from its composition (one [`Op::RemoveLayer`], undoable).
@@ -1036,6 +1133,114 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// A fresh bridge with one comp and one footage item; returns the bridge,
+    /// the comp id and the footage item id. The footage has no probe entry, so
+    /// the media-less span/size fallbacks (full comp) are exercised.
+    fn bridge_with_comp_and_footage() -> (Bridge, String, String) {
+        use lumit_core::model::{FootageItem, MediaRef};
+        let (b, comp) = bridge_with_comp();
+        let footage = FootageItem {
+            id: Uuid::now_v7(),
+            name: "clip.mp4".into(),
+            media: MediaRef {
+                relative_path: "clip.mp4".into(),
+                absolute_path: String::new(),
+                fingerprint: None,
+                extra: serde_json::Map::new(),
+            },
+            extra: serde_json::Map::new(),
+        };
+        let item_id = footage.id.to_string();
+        b.store
+            .commit(Op::AddItem {
+                index: 0,
+                item: Box::new(ProjectItem::Footage(footage)),
+            })
+            .unwrap();
+        (b, comp, item_id)
+    }
+
+    #[test]
+    fn add_footage_layer_lists_a_footage_layer_with_its_source_and_undoes() {
+        let (mut b, comp, item) = bridge_with_comp_and_footage();
+        let snap = parse(&add_footage_layer(&mut b, &comp, &item));
+        let layer = first_layer(&snap);
+        assert_eq!(layer["kind"], json!("footage"));
+        assert_eq!(layer["name"], json!("clip.mp4"));
+        // The identity link names the source footage item.
+        assert_eq!(layer["source_item_id"], json!(item));
+        // Without a probe the span is the full comp (30 s at 60 fps = 1800).
+        assert_eq!(layer["in_frame"], json!(0));
+        assert_eq!(layer["out_frame"], json!(1800));
+        // One undo removes it.
+        let after = parse(&undo(&mut b));
+        assert!(find_comp(&after)["comp"]["layers"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn add_footage_layer_rejects_a_non_footage_item() {
+        // The comp id is a real item but not footage, so the item guard fires.
+        let (mut b, comp) = bridge_with_comp();
+        let reply = parse(&add_footage_layer(&mut b, &comp, &comp));
+        assert_eq!(reply["ok"], json!(false));
+        assert!(reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown footage item"));
+    }
+
+    #[test]
+    fn reorder_layer_moves_bottom_to_top_and_round_trips() {
+        let (mut b, comp) = bridge_with_comp();
+        // Add three layers (each inserts at the top), so the stack top-to-bottom
+        // is: adjustment, camera, text.
+        add_text_layer(&mut b, &comp);
+        add_camera_layer(&mut b, &comp);
+        add_adjustment_layer(&mut b, &comp);
+        let snap = parse(&crate::state::snapshot(&b));
+        let layers = find_comp(&snap)["comp"]["layers"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(layers.len(), 3);
+        let bottom_id = layers[2]["id"].as_str().unwrap().to_owned();
+        // Move the bottom layer to the top (index 0).
+        let snap = parse(&reorder_layer(&mut b, &comp, &bottom_id, 0));
+        let layers = find_comp(&snap)["comp"]["layers"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(layers[0]["id"].as_str().unwrap(), bottom_id);
+        assert_eq!(layers[0]["index"], json!(0));
+        // Undo restores the original order (the moved layer back at the bottom).
+        let after = parse(&undo(&mut b));
+        let layers = find_comp(&after)["comp"]["layers"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(layers[2]["id"].as_str().unwrap(), bottom_id);
+    }
+
+    #[test]
+    fn reorder_layer_clamps_an_out_of_range_index_calmly() {
+        let (mut b, comp) = bridge_with_comp();
+        add_text_layer(&mut b, &comp);
+        add_camera_layer(&mut b, &comp);
+        let snap = parse(&crate::state::snapshot(&b));
+        let top_id = first_layer(&snap)["id"].as_str().unwrap().to_owned();
+        // A wildly out-of-range target clamps to the end rather than erroring.
+        let reply = parse(&reorder_layer(&mut b, &comp, &top_id, 999));
+        assert_eq!(reply["ok"], json!(true));
+        let layers = find_comp(&reply)["comp"]["layers"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(layers.last().unwrap()["id"].as_str().unwrap(), top_id);
     }
 
     #[test]

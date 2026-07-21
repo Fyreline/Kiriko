@@ -76,13 +76,14 @@ use serde_json::json;
 /// v2 added the composition/layer/media detail to the snapshot and the
 /// layer/transform/marker ops. v3 added the transform read-back, identity links,
 /// work area and effect stack to the snapshot, plus the layer lifecycle,
-/// comp-settings, keyframe, work-area and effect ops. v4 (this build) adds
-/// export (start/poll/cancel + the preset resolver), keyframe interpolation
-/// read-back and set, the Retime read-back and its ops, and the blend-mode,
-/// matte, parent, motion-blur and add-mask columns. Every addition is
+/// comp-settings, keyframe, work-area and effect ops. v4 added export
+/// (start/poll/cancel + the preset resolver), keyframe interpolation read-back
+/// and set, the Retime read-back and its ops, and the blend-mode, matte, parent,
+/// motion-blur and add-mask columns. v5 (this build) adds footage placement
+/// (`add_footage_layer`) and layer reorder (`reorder_layer`). Every addition is
 /// *additive*, so an older Dart client still reads every field it knew, but the
 /// ABI number rises so a client that needs the new calls can insist on them.
-pub(crate) const ABI_VERSION: u32 = 4;
+pub(crate) const ABI_VERSION: u32 = 5;
 
 /// `{"ok":false,"error":"…"}`. serde escapes any control character, so the
 /// resulting string never carries an interior NUL and always makes a `CString`.

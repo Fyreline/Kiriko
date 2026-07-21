@@ -314,6 +314,45 @@ pub unsafe extern "C" fn lumit_bridge_add_sequence_layer(comp_id: *const c_char)
     guard(move || with_bridge(|b| crate::edits::add_sequence_layer(b, &comp)))
 }
 
+/// Place a project footage item into `comp_id` as a new Footage layer (top of
+/// the stack, the media's own duration/size when probed).
+///
+/// # Safety
+/// The two string pointers must each be null or a valid NUL-terminated UTF-8 C
+/// string alive for the call.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_add_footage_layer(
+    comp_id: *const c_char,
+    item_id: *const c_char,
+) -> *mut c_char {
+    let (Some(comp), Some(item)) = (c_str_to_string(comp_id), c_str_to_string(item_id)) else {
+        return to_c_string(err_json(
+            "add footage layer: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || with_bridge(|b| crate::edits::add_footage_layer(b, &comp, &item)))
+}
+
+/// Reorder a layer within its composition to `new_index` (0 = top; the op clamps
+/// an out-of-range value into range).
+///
+/// # Safety
+/// The two string pointers must each be null or a valid NUL-terminated UTF-8 C
+/// string alive for the call.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_reorder_layer(
+    comp_id: *const c_char,
+    layer_id: *const c_char,
+    new_index: i64,
+) -> *mut c_char {
+    let (Some(comp), Some(layer)) = (c_str_to_string(comp_id), c_str_to_string(layer_id)) else {
+        return to_c_string(err_json(
+            "reorder layer: an argument was null or not valid UTF-8",
+        ));
+    };
+    guard(move || with_bridge(|b| crate::edits::reorder_layer(b, &comp, &layer, new_index)))
+}
+
 /// Delete a layer from its composition.
 ///
 /// # Safety
@@ -1236,7 +1275,7 @@ mod tests {
         assert!(!ptr.is_null());
         let copied = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
         assert_eq!(parse(&copied)["ok"], json!(true));
-        assert_eq!(parse(&copied)["abi"], json!(4));
+        assert_eq!(parse(&copied)["abi"], json!(5));
         unsafe { lumit_bridge_free_string(ptr) };
 
         let snap_ptr = lumit_bridge_snapshot();

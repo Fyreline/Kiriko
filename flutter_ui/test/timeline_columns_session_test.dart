@@ -114,6 +114,11 @@ class _FakeBridge implements DocumentBridge {
   @override
   BridgeReply addSequenceLayer(String compId) => _snap();
   @override
+  BridgeReply addFootageLayer(String compId, String itemId) => _snap();
+  @override
+  BridgeReply reorderLayer(String compId, String layerId, int newIndex) =>
+      _snap();
+  @override
   BridgeReply deleteLayer(String compId, String layerId) => _snap();
   @override
   BridgeReply duplicateLayer(String compId, String layerId) => _snap();

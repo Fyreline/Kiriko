@@ -68,6 +68,11 @@ class _FrameBridge implements DocumentBridge {
   @override
   BridgeReply addSequenceLayer(String c) => BridgeReply.ok(snap);
   @override
+  BridgeReply addFootageLayer(String c, String itemId) => BridgeReply.ok(snap);
+  @override
+  BridgeReply reorderLayer(String c, String layerId, int newIndex) =>
+      BridgeReply.ok(snap);
+  @override
   BridgeReply deleteLayer(String c, String l) => BridgeReply.ok(snap);
   @override
   BridgeReply duplicateLayer(String c, String l) => BridgeReply.ok(snap);

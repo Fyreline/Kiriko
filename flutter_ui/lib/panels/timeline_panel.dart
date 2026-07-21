@@ -103,7 +103,111 @@ class _TimelineBodyState extends State<_TimelineBody>
   int _dragDelta = 0;
   bool _dragActive = false;
 
+  // --- Layer drag-reorder --------------------------------------------------
+  /// A per-layer key so the body can measure each row's centre while reordering
+  /// (mirroring egui's `layer_row_centers`).
+  final Map<String, GlobalKey> _rowKeys = {};
+
+  /// The layer being dragged to restack, and the pointer's last global Y, while
+  /// a reorder drag is live (both null otherwise).
+  String? _reorderId;
+  double? _reorderGlobalY;
+
+  /// A GlobalKey on the body's outer Stack so the insertion line can convert a
+  /// global gap-Y into the Stack's local coordinates.
+  final GlobalKey _stackKey = GlobalKey();
+
+  GlobalKey _rowKey(String id) => _rowKeys.putIfAbsent(id, () => GlobalKey());
+
   AppStateStub get app => widget.app;
+
+  /// The visible layers after the search filter (top-first) — the reorder
+  /// target index and the build both read this so they agree.
+  List<BridgeLayer> _visibleLayers() => [
+        for (final l in widget.comp.layers)
+          if (layerMatchesSearch(l.name, _search)) l,
+      ];
+
+  /// A layer row's centre Y in global coordinates, or null before it has laid
+  /// out (a filtered-out or freshly added row).
+  double? _rowCentreGlobalY(String id) {
+    final ctx = _rowKeys[id]?.currentContext;
+    final box = ctx?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    return box.localToGlobal(box.size.center(Offset.zero)).dy;
+  }
+
+  void _reorderStart(String id) {
+    app.selectLayer(id);
+    setState(() {
+      _reorderId = id;
+      _reorderGlobalY = null;
+    });
+  }
+
+  void _reorderUpdate(Offset globalPos) {
+    setState(() => _reorderGlobalY = globalPos.dy);
+  }
+
+  void _reorderEnd() {
+    final id = _reorderId;
+    final gy = _reorderGlobalY;
+    if (id != null && gy != null) {
+      final layers = _visibleLayers();
+      final old = layers.indexWhere((l) => l.id == id);
+      // The target index counts the OTHER rows whose centre sits above the
+      // release Y — exactly the lifted-out insert index egui's ReorderLayer
+      // takes (panel.rs:1770).
+      var target = 0;
+      for (final l in layers) {
+        if (l.id == id) continue;
+        final c = _rowCentreGlobalY(l.id);
+        if (c != null && c < gy) target++;
+      }
+      if (old != -1 && target != old) {
+        app.reorderLayer(widget.compId, id, target);
+      }
+    }
+    setState(() {
+      _reorderId = null;
+      _reorderGlobalY = null;
+    });
+  }
+
+  void _reorderCancel() {
+    setState(() {
+      _reorderId = null;
+      _reorderGlobalY = null;
+    });
+  }
+
+  /// The insertion line's Y in the Stack's local coordinates while a reorder
+  /// drag is live, or null when it cannot be placed yet.
+  double? _insertionLineY(List<BridgeLayer> layers) {
+    final id = _reorderId;
+    final gy = _reorderGlobalY;
+    if (id == null || gy == null) return null;
+    final others = <double>[];
+    for (final l in layers) {
+      if (l.id == id) continue;
+      final c = _rowCentreGlobalY(l.id);
+      if (c != null) others.add(c);
+    }
+    if (others.isEmpty) return null;
+    others.sort();
+    final target = others.where((c) => c < gy).length;
+    final double gapGlobalY;
+    if (target == 0) {
+      gapGlobalY = others.first - kRowHeight / 2;
+    } else if (target >= others.length) {
+      gapGlobalY = others.last + kRowHeight / 2;
+    } else {
+      gapGlobalY = (others[target - 1] + others[target]) / 2;
+    }
+    final stackBox = _stackKey.currentContext?.findRenderObject() as RenderBox?;
+    if (stackBox == null) return null;
+    return stackBox.globalToLocal(Offset(0, gapGlobalY)).dy;
+  }
 
   @override
   void dispose() {
@@ -220,12 +324,10 @@ class _TimelineBodyState extends State<_TimelineBody>
         final fps = widget.comp.fps.fps;
         final markers = widget.comp.markers;
         // The visible layers after the search filter (top-first).
-        final layers = [
-          for (final l in widget.comp.layers)
-            if (layerMatchesSearch(l.name, _search)) l,
-        ];
+        final layers = _visibleLayers();
 
         return Stack(
+          key: _stackKey,
           children: [
             Column(
               children: [
@@ -278,38 +380,30 @@ class _TimelineBodyState extends State<_TimelineBody>
                 // The lane area: the graph editor when the graph lens is on,
                 // else the scrolling layer rows. The ruler above and the pan
                 // scrollbar below stay put, and the graph shares this `scale`.
+                // A footage item dragged from the Project panel drops here to
+                // become a new layer (top of the stack, mirroring egui's
+                // `add_footage_to_comp`).
                 Expanded(
-                  child: app.timelineGraphMode
-                      ? GraphEditor(
-                          app: app,
-                          comp: widget.comp,
-                          compId: widget.compId,
-                          scale: scale,
-                        )
-                      : Listener(
-                          onPointerSignal: (e) {
-                            if (e is! PointerScrollEvent || !scale.canPan) {
-                              return;
-                            }
-                            final shift =
-                                HardwareKeyboard.instance.isShiftPressed;
-                            final dx = e.scrollDelta.dx != 0
-                                ? e.scrollDelta.dx
-                                : (shift ? e.scrollDelta.dy : 0);
-                            if (dx == 0) return;
-                            _pan(dx / scale.pxPerFrame,
-                                widget.comp.frameCount, app.timelineZoom);
-                          },
-                          child: SingleChildScrollView(
-                            child: Column(
-                              children: [
-                                for (var i = 0; i < layers.length; i++)
-                                  ..._layerBlock(layers[i], i,
-                                      outlineW.toDouble(), scale, fps, markers),
-                              ],
+                  child: DragTarget<FootageDragData>(
+                    onAcceptWithDetails: (d) =>
+                        app.addFootageLayer(widget.compId, d.data.itemId),
+                    builder: (context, candidate, rejected) => Stack(
+                      children: [
+                        Positioned.fill(
+                          child: _laneArea(
+                              scale, fps, markers, layers, outlineW),
+                        ),
+                        if (candidate.isNotEmpty)
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: Container(
+                                color: t.accent.withValues(alpha: 0.08),
+                              ),
                             ),
                           ),
-                        ),
+                      ],
+                    ),
+                  ),
                 ),
                 if (scale.canPan)
                   _PanScrollbar(
@@ -322,6 +416,21 @@ class _TimelineBodyState extends State<_TimelineBody>
                   ),
               ],
             ),
+            // The live insertion line while a layer is being drag-reordered,
+            // drawn across the outline column at the gap it would drop into.
+            if (_reorderId != null)
+              Builder(builder: (_) {
+                final y = _insertionLineY(layers);
+                if (y == null) return const SizedBox.shrink();
+                return Positioned(
+                  left: 0,
+                  width: outlineW.toDouble(),
+                  top: y - 1,
+                  child: IgnorePointer(
+                    child: Container(height: 2, color: t.accent),
+                  ),
+                );
+              }),
             // The playhead line is the only thing that moves per frame, so it
             // alone watches the fine-grained playhead notifier — the ruler,
             // layer rows and lanes above stay outside this rebuild (perf pass:
@@ -349,6 +458,48 @@ class _TimelineBodyState extends State<_TimelineBody>
     );
   }
 
+  /// The lane area's inner content (graph editor or the scrolling layer rows),
+  /// factored out so the [DragTarget] wrapper stays legible.
+  Widget _laneArea(
+    LaneScale scale,
+    double fps,
+    List<int> markers,
+    List<BridgeLayer> layers,
+    double outlineW,
+  ) {
+    return app.timelineGraphMode
+        ? GraphEditor(
+            app: app,
+            comp: widget.comp,
+            compId: widget.compId,
+            scale: scale,
+          )
+        : Listener(
+                          onPointerSignal: (e) {
+                            if (e is! PointerScrollEvent || !scale.canPan) {
+                              return;
+                            }
+                            final shift =
+                                HardwareKeyboard.instance.isShiftPressed;
+                            final dx = e.scrollDelta.dx != 0
+                                ? e.scrollDelta.dx
+                                : (shift ? e.scrollDelta.dy : 0);
+                            if (dx == 0) return;
+                            _pan(dx / scale.pxPerFrame,
+                                widget.comp.frameCount, app.timelineZoom);
+                          },
+                          child: SingleChildScrollView(
+                            child: Column(
+                              children: [
+                                for (var i = 0; i < layers.length; i++)
+                                  ..._layerBlock(layers[i], i,
+                                      outlineW.toDouble(), scale, fps, markers),
+                              ],
+                            ),
+                          ),
+                        );
+  }
+
   /// One layer's rows: the clip row, then — when its twirl is open — the
   /// Transform group header and one row per transform property.
   List<Widget> _layerBlock(
@@ -362,7 +513,7 @@ class _TimelineBodyState extends State<_TimelineBody>
     final open = _open.contains(layer.id);
     final rows = <Widget>[
       LayerRow(
-        key: ValueKey(layer.id),
+        key: _rowKey(layer.id),
         app: app,
         compId: widget.compId,
         layer: layer,
@@ -373,6 +524,10 @@ class _TimelineBodyState extends State<_TimelineBody>
         markers: markers,
         open: open,
         onToggleOpen: () => _toggleOpen(layer.id),
+        onReorderStart: _reorderStart,
+        onReorderUpdate: _reorderUpdate,
+        onReorderEnd: _reorderEnd,
+        onReorderCancel: _reorderCancel,
       ),
     ];
     if (open) {
