@@ -206,6 +206,15 @@ pub enum Op {
         layer: Uuid,
         animation: Animation,
     },
+    /// Replace a layer's audio Volume animation (docs/09 §6; same
+    /// coarse-grained shape as SetTransformProperty, for the same
+    /// invertibility reason). Valid on any layer; only heard where the
+    /// source has an audio stream.
+    SetLayerVolume {
+        comp: Uuid,
+        layer: Uuid,
+        animation: Animation,
+    },
     /// Replace a Footage layer's Retime map (None = play at source rate).
     SetLayerRetime {
         comp: Uuid,
@@ -710,6 +719,24 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Op, OpError> {
             };
             let previous = std::mem::replace(&mut zoom.animation, animation.clone());
             Ok(Op::SetCameraZoom {
+                comp: *comp,
+                layer: *layer,
+                animation: previous,
+            })
+        }
+        Op::SetLayerVolume {
+            comp,
+            layer,
+            animation,
+        } => {
+            let c = doc.comp_mut(*comp).ok_or(OpError::UnknownComp)?;
+            let l = c
+                .layers
+                .iter_mut()
+                .find(|l| l.id == *layer)
+                .ok_or(OpError::UnknownLayer)?;
+            let previous = std::mem::replace(&mut l.volume_db.animation, animation.clone());
+            Ok(Op::SetLayerVolume {
                 comp: *comp,
                 layer: *layer,
                 animation: previous,

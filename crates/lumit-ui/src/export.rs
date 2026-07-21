@@ -53,8 +53,8 @@ pub struct ItemInfo {
 }
 
 /// One audio-bearing layer, as the export thread needs it: where its file
-/// is, its comp-timeline span, and its start offset (the same trio the
-/// preview mix uses, so export audio matches playback).
+/// is, its comp-timeline span, its start offset, and its Volume (the same
+/// set the preview mix uses, so export audio matches playback).
 #[derive(Clone, PartialEq)]
 pub struct AudioJob {
     /// The footage item the audio comes from — the key the preview path uses
@@ -64,6 +64,34 @@ pub struct AudioJob {
     pub in_s: f64,
     pub out_s: f64,
     pub offset_s: f64,
+    /// The layer's Volume property (dB, docs/09 §6): static values become a
+    /// constant gain; keyframed ones bake to a control-rate envelope.
+    pub volume: lumit_core::anim::Property,
+}
+
+/// Bake one job's Volume for its placed span: `(constant gain, envelope)`.
+/// A static Volume is exactly its constant gain (envelope None); an animated
+/// one becomes a ~10 ms control-rate curve sampled in layer time — the same
+/// clock every other property reads (`lt = comp time − start offset`).
+pub fn volume_bake(
+    volume: &lumit_core::anim::Property,
+    start_frame: i64,
+    len: usize,
+    offset_s: f64,
+    rate: u32,
+) -> (f32, Option<lumit_audio::mix::GainEnvelope>) {
+    if !volume.is_animated() {
+        return (lumit_audio::mix::db_to_gain(volume.value_at(0.0)), None);
+    }
+    let stride = (rate / 100).max(1);
+    let n = len / stride as usize + 2;
+    let points = (0..n)
+        .map(|p| {
+            let t = (start_frame + p as i64 * i64::from(stride)) as f64 / f64::from(rate);
+            lumit_audio::mix::db_to_gain(volume.value_at(t - offset_s))
+        })
+        .collect();
+    (1.0, Some(lumit_audio::mix::GainEnvelope { stride, points }))
 }
 
 /// Delivery presets (docs/06-RENDER-PIPELINE.md §7.5): frame, codec, and
@@ -271,10 +299,12 @@ fn mix_decoded(
                 buf.samples.len() / 2,
                 rate,
             )?;
+            let (gain, envelope) = volume_bake(&job.volume, start_frame, len, job.offset_s, rate);
             Some(lumit_audio::mix::PlacedAudio {
                 start_frame,
                 samples: &buf.samples[src_start * 2..(src_start + len) * 2],
-                gain: 1.0,
+                gain,
+                envelope,
             })
         })
         .collect();
@@ -1914,6 +1944,42 @@ pub fn item_infos(
 mod tests {
     use super::*;
     use lumit_media::encode::VideoCodec;
+
+    /// Volume baking (docs/09 §6): a static Volume is exactly its constant
+    /// gain; a keyframed fade becomes a control-rate envelope sampled in
+    /// layer time (comp time − start offset), falling to true zero at the
+    /// −inf knee.
+    #[test]
+    fn volume_bake_static_gain_and_animated_envelope() {
+        use lumit_core::anim::{Animation, Keyframe, Property, SideInterp};
+        use lumit_core::Rational;
+        let stat = Property::fixed(-6.0);
+        let (g, env) = volume_bake(&stat, 0, 48_000, 0.0, 48_000);
+        assert!(env.is_none(), "static volume needs no envelope");
+        assert!((g - 0.501_19).abs() < 1e-3);
+
+        // A 1 s fade 0 dB → −inf, on a layer whose time 0 sits at comp 1 s.
+        let key = |t: i64, v: f64| Keyframe {
+            time: Rational::new(t, 1).unwrap(),
+            value: v,
+            interp_in: SideInterp::Linear,
+            interp_out: SideInterp::Linear,
+        };
+        let fade = Property {
+            animation: Animation::Keyframed(vec![key(0, 0.0), key(1, -100.0)]),
+            extra: serde_json::Map::new(),
+        };
+        // Placed at comp 1 s (start_frame 48000), offset 1 s: layer time 0..1.
+        let (g, env) = volume_bake(&fade, 48_000, 48_000, 1.0, 48_000);
+        assert_eq!(g, 1.0);
+        let env = env.unwrap();
+        assert!((env.gain_at(0) - 1.0).abs() < 1e-6, "fade starts at unity");
+        assert!(
+            env.gain_at(0) > env.gain_at(24_000) && env.gain_at(24_000) > env.gain_at(47_500),
+            "the fade descends"
+        );
+        assert_eq!(env.gain_at(48_000), 0.0, "the −inf knee lands at silence");
+    }
 
     /// The delivery-preset table is spec (docs/06 §7.5): frame, codec, and
     /// bitrates are pinned here so a stray edit can't silently change what

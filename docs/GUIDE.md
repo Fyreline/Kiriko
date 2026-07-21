@@ -1148,8 +1148,20 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   sound card notices. Soloing, muting, moving or trimming a layer swaps in a new plan and is
   heard on the very next callback, about ten milliseconds later, with the clock untouched.
   A test proves the plan sounds *sample-for-sample identical* to the old baked mix, another
-  proves a mid-play swap keeps the clock running, and the timeline waveform is now computed
-  straight off the plan without ever materialising the giant track.
+  proves a mid-play swap keeps the clock running.
+- **Per-layer Volume and the waveform in the layer's own row (K-172)** — every audio-carrying
+  layer now has an **Audio** group in its timeline twirl, next to Transform and Effects. Inside:
+  a **Volume** value in dB — 0 is the file's own loudness, positive boosts (up to +50), and
+  −100 or below reads "−inf", true silence. It keyframes like any other property (stopwatch,
+  the ◄ ◆ ► arrows), which is how fades work: two keyframes, loud to silent. Under the volume
+  sits a **Waveform** twirl that draws *that layer's* sound in its own lane — and because the
+  drawing reads the layer's position fresh every screen refresh, dragging the layer slides its
+  transients along with it, live. The old single waveform strip under the ruler is gone: it
+  showed the whole comp's mixed sound in one place, went stale mid-drag, and told you nothing
+  about *which* layer a spike belonged to. When a volume is keyframed, the fade is baked into a
+  little list of loudness levels every ten milliseconds (a "gain envelope") that both the live
+  player and the export mixer read — the same numbers, so what you hear is what you export;
+  changing a volume re-plans the mix instantly, like every other audio edit above.
 - **Beat detection** (`lumit-audio::beat`) — the groundwork for cutting to the music. It
   slides a short window along the track and, at each step, measures how much *new* energy
   appeared since the last step (the "spectral flux"); a kick or snare makes that number
@@ -1612,8 +1624,13 @@ Two mechanisms make this safe, and you'll see them by name in the code:
   the audio hardware's own clock) drifted ahead and kept getting yanked back. The fix is the
   metronome trick (`cached_pace_carry`): the leftover is *carried into the next frame's window*,
   so over any stretch the picture holds exactly true speed and stays with the sound. A genuine
-  freeze (dragging the window, say) is not "repaid" — the timer re-anchors and sound rejoins
-  after a quarter-second of smooth replay. In **Realtime** mode, the opposite trade: the clock never
+  freeze (dragging the window, say) is not "repaid" — the timer re-anchors rather than
+  fast-forwarding. And the rule for *when sound runs* is readiness, not history (the owner's
+  second report — audio used to sit out a quarter-second "warm-up" even on a fully cached run):
+  sound plays exactly when the coming quarter-second of frames is already cached, so a ready
+  run has audio from its very first frame, a still-rendering stretch stays silent rather than
+  flapping on and off at the render's crawling edge, and after a stall it rejoins the moment
+  the road ahead is paved. In **Realtime** mode, the opposite trade: the clock never
   waits, and when frames can't keep up Lumit drops the preview *resolution* to stay in time
   rather than slowing down. The stepping decision — advance, or hold and render, and whether
   sound should be playing — is a plain tested function; the messy wiring (the audio clock, the

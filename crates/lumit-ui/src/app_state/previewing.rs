@@ -756,6 +756,40 @@ impl AppState {
         self.audio_cache.set_budget(bytes);
     }
 
+    /// The `(source duration s, peaks)` strip of one item's decoded audio
+    /// for the per-layer Waveform lane (K-172): 2048 (min,max) buckets over
+    /// the whole source, computed once from the shared decoded buffer and
+    /// memoised. `None` until the decode lands — this kicks it off, so the
+    /// lane fills in on a later frame.
+    #[cfg(feature = "media")]
+    pub fn item_waveform(
+        &mut self,
+        item: Uuid,
+        path: &std::path::Path,
+    ) -> Option<super::ItemWaveform> {
+        if let Some(w) = self.item_waveforms.get(&item) {
+            return Some(w.clone());
+        }
+        let hit = self
+            .audio_cache
+            .get(&item)
+            .map(|c| std::sync::Arc::clone(&c.0));
+        match hit {
+            Some(buf) => {
+                let frames = buf.samples.len() / 2;
+                let dur = frames as f64 / f64::from(buf.rate.max(1));
+                let peaks = lumit_audio::mix::waveform_peaks(&buf.samples, 2048);
+                let strip = std::sync::Arc::new((dur, peaks));
+                self.item_waveforms.insert(item, strip.clone());
+                Some(strip)
+            }
+            None => {
+                self.request_footage_audio(item, path.to_owned());
+                None
+            }
+        }
+    }
+
     #[cfg(feature = "media")]
     pub(crate) fn ensure_audio_engine(&mut self) -> Option<&lumit_audio::AudioEngine> {
         if self.audio_engine.is_none() {
@@ -834,6 +868,7 @@ impl AppState {
                 in_s: layer.in_point.0.to_f64(),
                 out_s: layer.out_point.0.to_f64(),
                 offset_s: layer.start_offset.0.to_f64(),
+                volume: layer.volume_db.clone(),
             });
         }
         jobs
@@ -894,12 +929,23 @@ impl AppState {
                         buffer.samples.len() / 2,
                         rate,
                     ) {
+                        // Volume (docs/09 §6): static → a constant gain;
+                        // keyframed → a control-rate envelope. Same bake the
+                        // export mixdown uses, so playback == export.
+                        let (gain, envelope) = crate::export::volume_bake(
+                            &job.volume,
+                            start_frame,
+                            len,
+                            job.offset_s,
+                            rate,
+                        );
                         clips.push(lumit_audio::mix::PlacedClip {
                             buffer,
                             start_frame,
                             src_start,
                             len,
-                            gain: 1.0,
+                            gain,
+                            envelope: envelope.map(std::sync::Arc::new),
                         });
                     }
                 }
@@ -949,14 +995,9 @@ impl AppState {
         self.audio_loaded_comp = Some(comp_id);
         self.audio_loaded_sig = Some(sig);
         self.audio_loaded = None;
-        // The waveform strip is cosmetic and O(comp length): computed off the
-        // plan on a background thread (never materialising a whole-comp
-        // buffer — that buffer was the memory blowup) and delivered as peaks.
-        self.audio_preparing = Some((comp_id, sig));
-        std::thread::spawn(move || {
-            let peaks = plan.waveform_peaks(2048);
-            let _ = tx.send(super::CompAudioMsg::Peaks(comp_id, sig, peaks));
-        });
+        // (The comp-wide waveform strip once computed off the plan here is
+        // gone, K-172: each audio layer's Waveform twirl draws its own item's
+        // peaks instead.)
     }
 
     /// Drain background comp-audio deliveries. Waveform peaks (the live-mix
@@ -968,16 +1009,6 @@ impl AppState {
     pub fn poll_comp_audio(&mut self) {
         while let Ok(msg) = self.comp_audio_rx.try_recv() {
             match msg {
-                super::CompAudioMsg::Peaks(comp_id, sig, peaks) => {
-                    if self.audio_preparing == Some((comp_id, sig)) {
-                        self.audio_preparing = None;
-                    }
-                    // Show the strip only while it still describes the loaded
-                    // mix (an edit mid-compute supersedes it; sync re-spawns).
-                    if self.preview_comp == Some(comp_id) && self.audio_loaded_sig == Some(sig) {
-                        self.comp_waveform = Some((comp_id, peaks));
-                    }
-                }
                 super::CompAudioMsg::Baked(comp_id, sig, buffer) => {
                     if self.audio_preparing == Some((comp_id, sig)) {
                         self.audio_preparing = None;
@@ -1002,10 +1033,6 @@ impl AppState {
                     }
                     let playing = self.comp_playback.is_some();
                     let start_s = self.preview_frame as f64 / fps;
-                    self.comp_waveform = Some((
-                        comp_id,
-                        lumit_audio::mix::waveform_peaks(&buffer.samples, 2048),
-                    ));
                     if let Some(engine) = &self.audio_engine {
                         engine.load(std::sync::Arc::new(buffer));
                         engine.seek_seconds(start_s);
@@ -1062,7 +1089,6 @@ impl AppState {
                 self.audio_loaded_comp = None;
                 self.audio_loaded_sig = None;
                 self.audio_preparing = None;
-                self.comp_waveform = None;
                 // Keep any in-progress playback going on the wall clock, from
                 // the current playhead (the audio clock has just gone away).
                 if self.comp_playback.is_some() {

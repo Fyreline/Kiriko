@@ -226,7 +226,7 @@ impl AppState {
         wa_end: usize,
         fps: f64,
     ) -> bool {
-        use lumit_eval::schedule::{cached_audio_streak, cached_step};
+        use lumit_eval::schedule::{cached_audio_lookahead, cached_step};
         let Some(pb) = self.comp_playback else {
             return false;
         };
@@ -249,15 +249,15 @@ impl AppState {
             Some(key) => self.comp_frame_cache.contains_key(&key),
             None => true,
         };
+        // Audio gate (owner): sound runs exactly when the coming quarter
+        // second is already renderable, so a cached run has audio from its
+        // very first frame — no warm-up streak — and a still-rendering
+        // stretch stays silent instead of flapping on and off.
+        let run_ready = next_ready
+            && self.cached_run_ready(comp_id, cached_audio_lookahead(fps), wa_start, wa_end);
         let elapsed = pb.started.elapsed().as_secs_f64();
         let frame_dur = 1.0 / fps;
-        let step = cached_step(
-            next_ready,
-            elapsed,
-            frame_dur,
-            pb.smooth,
-            cached_audio_streak(fps),
-        );
+        let step = cached_step(next_ready, elapsed, frame_dur, run_ready);
         let mut audio_playing = step.audio_playing;
 
         if step.advance {
@@ -266,7 +266,7 @@ impl AppState {
             // "now", which lost up to a UI tick per frame — replay ran slower
             // than realtime, the audio clock pulled ahead, and the >2-frame
             // resync yanked it back for ever. A hitch re-anchors (and pauses
-            // audio to rebuild the streak) rather than fast-forwarding.
+            // audio this tick) rather than fast-forwarding.
             let (carry, continuous) = lumit_eval::schedule::cached_pace_carry(elapsed, frame_dur);
             let started = Instant::now()
                 .checked_sub(std::time::Duration::from_secs_f64(carry))
@@ -278,26 +278,19 @@ impl AppState {
             self.comp_playback = Some(CompPlayback {
                 started,
                 start_frame: next,
-                smooth: if continuous { step.smooth } else { 0 },
             });
             self.refresh_preview();
-        } else {
-            self.comp_playback = Some(CompPlayback {
-                smooth: step.smooth,
-                ..pb
-            });
-            if step.request_next {
-                // Render-gate: make sure the frame we are waiting on is on its
-                // way (idempotent — a matching request in flight is not
-                // re-sent). A cached frame under the playhead also keeps its
-                // display up to date.
-                self.request_frame_render(comp_id, next);
-            }
+        } else if step.request_next {
+            // Render-gate: make sure the frame we are waiting on is on its
+            // way (idempotent — a matching request in flight is not
+            // re-sent). A cached frame under the playhead also keeps its
+            // display up to date.
+            self.request_frame_render(comp_id, next);
         }
 
-        // Audio follows the picture: play during smooth replay, pause while a
-        // frame is awaited, and keep it seeked to the shown frame so a resumed
-        // stretch starts in sync.
+        // Audio follows the picture: play while the stretch ahead is ready,
+        // pause while a frame is awaited, and keep it seeked to the shown
+        // frame so a resumed stretch starts in sync.
         self.sync_cached_audio(comp_id, audio_playing, fps);
 
         // Warm ahead only once we are replaying smoothly (audio playing), so a
@@ -309,6 +302,52 @@ impl AppState {
             }
         }
         true
+    }
+
+    /// Whether the `lookahead` frames after the playhead (wrapping the work
+    /// area exactly as playback does) are all ready to show — the Cached-mode
+    /// audio gate (`run_ready`). Rides the memoised cache bar when the comp is
+    /// small enough to have one, so the steady path adds no hashing; longer
+    /// comps key just the window, a bounded per-tick cost. An unkeyable comp
+    /// (unprobed or unprobeable footage) counts as ready, matching the
+    /// stepper's own best-effort rule, so its audio still plays.
+    #[cfg(feature = "media")]
+    fn cached_run_ready(
+        &mut self,
+        comp_id: Uuid,
+        lookahead: usize,
+        wa_start: usize,
+        wa_end: usize,
+    ) -> bool {
+        let span = (wa_end - wa_start).max(1);
+        let frames: Vec<usize> = (1..=lookahead)
+            .map(|k| {
+                let f = self.preview_frame + k;
+                if f >= wa_end {
+                    wa_start + (f - wa_end) % span
+                } else {
+                    f
+                }
+            })
+            .collect();
+        if frames
+            .first()
+            .is_some_and(|&f| self.frame_key_for(comp_id, f).is_none())
+        {
+            return true; // unkeyable: renders live, best effort — like next_ready
+        }
+        let doc = self.store.snapshot();
+        if let Some(bars) = doc.comp(comp_id).and_then(|comp| self.cache_bar(comp)) {
+            return frames
+                .iter()
+                .all(|&f| matches!(bars.get(f), Some(CacheTier::Ram)));
+        }
+        frames
+            .iter()
+            .all(|&f| match self.frame_key_for(comp_id, f) {
+                Some(key) => self.comp_frame_cache.contains_key(&key),
+                None => true,
+            })
     }
 
     /// Ensure `frame` of `comp_id` is being rendered/displayed now. Unlike
@@ -512,7 +551,6 @@ impl AppState {
                     }
                     self.audio_loaded_comp = None;
                     self.audio_loaded_sig = None;
-                    self.comp_waveform = None;
                 }
             } else {
                 self.prepare_comp_audio(comp_id);

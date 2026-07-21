@@ -363,3 +363,30 @@ Four notes relayed by the owner; the tester started on main, then switched to th
   frames and throws them away. The tester's suggestion — cache the walk's byproducts (a "cache
   frames 10-20" shape) — is sound and tracked as a decode-cache improvement; it trades a
   little conversion CPU during the walk for free nearby frames afterwards.
+
+# Owner desk-testing — 2026-07-21 (implementation-audit branch)
+
+- [x] OD-1 **Audio still late at playback start.** The quarter-second smooth-streak warm-up
+  meant even a fully cached run began with ~15 silent frames. The gate is readiness *ahead*
+  now (`cached_audio_lookahead` + `run_ready` in `cached_step`): sound plays exactly when the
+  coming quarter-second of frames is already cached — a ready run has audio from its very
+  first frame (even while frame 0 holds for pace), a still-rendering stretch stays silent (no
+  flapping at the crawl edge), and recovery after a stall is immediate once the road ahead is
+  paved. Rides the memoised cache bar, so steady playback adds no hashing; >2400-frame comps
+  key just the window per tick (bounded; noted). `CompPlayback.smooth` retired.
+- [x] OD-2 **Dragged audio layer's waveform didn't follow in realtime** — resolved by design
+  via OD-3: the per-layer waveform lane reads the layer's live in/out/offset every paint, so
+  a drag carries the transients with it. (The stale comp-wide strip is gone entirely.)
+- [x] OD-3 **Per-layer Audio group replaces the comp-wide waveform (K-172).** Audio group in
+  the layer twirl (footage with an audio stream only): **Volume dB** — animatable property
+  (`Layer.volume_db`, `Op::SetLayerVolume`), 0 dB default, +50 ceiling, −100 = −inf knee
+  (exact zero gain; the box reads "−inf" and parses it back) — with stopwatch + ◄ ◆ ►
+  furniture; and a **Waveform** twirl drawing the item's 2048-bucket peak strip through the
+  layer's live placement. Static volume = constant clip gain; keyframed = ~10 ms control-rate
+  GainEnvelope applied identically by the live MixPlan callback and the baked export mixdown
+  (pinned by test: `an_enveloped_fade_rides_through_both_mixers_identically`). Volume joins
+  the audio-jobs signature so a nudge re-plans instantly. Comp-wide strip, its T25 toggles
+  (Window menu, lane right-click, strip right-click) and the background peaks bake all
+  removed. **Deferred, documented**: lane keyframe diamonds / graph editing for Volume await
+  the shared PropRow widening (same note as UI-11's flow input rate); fade-in/out commands
+  and detach-audio remain docs/09 §6 future work.

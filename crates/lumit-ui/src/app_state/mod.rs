@@ -224,6 +224,19 @@ pub(crate) fn audio_jobs_signature(jobs: &[crate::export::AudioJob], duration_s:
         j.in_s.to_bits().hash(&mut h);
         j.out_s.to_bits().hash(&mut h);
         j.offset_s.to_bits().hash(&mut h);
+        // Volume is mix content too: a level nudge or a fade keyframe must
+        // re-plan (docs/09 §6). Static is the overwhelmingly common case and
+        // hashes as one f64; keyframed volumes hash every key.
+        match &j.volume.animation {
+            lumit_core::anim::Animation::Static(v) => v.to_bits().hash(&mut h),
+            lumit_core::anim::Animation::Keyframed(keys) => {
+                keys.len().hash(&mut h);
+                for k in keys {
+                    k.time.to_f64().to_bits().hash(&mut h);
+                    k.value.to_bits().hash(&mut h);
+                }
+            }
+        }
     }
     h.finish()
 }
@@ -478,13 +491,12 @@ impl lumit_cache::ByteSized for CachedAudio {
 #[derive(Debug, Clone, Copy)]
 pub struct CompPlayback {
     /// Realtime: the wall-clock origin. Cached: when the current frame was
-    /// shown (the realtime-pace timer for the next advance).
+    /// shown (the realtime-pace timer for the next advance, carried by
+    /// `cached_pace_carry` so replay holds exact realtime).
     pub started: Instant,
     /// Realtime: the frame the clock is measured from. Cached: unused
     /// (`current` leads).
     pub start_frame: usize,
-    /// Cached mode: consecutive on-pace advances — the audio gate.
-    pub smooth: u32,
 }
 
 impl CompPlayback {
@@ -493,18 +505,23 @@ impl CompPlayback {
         Self {
             started: Instant::now(),
             start_frame: frame,
-            smooth: 0,
         }
     }
 }
 
 /// A background comp-audio delivery (see the `comp_audio_rx` field).
 #[cfg(feature = "media")]
+/// One item's waveform strip for the per-layer Waveform lane (K-172):
+/// `(source duration s, 2048 (min,max) peak buckets)` over the item's whole
+/// decoded audio, shared between the memo and the painters.
+#[cfg(feature = "media")]
+pub type ItemWaveform = std::sync::Arc<(f64, Vec<(f32, f32)>)>;
+
 pub(crate) enum CompAudioMsg {
-    /// Waveform peaks computed off the live mix plan.
-    Peaks(Uuid, u64, Vec<(f32, f32)>),
     /// A whole baked mix — the legacy path for sources the byte-budgeted
     /// cache cannot hold (decode failed, or larger than the entire budget).
+    /// (The Peaks variant that fed the comp-wide waveform strip left with
+    /// it, K-172 — waveforms are per layer now.)
     Baked(Uuid, u64, lumit_media::AudioBuffer),
 }
 
@@ -765,14 +782,11 @@ pub struct AppState {
     /// (comp id, estimated BPM) from the last beat detection, shown by the ruler.
     #[cfg(feature = "media")]
     pub detected_bpm: Option<(Uuid, f64)>,
-    /// (comp id, (min,max) peaks) for the timeline waveform, computed when the
-    /// comp's audio is mixed. Drawn under the ruler.
+    /// Per-item waveform peaks for the per-layer Waveform twirl (K-172):
+    /// memoised on first request. View data only — amplitude shape, no
+    /// timing — so it survives edits and re-mixes untouched.
     #[cfg(feature = "media")]
-    pub comp_waveform: Option<(Uuid, Vec<(f32, f32)>)>,
-    /// Whether the audio-preview waveform strip under the ruler is shown (T25):
-    /// right-clicking the strip hides it; it defaults on. A view preference, not
-    /// project data.
-    pub show_audio_bar: bool,
+    pub item_waveforms: std::collections::HashMap<Uuid, ItemWaveform>,
     /// The timeline's layer-search filter (TL4): layers whose name doesn't
     /// contain this (case-insensitive) are hidden from the outline. Empty shows
     /// all. A view preference.
@@ -1138,7 +1152,8 @@ impl Default for AppState {
             #[cfg(feature = "media")]
             beats_tx,
             #[cfg(feature = "media")]
-            comp_waveform: None,
+            #[cfg(feature = "media")]
+            item_waveforms: std::collections::HashMap::new(),
             #[cfg(feature = "media")]
             detected_bpm: None,
             #[cfg(feature = "media")]
@@ -1231,7 +1246,6 @@ impl Default for AppState {
             layer_reorder: None,
             selected_item: None,
             selected_items: Vec::new(),
-            show_audio_bar: true,
             timeline_layer_search: String::new(),
             timeline_hide_invisible: false,
             mask_drag: None,

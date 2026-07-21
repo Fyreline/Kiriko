@@ -243,6 +243,7 @@ mod tests {
             matte: None,
             parent: None,
             label: 0,
+            volume_db: lumit_core::anim::Property::zero(),
             effects: Vec::new(),
             blend: BlendMode::Normal,
             masks,

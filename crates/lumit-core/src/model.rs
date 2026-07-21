@@ -988,6 +988,13 @@ pub struct Layer {
     /// organisational — never rendered into the picture.
     #[serde(default)]
     pub label: u8,
+    /// Per-layer audio volume in dB (docs/09 §6): 0 = unity, boostable to
+    /// +50; −100 and below reads as −∞ (exact silence). Animatable like any
+    /// property — fades are volume keyframes. Only heard on layers whose
+    /// source carries an audio stream; harmless everywhere else. Never feeds
+    /// the frame cache key (sound, not pixels).
+    #[serde(default = "Property::zero")]
+    pub volume_db: Property,
     #[serde(default)]
     pub blend: BlendMode,
     /// Masks gate the layer's alpha before effects/transform
@@ -1518,6 +1525,7 @@ mod tests {
             matte: None,
             parent: None,
             label: 0,
+            volume_db: crate::anim::Property::zero(),
             blend: BlendMode::Normal,
             masks: Vec::new(),
             effects: Vec::new(),

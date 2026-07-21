@@ -18,6 +18,51 @@
 /// not bound reconstruction overshoot, only the sample values themselves.
 pub const MASTER_CEILING: f32 = 0.966_050_9;
 
+/// The Volume property's −∞ knee (docs/09 §6): at or below this many dB the
+/// layer is truly silent — the UI shows "−inf" and the mixer multiplies by
+/// exactly zero, not a denormal whisper.
+pub const VOLUME_FLOOR_DB: f64 = -100.0;
+
+/// dB → linear gain for the per-layer Volume property: 0 dB = unity,
+/// +6 dB ≈ ×2, and anything at or under [`VOLUME_FLOOR_DB`] is exact silence.
+/// (The master ceiling still bounds a hot boosted sum.)
+#[must_use]
+pub fn db_to_gain(db: f64) -> f32 {
+    if db <= VOLUME_FLOOR_DB {
+        0.0
+    } else {
+        10f64.powf(db / 20.0) as f32
+    }
+}
+
+/// An animated volume, baked to control-rate gain points across a placed
+/// clip: `points[p]` is the gain at placed frame `p × stride`, and frames in
+/// between interpolate linearly — a ~10 ms control rate, plenty for fades,
+/// cheap enough for the audio callback. Baked by the host (which owns the
+/// keyframes); this crate only ever reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GainEnvelope {
+    /// Frames per control point (≥ 1).
+    pub stride: u32,
+    /// Gains at control points 0, stride, 2×stride, …; never empty.
+    pub points: Vec<f32>,
+}
+
+impl GainEnvelope {
+    /// The interpolated gain at placed frame `idx` (clamped at the ends).
+    #[must_use]
+    pub fn gain_at(&self, idx: usize) -> f32 {
+        let stride = self.stride.max(1) as usize;
+        let p = idx / stride;
+        let Some(&a) = self.points.get(p) else {
+            return self.points.last().copied().unwrap_or(1.0);
+        };
+        let b = self.points.get(p + 1).copied().unwrap_or(a);
+        let frac = (idx % stride) as f32 / stride as f32;
+        a + (b - a) * frac
+    }
+}
+
 /// One decoded stereo source placed on the comp's output strip.
 pub struct PlacedAudio<'a> {
     /// Output frame (per-channel sample index) where this source's first
@@ -26,8 +71,12 @@ pub struct PlacedAudio<'a> {
     pub start_frame: i64,
     /// Interleaved stereo samples (L R L R …); length is `frames × 2`.
     pub samples: &'a [f32],
-    /// Linear gain (1.0 = unity).
+    /// Linear gain (1.0 = unity). Used when `envelope` is None (a static
+    /// Volume); an animated Volume rides the envelope instead.
     pub gain: f32,
+    /// Control-rate gain curve for an animated Volume, indexed on placed
+    /// frames (0 = this source's first audible frame).
+    pub envelope: Option<GainEnvelope>,
 }
 
 /// Sum `sources` into a fresh `total_frames`-long interleaved stereo buffer.
@@ -37,7 +86,7 @@ pub struct PlacedAudio<'a> {
 pub fn mix_stereo(sources: &[PlacedAudio], total_frames: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; total_frames * 2];
     for src in sources {
-        if src.gain == 0.0 || src.samples.is_empty() {
+        if (src.gain == 0.0 && src.envelope.is_none()) || src.samples.is_empty() {
             continue;
         }
         let src_frames = src.samples.len() / 2;
@@ -50,9 +99,10 @@ pub fn mix_stereo(sources: &[PlacedAudio], total_frames: usize) -> Vec<f32> {
         for out_f in out_start..out_end {
             // The matching source frame (out_f - start_frame >= 0 here).
             let src_f = (out_f - src.start_frame) as usize;
+            let g = src.envelope.as_ref().map_or(src.gain, |e| e.gain_at(src_f));
             let o = out_f as usize * 2;
-            out[o] += src.samples[src_f * 2] * src.gain;
-            out[o + 1] += src.samples[src_f * 2 + 1] * src.gain;
+            out[o] += src.samples[src_f * 2] * g;
+            out[o + 1] += src.samples[src_f * 2 + 1] * g;
         }
     }
     for s in &mut out {
@@ -102,7 +152,13 @@ pub struct PlacedClip {
     pub start_frame: i64,
     pub src_start: usize,
     pub len: usize,
+    /// Linear gain (1.0 = unity). Used when `envelope` is None (a static
+    /// Volume); an animated Volume rides the envelope instead.
     pub gain: f32,
+    /// Control-rate gain curve for an animated Volume, indexed on placed
+    /// frames (0 = this clip's first audible frame). Shared so plan clones
+    /// stay cheap; callback-safe (read-only, allocation-free).
+    pub envelope: Option<std::sync::Arc<GainEnvelope>>,
 }
 
 /// A comp's audio as a *plan* rather than a baked buffer: the placed clips
@@ -136,8 +192,9 @@ impl MixPlan {
             if let (Some(&sl), Some(&sr)) =
                 (clip.buffer.samples.get(s), clip.buffer.samples.get(s + 1))
             {
-                l += sl * clip.gain;
-                r += sr * clip.gain;
+                let g = clip.envelope.as_ref().map_or(clip.gain, |e| e.gain_at(idx));
+                l += sl * g;
+                r += sr * g;
             }
         }
         (
@@ -271,6 +328,7 @@ mod tests {
             start_frame: out_start,
             samples: &src[src_start * 2..(src_start + len) * 2],
             gain: 1.0,
+            envelope: None,
         };
         let out = mix_stereo(&[placed], 3 * rate as usize);
         assert!(
@@ -316,6 +374,7 @@ mod tests {
             start_frame: out_start,
             samples: &src[src_start * 2..(src_start + len) * 2],
             gain: 1.0,
+            envelope: None,
         };
         let out = mix_stereo(&[placed], 2 * rate as usize);
         assert_eq!(out.len(), 2 * rate as usize * 2);
@@ -331,6 +390,79 @@ mod tests {
     }
 
     #[test]
+    fn db_to_gain_unity_boost_and_the_inf_knee() {
+        assert_eq!(db_to_gain(0.0), 1.0);
+        assert!((db_to_gain(20.0) - 10.0).abs() < 1e-4);
+        assert!((db_to_gain(-6.0) - 0.5012).abs() < 1e-4);
+        // At and below the knee: exact silence, not a denormal whisper.
+        assert_eq!(db_to_gain(VOLUME_FLOOR_DB), 0.0);
+        assert_eq!(db_to_gain(-200.0), 0.0);
+        assert!(db_to_gain(VOLUME_FLOOR_DB + 0.1) > 0.0);
+    }
+
+    #[test]
+    fn envelope_interpolates_between_control_points_and_clamps() {
+        let e = GainEnvelope {
+            stride: 4,
+            points: vec![0.0, 1.0],
+        };
+        assert_eq!(e.gain_at(0), 0.0);
+        assert!((e.gain_at(2) - 0.5).abs() < 1e-6);
+        assert_eq!(e.gain_at(4), 1.0);
+        assert_eq!(e.gain_at(100), 1.0, "holds the last point past the end");
+    }
+
+    /// A volume fade must sound identical through the baked mixer and the
+    /// live plan — the same preview == export contract the static mix keeps.
+    #[test]
+    fn an_enveloped_fade_rides_through_both_mixers_identically() {
+        use std::sync::Arc;
+        let env = GainEnvelope {
+            stride: 2,
+            points: vec![0.0, 0.5, 1.0],
+        };
+        let src = tone(4, 0.8);
+        let baked = mix_stereo(
+            &[PlacedAudio {
+                start_frame: 0,
+                samples: &src,
+                gain: 1.0,
+                envelope: Some(env.clone()),
+            }],
+            4,
+        );
+        // Placed frames 0..4 fade 0 → 1: gains 0, 0.25, 0.5, 0.75.
+        for (i, want) in [0.0f32, 0.2, 0.4, 0.6].iter().enumerate() {
+            assert!(
+                (baked[i * 2] - want).abs() < 1e-6,
+                "frame {i}: {} vs {want}",
+                baked[i * 2]
+            );
+        }
+        let plan = MixPlan {
+            clips: vec![PlacedClip {
+                buffer: Arc::new(lumit_media::AudioBuffer {
+                    rate: 48_000,
+                    samples: src,
+                }),
+                start_frame: 0,
+                src_start: 0,
+                len: 4,
+                gain: 1.0,
+                envelope: Some(Arc::new(env)),
+            }],
+            total_frames: 4,
+        };
+        for i in 0..4 {
+            let (l, r) = plan.frame_at(i);
+            assert!(
+                (l - baked[i * 2]).abs() < 1e-6 && (r - baked[i * 2 + 1]).abs() < 1e-6,
+                "frame {i}: plan and baked mixes disagree"
+            );
+        }
+    }
+
+    #[test]
     fn single_source_lands_at_its_offset() {
         let s = tone(2, 0.5);
         let out = mix_stereo(
@@ -338,6 +470,7 @@ mod tests {
                 start_frame: 1,
                 samples: &s,
                 gain: 1.0,
+                envelope: None,
             }],
             4,
         );
@@ -355,11 +488,13 @@ mod tests {
                     start_frame: 0,
                     samples: &a,
                     gain: 1.0,
+                    envelope: None,
                 },
                 PlacedAudio {
                     start_frame: 0,
                     samples: &b,
                     gain: 1.0,
+                    envelope: None,
                 },
             ],
             4,
@@ -375,6 +510,7 @@ mod tests {
                 start_frame: 0,
                 samples: &s,
                 gain: 0.5,
+                envelope: None,
             }],
             2,
         );
@@ -393,6 +529,7 @@ mod tests {
                 start_frame: -2,
                 samples: &s,
                 gain: 1.0,
+                envelope: None,
             }],
             4,
         );
@@ -408,6 +545,7 @@ mod tests {
                 start_frame: 2,
                 samples: &s,
                 gain: 1.0,
+                envelope: None,
             }],
             4,
         );
@@ -426,11 +564,13 @@ mod tests {
                     start_frame: 0,
                     samples: &a,
                     gain: 1.0,
+                    envelope: None,
                 },
                 PlacedAudio {
                     start_frame: 0,
                     samples: &b,
                     gain: 1.0,
+                    envelope: None,
                 },
             ],
             2,
@@ -460,11 +600,13 @@ mod tests {
                     start_frame: 0,
                     samples: &a.samples,
                     gain: 1.0,
+                    envelope: None,
                 },
                 PlacedAudio {
                     start_frame: 4,
                     samples: &b.samples,
                     gain: 1.0,
+                    envelope: None,
                 },
             ],
             10,
@@ -477,6 +619,7 @@ mod tests {
                     src_start: 0,
                     len: 6,
                     gain: 1.0,
+                    envelope: None,
                 },
                 PlacedClip {
                     buffer: b,
@@ -484,6 +627,7 @@ mod tests {
                     src_start: 0,
                     len: 4,
                     gain: 1.0,
+                    envelope: None,
                 },
             ],
             total_frames: 10,
@@ -511,6 +655,7 @@ mod tests {
                 src_start: 3,
                 len: 2,
                 gain: 1.0,
+                envelope: None,
             }],
             total_frames: 4,
         };
@@ -534,6 +679,7 @@ mod tests {
                 start_frame: 0,
                 samples: &hot_pos,
                 gain: 1.0,
+                envelope: None,
             }],
             2,
         );
@@ -542,6 +688,7 @@ mod tests {
                 start_frame: 0,
                 samples: &hot_neg,
                 gain: 1.0,
+                envelope: None,
             }],
             2,
         );

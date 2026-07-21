@@ -116,9 +116,17 @@ same decoded ring, so it is warm wherever the cache bar is warm.
 
 - **Multiple audio layers per comp**; audio layers mix per §3.1. There is no layer-count
   audio limit beyond CPU.
-- **Volume** is an animatable property per audio-capable layer (dB scale, −∞..+12 dB,
-  default 0 dB), keyframable and expression-visible like any property. Fades are volume
-  keyframes; v1 ships fade-in/fade-out commands that write eased keyframe pairs.
+- **Volume** is an animatable property per audio-capable layer (dB scale, −∞..+50 dB,
+  default 0 dB; the owner raised the ceiling from the original +12 — K-172), keyframable
+  and expression-visible like any property. −100 dB is the −∞ knee: at or below it the
+  gain is exactly zero (the UI reads "−inf"), never a denormal whisper. Fades are volume
+  keyframes; the fade-in/fade-out commands that write eased keyframe pairs are still to
+  come. **Shipped (K-172):** `Layer.volume_db` + `Op::SetLayerVolume`; an animated volume
+  bakes to a ~10 ms control-rate gain envelope applied identically by the live mix plan
+  and the baked mixdown (playback == export, pinned by test); it lives in the layer's
+  **Audio** group in the timeline outline, beside a **Waveform** twirl that draws that
+  layer's own peaks in its lane (replacing the comp-wide strip — the per-layer lane
+  follows a dragged bar in realtime, where the strip only refreshed on re-mix).
 - **Mute / solo** via the audible and solo switches ([01-GLOSSARY.md](01-GLOSSARY.md) §2).
   Solo on any layer silences non-soloed audio, matching video solo semantics.
 - **Audio from video footage**: a Footage layer with audio exposes its audio as part of

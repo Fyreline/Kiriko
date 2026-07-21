@@ -178,6 +178,7 @@ mod tests {
             matte: None,
             parent: None,
             label: 0,
+            volume_db: crate::anim::Property::zero(),
             blend: Default::default(),
             masks: Vec::new(),
             effects: Vec::new(),
@@ -514,6 +515,7 @@ mod tests {
                     matte: None,
                     parent: None,
                     label: 0,
+                    volume_db: crate::anim::Property::zero(),
                     blend: Default::default(),
                     masks: Vec::new(),
                     effects: Vec::new(),
@@ -644,6 +646,7 @@ mod tests {
                     matte: None,
                     parent: None,
                     label: 0,
+                    volume_db: crate::anim::Property::zero(),
                     blend: Default::default(),
                     masks: Vec::new(),
                     effects: Vec::new(),
@@ -842,6 +845,29 @@ mod tests {
         assert_eq!(lock_label(&store), (true, 0));
         store.undo().unwrap();
         assert_eq!(lock_label(&store), (false, 0));
+
+        // Volume (docs/09 §6) round-trips like the transform properties.
+        let vol = |s: &DocumentStore| {
+            s.snapshot()
+                .comp(comp_id)
+                .unwrap()
+                .layers
+                .iter()
+                .find(|l| l.id == layer_id)
+                .unwrap()
+                .volume_db
+                .value_at(0.0)
+        };
+        store
+            .commit(Op::SetLayerVolume {
+                comp: comp_id,
+                layer: layer_id,
+                animation: Animation::Static(-12.0),
+            })
+            .unwrap();
+        assert_eq!(vol(&store), -12.0);
+        store.undo().unwrap();
+        assert_eq!(vol(&store), 0.0, "default volume is unity (0 dB)");
 
         store.undo().unwrap();
         store.undo().unwrap();

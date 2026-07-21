@@ -302,68 +302,9 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
         #[cfg(feature = "media")]
         app.refresh_preview();
     }
-    // Audio waveform strip (mono peaks) beneath the ruler, aligned to the same
-    // time axis so beats and transients line up. Optional (T25): right-clicking
-    // the strip hides it, and right-clicking the ruler shows it again.
-    #[cfg(feature = "media")]
-    {
-        let mut toggle_bar = false;
-        if app.show_audio_bar {
-            if let Some((wc, wf)) = &app.comp_waveform {
-                if *wc == comp_id && !wf.is_empty() {
-                    let (wave_rect, wave_resp) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 26.0),
-                        egui::Sense::click(),
-                    );
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_max(
-                            egui::pos2(track_left, wave_rect.top()),
-                            egui::pos2(track_left + track_w, wave_rect.bottom()),
-                        ),
-                        0.0,
-                        theme.surface_0,
-                    );
-                    let cy = wave_rect.center().y;
-                    let half = wave_rect.height() * 0.45;
-                    let n = wf.len().max(1) as f64;
-                    let col = theme.text_muted.gamma_multiply(0.7);
-                    // Map each peak through the SAME time axis as the ruler and
-                    // the layers (`x_of`), not a full-width stretch (T25): the
-                    // waveform then tracks zoom, scroll and a moved audio layer's
-                    // transients instead of standing still. Peaks off-screen are
-                    // skipped so a zoomed view never draws past the track.
-                    for (i, (lo, hi)) in wf.iter().enumerate() {
-                        let t = (i as f64 / n) * duration;
-                        let x = x_of(t);
-                        if x < track_left || x > track_left + track_w {
-                            continue;
-                        }
-                        ui.painter().line_segment(
-                            [egui::pos2(x, cy - hi * half), egui::pos2(x, cy - lo * half)],
-                            egui::Stroke::new(1.0_f32, col),
-                        );
-                    }
-                    wave_resp.context_menu(|ui| {
-                        if ui.button("Hide audio waveform").clicked() {
-                            toggle_bar = true;
-                            ui.close_menu();
-                        }
-                    });
-                }
-            }
-        } else {
-            // Hidden: offer to bring it back from the ruler's context menu.
-            ruler_resp.context_menu(|ui| {
-                if ui.button("Show audio waveform").clicked() {
-                    toggle_bar = true;
-                    ui.close_menu();
-                }
-            });
-        }
-        if toggle_bar {
-            app.show_audio_bar = !app.show_audio_bar;
-        }
-    }
+    // (The comp-wide audio waveform strip that sat here was replaced by the
+    // per-layer Audio → Waveform twirl, K-172: each audio layer draws its own
+    // sound in its own lane, tracking a drag in realtime.)
     let rows_top = ui.cursor().top();
 
     // Graph mode (K-070) keeps everything around the lanes — the ruler, the
@@ -434,7 +375,6 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                 let mut open_settings = false;
                 let mut reveal = false;
                 let mut toggle_grid = false;
-                let mut toggle_wave = false;
                 #[cfg_attr(not(feature = "media"), allow(unused_mut, unused_variables))]
                 let mut beat_sens = app.beat_sensitivity;
                 #[cfg_attr(not(feature = "media"), allow(unused_mut, unused_variables))]
@@ -451,8 +391,10 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                         ui.close_menu();
                     }
                     ui.separator();
-                    // View toggles (owner): the lane guide lines and the audio
-                    // waveform strip, reachable from empty lane space.
+                    // View toggle (owner): the lane guide lines, reachable
+                    // from empty lane space. (The audio-waveform toggle left
+                    // with the comp-wide strip, K-172 — each audio layer now
+                    // carries its own Waveform twirl.)
                     let grid_on =
                         !matches!(app.timeline_grid, crate::app_state::TimelineGrid::Off);
                     if ui
@@ -461,13 +403,6 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                         .clicked()
                     {
                         toggle_grid = true;
-                        ui.close_menu();
-                    }
-                    if ui
-                        .selectable_label(app.show_audio_bar, "Show audio waveform")
-                        .clicked()
-                    {
-                        toggle_wave = true;
                         ui.close_menu();
                     }
                     // Beat detection lives where the markers land (docs/09 §5):
@@ -496,9 +431,6 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                         } else {
                             crate::app_state::TimelineGrid::Off
                         };
-                }
-                if toggle_wave {
-                    app.show_audio_bar = !app.show_audio_bar;
                 }
                 #[cfg(feature = "media")]
                 {
@@ -1714,6 +1646,70 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
                             }
                         }
                     }
+                    // Audio group (docs/09 §6, K-172): only for footage whose
+                    // source carries an audio stream — Volume (dB, animatable)
+                    // and a Waveform twirl drawing this layer's own sound in
+                    // its lane. Unlike the old comp-wide strip (which only
+                    // refreshed when the mix re-planned), the lane reads the
+                    // layer's live offset every paint, so dragging the bar
+                    // drags the transients with it in realtime.
+                    #[cfg(feature = "media")]
+                    if let lumit_core::model::LayerKind::Footage { item, .. } = &layer.kind {
+                        let audio_path = match (
+                            app.media.map.get(item),
+                            doc.item(*item),
+                        ) {
+                            (
+                                Some(crate::app_state::media::MediaStatus::Ready {
+                                    probe, ..
+                                }),
+                                Some(lumit_core::model::ProjectItem::Footage(f)),
+                            ) if probe.audio.is_some() => {
+                                Some(std::path::PathBuf::from(&f.media.absolute_path))
+                            }
+                            _ => None,
+                        };
+                        if let Some(path) = audio_path {
+                            let au_id = ui.id().with(("audio-group", layer.id));
+                            if group_header_row(ui, theme, "Audio", au_id, false, viewport) {
+                                let fps4 = comp.frame_rate.fps().max(1.0);
+                                let au_ctx = RowCtx {
+                                    theme,
+                                    comp_id,
+                                    comp,
+                                    layer,
+                                    lt: app.preview_frame as f64 / fps4
+                                        - layer.start_offset.0.to_f64(),
+                                    off: layer.start_offset.0.to_f64(),
+                                    fps: fps4,
+                                    viewport,
+                                    track_left,
+                                    track_w,
+                                    px_per_sec,
+                                    view_start,
+                                    graph_mode: app.timeline_graph_mode,
+                                    effects_toolbar: false,
+                                    selected_prop: app.selected_prop,
+                                    selected_props: app.selected_props.clone(),
+                                };
+                                let mut au_nav_jump = None;
+                                volume_row(ui, &au_ctx, &mut pending, &mut au_nav_jump);
+                                if let Some(kt) = au_nav_jump {
+                                    app.preview_frame =
+                                        ((kt + au_ctx.off) * au_ctx.fps).round().max(0.0) as usize;
+                                    app.refresh_preview();
+                                }
+                                let wf_id = ui.id().with(("waveform-twirl", layer.id));
+                                if group_header_row(ui, theme, "Waveform", wf_id, false, viewport)
+                                {
+                                    waveform_lane_row(
+                                        ui, app, theme, layer, *item, &path, track_left, track_w,
+                                        px_per_sec, view_start,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
             // Resolve a name-drag reorder (Mack). The target slot is where the
@@ -2043,4 +2039,91 @@ pub(crate) fn timeline_panel(ui: &mut egui::Ui, theme: &Theme, app: &mut AppStat
         duration,
         view_start,
     );
+}
+
+/// The per-layer waveform lane (docs/09 §6, K-172): a taller row whose lane
+/// half draws the layer's own decoded audio as (min,max) peaks, mapped
+/// through the layer's live in / out / offset every paint — so dragging the
+/// layer's bar carries its transients along in realtime, where the old
+/// comp-wide strip only refreshed when the mix re-planned. The outline half
+/// stays empty (the Waveform twirl above names the row). Fills in once the
+/// item's audio decode lands (the accessor kicks it off).
+#[cfg(feature = "media")]
+#[allow(clippy::too_many_arguments)]
+fn waveform_lane_row(
+    ui: &mut egui::Ui,
+    app: &mut AppState,
+    theme: &Theme,
+    layer: &lumit_core::model::Layer,
+    item: uuid::Uuid,
+    path: &std::path::Path,
+    track_left: f32,
+    track_w: f32,
+    px_per_sec: f64,
+    view_start: f64,
+) {
+    let (rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) || app.timeline_graph_mode {
+        return; // scrolled away, or the curve owns the lane area
+    }
+    let lane = egui::Rect::from_min_max(
+        egui::pos2(track_left.max(rect.left()), rect.top() + 2.0),
+        egui::pos2(track_left + track_w, rect.bottom() - 2.0),
+    );
+    if lane.width() <= 1.0 {
+        return;
+    }
+    let p = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
+    let Some(strip) = app.item_waveform(item, path) else {
+        // Decode on its way: a quiet midline so the row doesn't look broken.
+        p.hline(
+            lane.x_range(),
+            lane.center().y,
+            egui::Stroke::new(1.0_f32, theme.hairline),
+        );
+        return;
+    };
+    let (src_dur, peaks) = (strip.0, &strip.1);
+    if src_dur <= 0.0 || peaks.is_empty() {
+        return;
+    }
+    let in_s = layer.in_point.0.to_f64();
+    let out_s = layer.out_point.0.to_f64();
+    let off = layer.start_offset.0.to_f64();
+    // A faint bed across the layer's active span, so silence still reads as
+    // "this is where the audio lives".
+    let x_at = |t: f64| track_left + ((t - view_start) * px_per_sec) as f32;
+    let bed = egui::Rect::from_min_max(
+        egui::pos2(x_at(in_s).max(lane.left()), lane.top()),
+        egui::pos2(x_at(out_s).min(lane.right()), lane.bottom()),
+    );
+    if bed.width() > 0.0 {
+        p.rect_filled(bed, 2.0, theme.surface_0);
+    }
+    let cy = lane.center().y;
+    let half = lane.height() * 0.5 - 1.0;
+    let col = theme.text_muted.gamma_multiply(0.7);
+    let n = peaks.len();
+    // One column per pixel: pixel → comp time → source time → peak bucket.
+    let mut x = lane.left().ceil();
+    while x <= lane.right() {
+        let t = view_start + f64::from(x - track_left) / px_per_sec;
+        if t >= in_s && t < out_s {
+            let src_t = t - off;
+            if src_t >= 0.0 && src_t < src_dur {
+                let bucket = ((src_t / src_dur) * n as f64) as usize;
+                if let Some(&(lo, hi)) = peaks.get(bucket.min(n - 1)) {
+                    p.line_segment(
+                        [
+                            egui::pos2(x, cy - hi.max(0.02) * half),
+                            egui::pos2(x, cy - lo.min(-0.02) * half),
+                        ],
+                        egui::Stroke::new(1.0_f32, col),
+                    );
+                }
+            }
+        }
+        x += 1.0;
+    }
 }

@@ -2188,3 +2188,21 @@ playback tick gains a render-gated stepping path as the default; the audio clock
 while playback is actually realtime (cached replay, or Realtime mode); during slower-than-
 realtime cached rendering the *frame counter* leads and audio follows or waits. 06 §6 and the
 playback-scheduler impl note describe the ring/pre-roll machinery this stepping feeds.
+
+**K-172 · DECIDED · Per-layer audio: the Volume property ships (−∞..+50 dB) and per-layer
+waveform lanes replace the comp-wide strip (owner, 2026-07-21).** Three linked calls from
+the owner's desk testing. (1) `Layer.volume_db` lands as the docs/09 §6 animatable dB
+property — `Op::SetLayerVolume` (coarse-grained like SetTransformProperty), default 0 dB,
+ceiling raised from the spec's +12 to +50, and −100 dB is the −∞ knee (gain exactly 0 at or
+below; the value box reads "−inf"). A static volume is a constant gain on the placed clip;
+a keyframed one bakes to a ~10 ms control-rate `GainEnvelope` read identically by the live
+`MixPlan` callback and the baked export mixdown — playback == export, pinned by test.
+(2) The timeline outline gains an **Audio** group (footage with an audio stream only):
+the Volume row with the standard stopwatch / ◄ ◆ ► furniture, and a **Waveform** twirl
+whose lane draws the layer's own decoded peaks mapped through its live in/out/offset every
+paint — so dragging the layer carries its transients in realtime, the owner's report
+against the comp strip (which only refreshed when the mix re-planned). (3) The comp-wide
+waveform strip under the ruler is removed outright, along with its T25 toggles and the
+background peaks bake (its `CompAudioMsg::Peaks` delivery). Lane keyframe diamonds for
+Volume await the shared PropRow widening (the UI-11 note); fade commands and detach-audio
+remain future §6 work.

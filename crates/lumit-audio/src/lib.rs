@@ -46,6 +46,7 @@ fn plan_of(buffer: Arc<AudioBuffer>) -> Arc<mix::MixPlan> {
             src_start: 0,
             len: frames,
             gain: 1.0,
+            envelope: None,
         }],
         total_frames: frames,
     })
