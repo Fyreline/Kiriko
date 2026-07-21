@@ -12,7 +12,7 @@
 # committed: it is a mechanical function of the lockfile.
 id: io.github.luminalmvm.Lumit
 runtime: org.freedesktop.Platform
-runtime-version: '24.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 command: lumit
 
@@ -33,18 +33,24 @@ finish-args:
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
-    # bindgen (via rusty_ffmpeg) needs libclang. The 24.08 SDK carries LLVM 18,
-    # which is exactly the pin the Windows and Linux CI jobs use — newer
-    # libclang makes bindgen emit opaque FFI structs and rsmpeg stops compiling.
-    LIBCLANG_PATH: /usr/lib
+    # bindgen (via rusty_ffmpeg) needs libclang, and is fussy about which:
+    # very new libclang makes it emit opaque FFI structs and rsmpeg stops
+    # compiling (seen with LLVM 22). Windows and Linux CI pin 18; the oldest
+    # extension this runtime offers is 20, so that is pinned explicitly rather
+    # than taking whatever the SDK happens to ship.
+    LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
     CARGO_HOME: /run/build/lumit/cargo
 
+# 25.08, not 24.08: that runtime's rust-stable is 1.89, and the dependency
+# tree needs 1.92 or newer.
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm20
 
 modules:
-  # FFmpeg 7.1 built here rather than taken from the runtime: 24.08 ships 6.x,
-  # which the crate's `ffmpeg7_1` feature does not match. Shared libraries, GPL
+  # FFmpeg 7.1 built here rather than taken from the runtime, so the version is
+  # ours to pin: the crate's `ffmpeg7_1` feature accepts 7.1 and nothing else,
+  # and a runtime's FFmpeg moves with the runtime. Shared libraries, GPL
   # (Lumit is GPLv3 — see LICENSE), no CLI programs or docs, since the app links
   # the libraries directly and only the test fixtures ever shell out to ffmpeg.
   - name: ffmpeg

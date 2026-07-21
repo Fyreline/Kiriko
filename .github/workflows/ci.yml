@@ -170,9 +170,9 @@ jobs:
     name: flatpak bundle (installs on any distro)
     runs-on: ubuntu-latest
     container:
-      # Carries flatpak + flatpak-builder and the freedesktop 24.08 SDK the
-      # manifest builds against.
-      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
+      # Carries flatpak + flatpak-builder and the freedesktop 25.08 SDK the
+      # manifest builds against (24.08's Rust is 1.89; the tree needs 1.92).
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
       options: --privileged
     steps:
       - uses: actions/checkout@v5
