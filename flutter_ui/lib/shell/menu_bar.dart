@@ -9,6 +9,7 @@ import '../state/app_state.dart';
 import '../state/settings.dart';
 import '../state/workspace.dart';
 import '../widgets/controls.dart';
+import 'dialogs.dart';
 
 class LumitMenuBar extends StatelessWidget {
   final AppStateStub app;
@@ -55,7 +56,8 @@ class LumitMenuBar extends StatelessWidget {
             _Item('Redo', app.canRedo ? app.redo : null),
           ]),
           _menu(context, 'Composition', [
-            _Item('New composition', app.newComposition),
+            _Item('New composition',
+                () => showNewCompositionDialog(context, app)),
             _Item('Add solid layer', () => app.engine('Add solid layer')),
             _Item('Add text layer', () => app.engine('Add text layer')),
             _Item('Add camera layer', () => app.engine('Add camera layer')),
@@ -75,7 +77,8 @@ class LumitMenuBar extends StatelessWidget {
               _Item('Star', () => app.engine('Add mask: star')),
             ]),
             _Item.divider(),
-            _Item('Composition settings…', () => app.engine('Composition settings')),
+            _Item('Composition settings…',
+                () => showCompositionSettingsDialog(context, app)),
           ]),
           _menu(context, 'Window', [
             _Item('Command palette…', onOpenPalette),

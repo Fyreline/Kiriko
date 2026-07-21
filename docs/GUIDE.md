@@ -2286,3 +2286,76 @@ neither side is left holding memory the other owns. Reading video needs FFmpeg,
 which is bundled behind an on-by-default switch (the `media` feature); turn it
 off and the app still builds and runs, footage just reads as "unprobed" and no
 frames decode.
+
+**The Viewer showing real frames, and the scopes reading them (F2).** The Viewer
+now shows actual pictures. It works out which footage the playhead is sitting
+over — the topmost visible footage layer whose span covers the current frame —
+asks the engine to decode that one frame to raw pixels, turns those pixels into
+an image Flutter can draw, and fits it onto the neutral grey pasteboard. A small
+shared helper (the *preview source*) does this work once and keeps the last
+eight decoded frames in memory, so scrubbing back and forth is cheap and it
+never decodes more than one frame per drawn frame. An important honesty: this is
+a **single-layer** preview. The real *compositor* — the part that stacks every
+layer, applies each one's position and effects, and blends them into the
+finished picture — still lives only in the Rust egui application; it has not been
+lifted out into a shared piece yet. So Flutter can show one footage frame
+straight, but not the composited comp; that (and the faster shared-GPU-texture
+path) waits on the compositor being extracted. When footage is *missing* the
+Viewer draws the same broadcast colour bars a comp shows — unmistakably "no
+signal here" rather than a black frame that hides the mistake — with the file's
+name written across the bottom; an unreadable file shows a dark "unreadable"
+card instead. Pressing play advances the playhead in time with the comp's frame
+rate and loops back to the start at the end, mirroring the egui transport. The
+**Scopes** panel — the colourist's instruments that plot brightness and colour
+instead of the picture (a waveform, an RGB waveform, a vectorscope and a
+histogram) — reads the very same decoded pixels from the shared preview source,
+so the trace always matches what is on screen. Each scope is drawn on a fixed
+near-black background rather than the interface theme, because a scope must be
+read against the same neutral whatever colours the chrome wears, and it holds the
+last trace for a beat rather than blinking to blank when a frame is momentarily
+unavailable.
+
+**The editors starting to come alive (F4, first slice).** Three of the editing
+surfaces move off their placeholders. The **Hierarchy** panel draws the active
+composition as an indented outline: the comp at the top, then its layers, each
+with the little coloured symbol for its kind; a layer that is *itself* another
+composition (a "precomp") gets a fold-out triangle you can open to see the
+layers inside it, and so on down. Clicking a row picks that layer. (One honest
+limitation: the bridge does not yet tell us *which* composition a precomp layer
+points at, only that it is one, so we match it up by name for now — a later
+bridge version will carry the exact link.) The **Effect controls** panel shows
+the picked layer's **Transform** values — its anchor point, position, scale,
+rotation and opacity — as editable number boxes in the same card style as the
+Settings window; typing or dragging a box sends the change straight to the
+engine as one undoable step. The catch, stated plainly in the panel itself, is
+that the bridge can currently *set* a transform value but not *read the current
+one back*, so a box shows a dash until you first edit it (and the value you set
+this session after that); reading the live values arrives with the next bridge
+version. Finally, the **Composition settings** and **New composition** windows
+are real dialogues now — name, size, frame rate and duration — opened from the
+Composition menu; creating a comp sends its name through the real engine call,
+while the size/rate/duration and the "edit an existing comp's settings" button
+are honestly marked as not-yet-wired, waiting on a bridge call that does not
+exist yet. Effects themselves, keyframes and masks are later waves.
+
+**The Timeline coming to life (F3).** The Timeline panel — the strip along the
+bottom that shows time running left-to-right and the stack of layers — is now
+live. Across the top sits a row of tabs, one per composition in the project;
+clicking one makes that comp the active one everywhere. Below the tabs is the
+*time ruler*: a tall band marked with seconds, thicker on the numbers and
+thinner in between, with little flags where you have dropped markers; clicking or
+dragging anywhere along it moves the playhead (the line that says "show me this
+moment"), which appears as a bright vertical line running down through all the
+layers. Each layer gets a row: on the left, a name and a cluster of little
+toggle switches (show/hide the picture, mute the sound, solo, lock, effects on,
+motion blur, 3D, and a fold-out for nested comps) — every switch flip is a real,
+undoable change sent to the engine. When the panel is made narrow, the switches
+don't pile up on top of each other the way the old interface's did; they drop
+away in a set order (the least-important first), so the name and the eye always
+stay readable — a deliberate improvement the owner asked for. On the right of
+each row is the layer's *clip bar*, tinted with the layer's colour, showing where
+in time it starts and ends; you can drag the middle of a bar to slide the whole
+layer earlier or later (its length preserved), or grab either end to trim just
+that edge, and with the magnet on, drags snap to whole seconds and to markers.
+The zoom, magnet and graph-editor buttons live along the bottom. Keyframe lanes,
+the fold-out property rows and the graph editor are still to come.

@@ -214,10 +214,10 @@ void main() {
     });
     expect(accentEdged(), isEmpty);
 
-    // Click inside the Viewer pane.
+    // Click inside the Viewer pane (its single-layer-preview placeholder, shown
+    // with no bridge/footage under the playhead).
     await tester.tap(
-      find.text(
-          'The composited frame arrives with the shared-texture path (phase F2)'),
+      find.textContaining('Single-layer preview'),
       warnIfMissed: false,
     );
     await tester.pump();

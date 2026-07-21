@@ -7,6 +7,8 @@ import 'package:flutter/widgets.dart';
 import '../icons/icons.dart';
 import '../state/app_state.dart';
 import '../state/dock.dart';
+import 'effect_controls_panel.dart';
+import 'hierarchy_panel.dart';
 import 'placeholder.dart';
 import 'project_panel.dart';
 import 'scopes_panel.dart';
@@ -28,22 +30,32 @@ Widget buildPanelBody(BuildContext context, Panel panel, AppStateStub app) =>
             ),
       Panel.viewer => ViewerPanel(app: app),
       Panel.timeline => TimelinePanel(app: app),
-      Panel.effectControls => const PlaceholderPanel(
-          icon: LumitIcon.fx,
-          title: 'Effect controls',
-          hint:
-              'Transform and effect property rows arrive in phase F4; select a layer to edit it here.',
-        ),
+      // The Effect controls panel goes live with a comp in the snapshot: it
+      // shows the selected layer's Transform rows (phase F4). Without a
+      // bridge/comp the placeholder stays.
+      Panel.effectControls => (app.bridge != null && app.frontComp != null)
+          ? EffectControlsPanel(app: app)
+          : const PlaceholderPanel(
+              icon: LumitIcon.fx,
+              title: 'Effect controls',
+              hint:
+                  'Transform and effect property rows arrive in phase F4; select a layer to edit it here.',
+            ),
       Panel.effectsAndPresets => const PlaceholderPanel(
           icon: LumitIcon.star,
           title: 'Effects & presets',
           hint:
               'The searchable effect list and .lumfx presets arrive in phase F4.',
         ),
-      Panel.scopes => const ScopesPanel(),
-      Panel.hierarchy => const PlaceholderPanel(
-          icon: LumitIcon.nodes,
-          title: 'Hierarchy',
-          hint: 'The composition tree arrives in phase F4.',
-        ),
+      Panel.scopes => ScopesPanel(app: app),
+      // The Hierarchy panel goes live with a comp in the snapshot: the front
+      // comp's layer tree, precomps expandable (phase F4). Without a
+      // bridge/comp the placeholder stays.
+      Panel.hierarchy => (app.bridge != null && app.frontComp != null)
+          ? HierarchyPanel(app: app)
+          : const PlaceholderPanel(
+              icon: LumitIcon.nodes,
+              title: 'Hierarchy',
+              hint: 'The composition tree arrives in phase F4.',
+            ),
     };

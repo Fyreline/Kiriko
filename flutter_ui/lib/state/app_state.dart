@@ -10,6 +10,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../bridge/bridge.dart';
+import '../panels/preview_source.dart';
 import 'file_dialogs.dart';
 
 /// One entry in the stub's action log — what a real engine call would have
@@ -19,6 +20,15 @@ class StubAction {
   final String action;
   final DateTime at;
   StubAction(this.action) : at = DateTime.now();
+}
+
+/// One composition as the Timeline's comp-tab strip reads it: its snapshot item
+/// [id] (the id ops address), display [name], and its [comp] detail.
+class CompTabInfo {
+  final String id;
+  final String name;
+  final BridgeComp comp;
+  const CompTabInfo(this.id, this.name, this.comp);
 }
 
 class AppStateStub extends ChangeNotifier {
@@ -95,7 +105,28 @@ class AppStateStub extends ChangeNotifier {
   double timelineZoom = 1.0;
   bool timelineGraphMode = false;
   bool snapping = true;
-  int? selectedLayer;
+
+  /// The selected layer, by its snapshot layer id (was an int index in F0; the
+  /// Timeline selects by the engine's stable layer id so ops address the right
+  /// layer). Null when nothing is selected.
+  String? selectedLayer;
+
+  /// Which composition the Timeline/Viewer front, by snapshot item id. Null
+  /// means "the first composition in the snapshot" — the [frontComp] fallback.
+  String? frontCompId;
+
+  /// Transform values the user has committed this session, keyed
+  /// `"$layerId/$property"`. Snapshot v2 does not carry current transform
+  /// values (only the setter exists), so the Effect controls panel shows these
+  /// — and an em-dash before any edit — until snapshot v3 delivers read-back.
+  /// Additive F4 session state.
+  final Map<String, double> transformEdits = {};
+
+  /// The value the user set for [layerId]'s [property] this session, or null if
+  /// it has not been edited yet (draw an em-dash in that case).
+  double? transformEditAt(String layerId, String property) =>
+      transformEdits['$layerId/$property'];
+
   final List<String> openComps = [];
   int beatSensitivity = 50;
   bool canUndo = false;
@@ -128,6 +159,21 @@ class AppStateStub extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Move the playhead during playback WITHOUT stopping (the Viewer's transport
+  /// ticker drives this). Unlike [goToFrame] it leaves `playing` set, so the
+  /// loop keeps running. Additive F2 seam.
+  void advancePlayback(int frame) {
+    previewFrame = frame;
+    notifyListeners();
+  }
+
+  /// The Viewer's CPU frame source (phase F2), shared with the Scopes panel so
+  /// both read the same decoded pixels. Created lazily on first use; harmless
+  /// without a bridge (it simply never resolves a frame). Single-layer preview
+  /// until the compositor is extracted from the egui crate.
+  PreviewSource? _previewSource;
+  PreviewSource get previewSource => _previewSource ??= PreviewSource(this);
+
   void zoomTimeline(double factor) {
     timelineZoom = (timelineZoom * factor).clamp(1.0, 400.0);
     notifyListeners();
@@ -148,6 +194,14 @@ class AppStateStub extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Select a layer by its snapshot layer id (the Hierarchy row click), or null
+  /// to clear. The Effect controls panel reads [selectedLayer].
+  void selectLayer(String? id) {
+    if (selectedLayer == id) return;
+    selectedLayer = id;
+    notifyListeners();
+  }
+
   // --- Bridge-routed document actions -------------------------------------
   //
   // Each mirrors an egui `AppState` action. With no bridge they fall back to
@@ -163,13 +217,17 @@ class AppStateStub extends ChangeNotifier {
     _applyReply(bridge!.newProject(), 'New project');
   }
 
-  void newComposition() {
+  /// Create a composition. [name] carries the name typed in the New
+  /// composition dialogue (F4); empty lets the engine name it ("Comp N"). Size,
+  /// frame rate and duration are not yet wired — the bridge has no
+  /// comp-settings op, so the dialogue collects them but only the name reaches
+  /// the engine for now (see the dialogue's pending note).
+  void newComposition([String name = '']) {
     if (bridge == null) {
       engine('New composition');
       return;
     }
-    // Bridge v0 has no dialogue yet, so the engine names the comp ("Comp N").
-    _applyReply(bridge!.newComposition(''), 'Composition added');
+    _applyReply(bridge!.newComposition(name), 'Composition added');
   }
 
   void undo() {
@@ -260,24 +318,56 @@ class AppStateStub extends ChangeNotifier {
             : '$failed items could not be imported';
   }
 
-  /// The first composition in the current snapshot — the active comp the Viewer
-  /// and Timeline read (nested comps are searched too). Null when there is no
-  /// bridge/snapshot or no composition yet.
-  BridgeComp? get frontComp {
+  /// Every composition in the current snapshot, top-first (nested comps are
+  /// flattened in, after their parent). The Timeline's comp-tab strip renders
+  /// this; empty when there is no bridge/snapshot or no composition yet.
+  List<CompTabInfo> get compositions {
     final snap = snapshot;
-    if (snap == null) return null;
-    return _firstComp(snap.items);
+    if (snap == null) return const [];
+    final out = <CompTabInfo>[];
+    void walk(List<BridgeItem> items) {
+      for (final item in items) {
+        if (item.kind == BridgeItemKind.composition && item.comp != null) {
+          out.add(CompTabInfo(item.id, item.name, item.comp!));
+        }
+        walk(item.children);
+      }
+    }
+
+    walk(snap.items);
+    return out;
   }
 
-  BridgeComp? _firstComp(List<BridgeItem> items) {
-    for (final item in items) {
-      if (item.kind == BridgeItemKind.composition && item.comp != null) {
-        return item.comp;
+  /// The active comp tab: [frontCompId] when it still resolves, else the first
+  /// composition in the snapshot. Null when there is no composition.
+  CompTabInfo? get _frontTab {
+    final comps = compositions;
+    if (comps.isEmpty) return null;
+    final id = frontCompId;
+    if (id != null) {
+      for (final c in comps) {
+        if (c.id == id) return c;
       }
-      final nested = _firstComp(item.children);
-      if (nested != null) return nested;
     }
-    return null;
+    return comps.first;
+  }
+
+  /// The active comp the Viewer and Timeline read. Honours [frontCompId] and
+  /// falls back to the first composition. Null when there is no composition.
+  BridgeComp? get frontComp => _frontTab?.comp;
+
+  /// The snapshot item id of the [frontComp] — the id the Timeline passes to the
+  /// layer/marker ops. Null when there is no composition.
+  String? get frontCompIdResolved => _frontTab?.id;
+
+  /// Front the composition with snapshot item [id] (a comp-tab click). Also
+  /// re-syncs the playhead range to that comp's frame count.
+  void frontCompSelect(String id) {
+    if (frontCompId == id) return;
+    frontCompId = id;
+    previewFrameCount = frontComp?.frameCount ?? previewFrameCount;
+    previewFrame = previewFrame.clamp(0, previewFrameCount);
+    notifyListeners();
   }
 
   // --- Snapshot-v2 op pass-throughs ---------------------------------------
@@ -307,8 +397,14 @@ class AppStateStub extends ChangeNotifier {
   /// name, e.g. `position_x`, `opacity`).
   void setTransform(
       String compId, String layerId, String property, double value) {
+    // Remember the value so the Effect controls panel can show it back (the
+    // snapshot does not carry current transform values yet — see [transformEdits]).
+    transformEdits['$layerId/$property'] = value;
     final b = bridge;
-    if (b == null) return;
+    if (b == null) {
+      notifyListeners();
+      return;
+    }
     _applyOp(b.setTransform(compId, layerId, property, value));
   }
 
@@ -337,12 +433,19 @@ class AppStateStub extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Adopt a snapshot into the held state (undo/redo flags follow it).
+  /// Adopt a snapshot into the held state (undo/redo flags follow it). Keeps the
+  /// playhead range in step with the front comp so the Timeline scrub and the
+  /// End-key jump land on real frames.
   void _adoptSnapshot(BridgeSnapshot? snap) {
     if (snap == null) return;
     snapshot = snap;
     canUndo = snap.canUndo;
     canRedo = snap.canRedo;
+    final fc = frontComp;
+    if (fc != null) {
+      previewFrameCount = fc.frameCount;
+      previewFrame = previewFrame.clamp(0, previewFrameCount);
+    }
   }
 
   /// Apply a bridge reply: on success refresh the snapshot and post a quiet

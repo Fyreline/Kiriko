@@ -78,14 +78,28 @@ where the row is logic).
   per-project session the egui shell restores on open; F1 restores only which
   project file reopens, not its saved session
 
-## Phase F2 — Viewer (not started)
+## Phase F2 — Viewer (in progress)
 
-- ☐ Shared-texture path (D3D11 interop) + `Texture` widget
-- ◑ CPU RGBA fallback — bridge side done: `lumit_bridge_decode_frame` returns a
-  Rust-owned tightly-packed RGBA8 buffer (freed by `lumit_bridge_free_buffer`,
-  the copy-then-free contract), behind the default-on `media` feature; Dart's
-  `decodeFrame` copies the pixels into a `DecodedFrame`. Viewer wiring (blitting
-  it through a `ui.Image`) is another agent's work
+- ☐ Shared-texture path (D3D11 interop) + `Texture` widget. BLOCKED on the same
+  compositor extraction as the composited-comp preview below — the frame to
+  share does not exist outside the egui crate yet
+- ☐ Composited-comp preview (all layers, transforms, effects). BLOCKED: the
+  compositor still lives in `crates/lumit-ui`; until it is extracted into a
+  shared crate, Flutter can only decode single footage frames, not composite
+  them. The Viewer's preview is honestly labelled single-layer everywhere
+- ☑ CPU RGBA fallback — **single-layer footage preview** (honest wording). The
+  Viewer resolves the front comp's topmost visible footage layer whose span
+  covers the playhead, maps comp-frame → source-frame by straight offset
+  (Retime is not in the snapshot yet — noted in code), decodes one frame via
+  `decodeFrame` through a shared `PreviewSource` (throttled to one decode per
+  painted frame, an 8-entry `ui.Image` LRU), and blits it fit-to-panel on the
+  neutral surround. NB the snapshot layer carries no source-item id, so the
+  layer is matched to its footage item by name (documented limitation). Unit-
+  and widget-tested. `preview_source.dart`, `viewer_panel.dart`
+- ◐ Transport: play/pause on a Ticker at the comp's rational fps, looping the
+  composition (mirrors the egui transport, which loops the work area); frame +
+  SMPTE timecode readout; `Full` resolution label as-is. Remaining: the
+  resolution ladder is engine-side (a later phase), so the label is static
 
 ## Bridge v0.2 data + ops (done, feeds F2/F3/F4)
 
@@ -103,22 +117,91 @@ where the row is logic).
 - ◑ Footage probing on import/open (`media` feature): resolution, rate, frame
   count and status carried in the snapshot; missing files probe to `missing`,
   never an error. Synchronous at this phase; not yet off-thread, no thumbnails
-- ☐ Transport + resolution picker + realtime tier readout
-- ☐ Missing-footage slate (generated colour bars + item path)
+- ◐ Transport ☑ (play/pause, frame + timecode, `Full` label); resolution picker
+  + realtime tier readout ☐ (the ladder is engine-side, a later phase)
+- ☑ Missing-footage slate: generated colour bars (band-for-band from
+  `lumit-media/src/slate.rs`, drawn from `documentColour`, never a bundled
+  asset) with the item path overlaid; a present-but-unreadable file shows a
+  dark "unreadable" slate (docs/07 §3.3). `slate.dart`
+- ☑ Scopes over the shown frame: Waveform (luma), Waveform (RGB), Vectorscope,
+  Histogram — chosen in a `BareDropdown`, drawn on the fixed `ScopeColours`
+  (never the theme), reading the same decoded pixels as the Viewer through the
+  shared `PreviewSource`; the trace is built off the build path (256×256 image,
+  rebuilt only when the shown frame or the scope changes) and the last trace is
+  held when a frame is momentarily unavailable (K-130). Scope maths ported
+  one-for-one from `scopes.rs` and unit-tested. `scopes_panel.dart`,
+  `scope_maths.dart`
 - ☐ Eyedropper magnifier; transform overlays
 
-## Phase F3 — Timeline (not started)
+## Phase F3 — Timeline (in progress)
 
-Comp tabs · ruler/markers/beats · work area · rows/columns/switches · clip bars
-(trim/move/razor/overrun hatch) · outline twirls · Audio group (Volume +
-waveform lane) · keyframe lanes (glyphs, drag, copy/paste) · graph lens ·
-bottom bar (zoom/magnet/grid) · top row (time, search, MB master)
+- ☑ Comp-tab strip: one pill per composition in the snapshot (three-state fill,
+  a local copy of the dock tab styling), clicking fronts that comp
+  (`AppStateStub.frontCompId` + `frontCompSelect`); the current-time readout
+  (frame + seconds at comp fps) sits at the strip's right
+- ☑ Two-row time ruler over the lane: the full-height band (owner design change,
+  see post-parity item 2), zoom-adaptive frame/second ticks + labels, markers as
+  small flags, click/drag anywhere scrubs the playhead (`goToFrame`); the
+  playhead is an accent line over ruler and lanes — unit-tested (tick density,
+  scrub) + widget-tested
+- ☑ Layer rows (22 px): outline column (fixed 260 px) with layer index, type
+  glyph + 3 px colour tab, ellipsised name, and the switch cluster (eye, speaker
+  — footage/sequence/precomp only, solo, lock, fx, motion blur, 3D, collapse),
+  each toggling through `setLayerSwitch`; muted/hidden rows dim their name
+- ☑ Outline degradation order (owner design change, see post-parity item 3):
+  switches drop collapse/3D → fx/MB → solo → speaker → index as the column
+  narrows, never overlapping; glyph + name + eye survive longest — unit-tested
+- ☑ Clip bars on the lane: type-colour wash + 3 px tab + hairline edge (accent
+  when selected); click a bar or outline row selects (`selectedLayer`, now a
+  layer-id String); drag the body to move (one `move_in` op — see the SpanEdit
+  note below), drag the 6 px edge handles to trim (`trim_in`/`trim_out`);
+  snapping rounds drags to whole seconds and marker frames — widget-tested
+- ☑ Bottom bar: zoom − / + / Fit + percentage readout, magnet snap toggle, graph
+  lens toggle (kept from the F0 skeleton, zoom readout corrected to `zoom×100`)
+- ☐ Remainder (still open): keyframe lanes (glyphs, drag, copy/paste), outline
+  twirls + Transform/Effects property rows, the graph lens, matte/blend/parent
+  columns, layer context menu + rename/duplicate/delete, layer search + hide
+  toggle, the top-row MB-master toggle, beat markers/cache bar, sequence sub-bars
+  and the overrun HOLD hatch, work area (the snapshot carries none yet),
+  horizontal scroll/pan + scrollbar when zoomed, resizable outline column
 
-## Phase F4 — editors (not started)
+## Phase F4 — editors (in progress)
 
 Effect controls rows · keyframe navigators · channel picker · Effects & presets
 (.lumfx) · Scopes (waveform/vectorscope/histogram) · Hierarchy · Export
 dialogue + queue · Comp settings · Add mask · Recovery modal
+
+First slice (2026-07-21):
+
+- ☑ Hierarchy: the front comp's layer tree — comp header (accent glyph + name),
+  layers indented with the layer-type glyph/colour, precomp rows twirl open to
+  reveal the nested comp's layers, click selects a layer by its stable id.
+  `hierarchy_panel.dart`, widget-tested. Nesting is resolved by matching the
+  precomp layer's *name* against the project's compositions, because snapshot v2
+  tags a precomp only as `kind:"precomp"` and carries no source-comp id (cycle-
+  guarded by name); snapshot v3 should carry the id (then match by id, and
+  comp-scoped selection becomes possible). The full project flowchart / node
+  graph is later.
+- ◐ Effect controls: the selected layer's **Transform** rows in the settings-card
+  style — Anchor point (x,y), Position (x,y[,z when 3D]), Scale (x,y with a link
+  toggle), Rotation, Opacity (and Rotation x/y when 3D), each committing through
+  `app.setTransform` (one undo step). `effect_controls_panel.dart`, widget-
+  tested. **Values-on-read pending snapshot v3**: the snapshot carries no current
+  transform values yet, so a box shows the value set this session and an em-dash
+  before any edit, with a one-line hint saying so. Open: effects stacks,
+  keyframes/stopwatches, the linked-scale ratio (the link sets both axes to the
+  same value until value read-back), and commit-on-release for the drag (today's
+  `DragValueField` commits each drag step; typing commits once).
+- ◐ Comp settings: the composition-settings / new-composition dialogue in the
+  Settings-window visual style (name, size, frame-rate preset dropdown,
+  duration), shown through the app Overlay. `dialogs.dart`, wired from the
+  Composition menu, widget-tested. **UI real, bridge op pending**: New
+  composition commits the *name* through the real `app.newComposition` op; size /
+  frame rate / duration and the whole Composition-settings apply are honestly
+  stubbed (`app.engine('Set composition settings (bridge op pending)')`) until a
+  comp-settings bridge op lands.
+- ☐ Add mask ▸ Rectangle/Ellipse/Star: still routes to `app.engine` (mask ops
+  are not in the bridge); the submenu reads correctly.
 
 ## Post-parity fixes (owner's known rough edges — do NOT fix during the port)
 
@@ -139,11 +222,16 @@ Recorded 2026-07-21, from the owner:
    region already covers both rows. Decide at F3: build the Flutter ruler
    two rows tall from the start (the owner's stated intent) and note the
    deliberate deviation here when done.
+   → Built into the F3 timeline from the start (recorded deviation): the ruler
+   band spans the full two-row height, labels up top, ticks below.
 3. **Layer-area overcrowding (design change, F3).** The timeline's layer
    outline handles small panel sizes badly — switches, buttons and labels
    start overlapping as the column shrinks. The Flutter layer area needs a
    real degradation order (truncate/hide columns before anything overlaps).
    Design it during F3 rather than copying the egui behaviour.
+   → Built into the F3 timeline from the start (recorded deviation): the outline
+   measures its width and drops switches collapse/3D → fx/MB → solo → speaker →
+   index, never overlapping; glyph + name + eye survive longest.
 4. **Value boxes clip their row (defect).** DragValue-style value boxes
    across most of the egui UI clip at the bottom of the row they sit on.
    The Flutter `DragValueField` must size rows to fit their controls; do
