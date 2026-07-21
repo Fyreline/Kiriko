@@ -32,6 +32,11 @@ egui_tiles = { version = "0.12", features = ["serde"] }
 # --no-default-features until ffmpeg dev libs are set up there (tracked TODO).
 default = ["media"]
 media = ["dep:lumit-media", "dep:lumit-audio", "dep:lumit-cache", "dep:lumit-eval", "dep:lumit-gpu", "dep:lumit-flow", "dep:egui-wgpu"]
+# The zero-copy Viewer path (K-177): the headless renderer can draw into a
+# Windows shared GPU texture Flutter samples directly. Off by default; the
+# bridge turns it on for the shipped build. Needs the GPU renderer, so it
+# implies `media`, and forwards to lumit-gpu's own `shared-texture` feature.
+shared-texture = ["media", "lumit-gpu/shared-texture"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.15"

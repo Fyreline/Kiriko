@@ -79,11 +79,14 @@ use serde_json::json;
 /// comp-settings, keyframe, work-area and effect ops. v4 added export
 /// (start/poll/cancel + the preset resolver), keyframe interpolation read-back
 /// and set, the Retime read-back and its ops, and the blend-mode, matte, parent,
-/// motion-blur and add-mask columns. v5 (this build) adds footage placement
-/// (`add_footage_layer`) and layer reorder (`reorder_layer`). Every addition is
+/// motion-blur and add-mask columns. v5 added footage placement
+/// (`add_footage_layer`) and layer reorder (`reorder_layer`). v6 (this build)
+/// adds the Windows zero-copy Viewer path (`shared_supported`,
+/// `render_to_shared`, K-177) — present but answering "unsupported" unless the
+/// `.dll` was built with the `shared-texture` feature. Every addition is
 /// *additive*, so an older Dart client still reads every field it knew, but the
 /// ABI number rises so a client that needs the new calls can insist on them.
-pub(crate) const ABI_VERSION: u32 = 5;
+pub(crate) const ABI_VERSION: u32 = 6;
 
 /// `{"ok":false,"error":"…"}`. serde escapes any control character, so the
 /// resulting string never carries an interior NUL and always makes a `CString`.

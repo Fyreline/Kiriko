@@ -46,6 +46,12 @@ typedef _DecodeDart = Pointer<Uint8> Function(
     Pointer<Char>, int, Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
 typedef _FreeBufferC = Void Function(Pointer<Uint8>, Size);
 typedef _FreeBufferDart = void Function(Pointer<Uint8>, int);
+// Zero-copy shared-texture render (K-177): no buffer returned — the frame stays
+// on the GPU; the reply carries only the NT handle and dimensions.
+typedef _RenderSharedC = Bool Function(
+    Pointer<Char>, Uint64, Pointer<Uint64>, Pointer<Uint32>, Pointer<Uint32>);
+typedef _RenderSharedDart = bool Function(
+    Pointer<Char>, int, Pointer<Uint64>, Pointer<Uint32>, Pointer<Uint32>);
 
 /// What the isolate needs to boot: the port to hand its own receive port back
 /// on, and the candidate library paths to open (the UI isolate resolved these).
@@ -64,6 +70,9 @@ class IsolateFrameRenderer implements FrameRenderer {
   @override
   final bool supportsCompRender;
 
+  @override
+  final bool supportsSharedTexture;
+
   final SynchronousFrameRenderer _fallback;
   final List<String> _libPaths;
 
@@ -74,13 +83,17 @@ class IsolateFrameRenderer implements FrameRenderer {
   bool _failed = false;
   bool _disposed = false;
 
-  /// Callbacks awaiting a worker reply, keyed by request generation.
+  /// Callbacks awaiting a worker RGBA reply (comp/decode), keyed by generation.
   final Map<int, void Function(DecodedFrame?)> _awaiting = {};
+
+  /// Callbacks awaiting a worker shared-texture reply, keyed by generation.
+  final Map<int, void Function(SharedFrame?)> _awaitingShared = {};
 
   /// Requests raised before the worker's send port arrived (the spawn window).
   final List<void Function()> _startupQueue = [];
 
-  IsolateFrameRenderer._(this.app, this.supportsCompRender, this._libPaths)
+  IsolateFrameRenderer._(this.app, this.supportsCompRender,
+      this.supportsSharedTexture, this._libPaths)
       : _fallback = SynchronousFrameRenderer(app) {
     _fromWorker.listen(_onWorkerMessage);
     _spawn();
@@ -97,7 +110,8 @@ class IsolateFrameRenderer implements FrameRenderer {
       if (bridge.loadedPath != null) bridge.loadedPath!,
       ...LumitBridge.candidateLibraryPaths(),
     ];
-    return IsolateFrameRenderer._(app, bridge.supportsCompRender, paths);
+    return IsolateFrameRenderer._(app, bridge.supportsCompRender,
+        bridge.supportsSharedTexture, paths);
   }
 
   Future<void> _spawn() async {
@@ -129,7 +143,24 @@ class IsolateFrameRenderer implements FrameRenderer {
       }
       return;
     }
-    if (message is List && message.length == 4) {
+    if (message is! List) return;
+    // A shared-texture reply is tagged; an RGBA (comp/decode) reply is a bare
+    // 4-tuple `[generation, width, height, ttd]`.
+    if (message.length == 5 && message[0] == 'shared') {
+      final generation = message[1] as int;
+      final handle = message[2] as int;
+      final width = message[3] as int;
+      final height = message[4] as int;
+      final onFrame = _awaitingShared.remove(generation);
+      if (onFrame == null) return; // superseded/unknown — drop it
+      if (handle != 0 && width > 0 && height > 0) {
+        onFrame(SharedFrame(handle: handle, width: width, height: height));
+      } else {
+        onFrame(null);
+      }
+      return;
+    }
+    if (message.length == 4) {
       final generation = message[0] as int;
       final width = message[1] as int;
       final height = message[2] as int;
@@ -174,10 +205,38 @@ class IsolateFrameRenderer implements FrameRenderer {
     }
   }
 
+  /// The shared-texture sibling of [_dispatch] — its reply is a
+  /// [SharedFrame], not pixels, so it uses its own awaiting map.
+  void _dispatchShared(int generation, List<Object?> wire,
+      void Function(SharedFrame?) onFrame) {
+    if (_disposed) {
+      onFrame(null);
+      return;
+    }
+    if (_failed) {
+      _fallback.requestShared(
+          wire[1] as String, wire[2] as int, wire[4] as int, onFrame);
+      return;
+    }
+    if (!_ready) {
+      _startupQueue.add(() => _dispatchShared(generation, wire, onFrame));
+      return;
+    }
+    _awaitingShared[generation] = onFrame;
+    _toWorker!.send(wire);
+  }
+
   @override
   void requestComp(String compId, int frame, double scale, int generation,
       void Function(DecodedFrame?) onFrame) {
     _dispatch(generation, ['comp', compId, frame, scale, generation], onFrame);
+  }
+
+  @override
+  void requestShared(String compId, int frame, int generation,
+      void Function(SharedFrame?) onFrame) {
+    _dispatchShared(
+        generation, ['shared', compId, frame, 0.0, generation], onFrame);
   }
 
   @override
@@ -190,6 +249,7 @@ class IsolateFrameRenderer implements FrameRenderer {
   void dispose() {
     _disposed = true;
     _awaiting.clear();
+    _awaitingShared.clear();
     _startupQueue.clear();
     _fromWorker.close();
     _isolate?.kill(priority: Isolate.immediate);
@@ -222,8 +282,12 @@ void _workerMain(_WorkerInit init) {
     // No library in the worker: answer null to everything so the UI isolate's
     // renderer keeps its last picture rather than hanging on a lost request.
     recv.listen((message) {
-      if (message is List && message.length == 5) {
-        init.mainPort.send([message[4] as int, 0, 0, null]);
+      if (message is! List || message.length != 5) return;
+      final generation = message[4] as int;
+      if (message[0] == 'shared') {
+        init.mainPort.send(['shared', generation, 0, 0, 0]);
+      } else {
+        init.mainPort.send([generation, 0, 0, null]);
       }
     });
     return;
@@ -231,6 +295,7 @@ void _workerMain(_WorkerInit init) {
 
   _RenderDart? render;
   _DecodeDart? decode;
+  _RenderSharedDart? renderShared;
   _FreeBufferDart? freeBuffer;
   try {
     render = lib.lookupFunction<_RenderC, _RenderDart>(
@@ -243,6 +308,12 @@ void _workerMain(_WorkerInit init) {
         lib.lookupFunction<_DecodeC, _DecodeDart>('lumit_bridge_decode_frame');
   } catch (_) {
     decode = null;
+  }
+  try {
+    renderShared = lib.lookupFunction<_RenderSharedC, _RenderSharedDart>(
+        'lumit_bridge_render_to_shared');
+  } catch (_) {
+    renderShared = null;
   }
   try {
     freeBuffer = lib.lookupFunction<_FreeBufferC, _FreeBufferDart>(
@@ -259,11 +330,38 @@ void _workerMain(_WorkerInit init) {
     final scale = message[3] as double;
     final generation = message[4] as int;
 
+    if (kind == 'shared') {
+      final shared = _renderShared(renderShared, id, frame);
+      init.mainPort.send(['shared', generation, shared.$1, shared.$2, shared.$3]);
+      return;
+    }
     final reply = (kind == 'comp')
         ? _renderOne(render, freeBuffer, id, frame, scale)
         : _decodeOne(decode, freeBuffer, id, frame);
     init.mainPort.send([generation, reply.$1, reply.$2, reply.$3]);
   });
+}
+
+/// Render one comp into the shared GPU texture on the worker; returns
+/// `(handle, width, height)` — zeros on failure. No buffer to free: the frame
+/// stays on the GPU (K-177).
+(int, int, int) _renderShared(
+    _RenderSharedDart? renderShared, String compId, int frame) {
+  if (renderShared == null) return (0, 0, 0);
+  final id = compId.toNativeUtf8();
+  final outHandle = malloc<Uint64>();
+  final outW = malloc<Uint32>();
+  final outH = malloc<Uint32>();
+  try {
+    final ok = renderShared(id.cast(), frame, outHandle, outW, outH);
+    if (!ok) return (0, 0, 0);
+    return (outHandle.value, outW.value, outH.value);
+  } finally {
+    malloc.free(id);
+    malloc.free(outHandle);
+    malloc.free(outW);
+    malloc.free(outH);
+  }
 }
 
 /// Run one comp render on the worker; returns `(width, height, ttd?)`.

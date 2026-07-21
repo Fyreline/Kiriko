@@ -2,14 +2,14 @@
 // widget (a fake bridge decodes a synthetic frame → an image; a missing item
 // shows the slate; play advances the playhead over pumped ticks).
 
-import 'dart:typed_data';
-
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumit_flutter/bridge/bridge.dart';
 import 'package:lumit_flutter/panels/preview_source.dart';
 import 'package:lumit_flutter/panels/scope_maths.dart';
 import 'package:lumit_flutter/panels/viewer_panel.dart';
+import 'package:lumit_flutter/panels/viewer_texture_controller.dart';
 import 'package:lumit_flutter/state/app_state.dart';
 import 'package:lumit_flutter/theme/theme.dart';
 import 'package:lumit_flutter/widgets/controls.dart';
@@ -188,6 +188,60 @@ class _CompBridge extends _FrameBridge implements CompRenderBridge {
   }
 }
 
+/// A bridge that offers the zero-copy shared-texture path (K-177) AND the
+/// read-back comp path (so the throttled Scopes render has something to return).
+/// [sharedResult] is what `renderToShared` gives back (null models a machine
+/// where the shared path is unavailable this frame); [supportsShared] toggles
+/// the capability flag.
+class _SharedBridge extends _FrameBridge
+    implements SharedTextureBridge, CompRenderBridge {
+  final SharedFrame? sharedResult;
+  final DecodedFrame? compResult;
+  final bool supportsShared;
+  final List<String> renderedShared = [];
+
+  _SharedBridge(
+    BridgeSnapshot snap, {
+    DecodedFrame? decodeResult,
+    this.sharedResult,
+    this.compResult,
+    this.supportsShared = true,
+  }) : super(snap, decodeResult);
+
+  @override
+  bool get supportsSharedTexture => supportsShared;
+
+  @override
+  SharedFrame? renderToShared(String compId, int frame) {
+    renderedShared.add('$compId@$frame');
+    return sharedResult;
+  }
+
+  @override
+  bool get supportsCompRender => compResult != null;
+
+  @override
+  DecodedFrame? renderCompFrame(String compId, int frame, double scale) =>
+      compResult;
+}
+
+/// Install a mock handler on the viewer-texture channel that answers `register`
+/// with [textureId] (and swallows the rest), returning a tear-down that removes
+/// it. When [textureId] is null, `register` returns null (a failed registration).
+void Function() _mockViewerTextureChannel(
+    WidgetTester tester, int? textureId) {
+  const channel = MethodChannel(ViewerTextureController.channelName);
+  final calls = <String>[];
+  tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel,
+      (call) async {
+    calls.add(call.method);
+    if (call.method == 'register') return textureId;
+    return null;
+  });
+  return () => tester.binding.defaultBinaryMessenger
+      .setMockMethodCallHandler(channel, null);
+}
+
 // --- Builders --------------------------------------------------------------
 
 BridgeSwitches _switches({bool visible = true}) => BridgeSwitches(
@@ -279,7 +333,66 @@ Widget _wrap(Widget child) => Directionality(
       ),
     );
 
+/// The viewer-texture channel a test injects — the same name the default
+/// controller uses, so a mock handler on that name answers either.
+const MethodChannel _defaultTextureChannel =
+    MethodChannel(ViewerTextureController.channelName);
+
 void main() {
+  group('ViewerTextureController (K-177)', () {
+    testWidgets('registers once and re-uses the id for the same handle',
+        (tester) async {
+      final calls = <String>[];
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(_defaultTextureChannel, (call) async {
+        calls.add('${call.method}:${(call.arguments as Map)['handle'] ?? ''}');
+        if (call.method == 'register') return 11;
+        return null;
+      });
+      final c = ViewerTextureController(channel: _defaultTextureChannel);
+      expect(await c.ensureRegistered(0xAA, 16, 9), 11);
+      expect(await c.ensureRegistered(0xAA, 16, 9), 11,
+          reason: 'the same handle/size does not re-register');
+      expect(calls.where((s) => s.startsWith('register')).length, 1);
+      await c.frameReady();
+      expect(calls, contains('frameReady:'));
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(_defaultTextureChannel, null);
+    });
+
+    testWidgets('a changed handle unregisters the old and registers anew',
+        (tester) async {
+      final calls = <String>[];
+      var next = 20;
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(_defaultTextureChannel, (call) async {
+        calls.add(call.method);
+        if (call.method == 'register') return next++;
+        return null;
+      });
+      final c = ViewerTextureController(channel: _defaultTextureChannel);
+      expect(await c.ensureRegistered(0xAA, 16, 9), 20);
+      expect(await c.ensureRegistered(0xBB, 16, 9), 21,
+          reason: 'a new handle gets a new texture id');
+      expect(calls, containsAllInOrder(['register', 'unregister', 'register']));
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(_defaultTextureChannel, null);
+    });
+
+    testWidgets('a missing handler latches unavailable (falls back)',
+        (tester) async {
+      // No handler installed → the messenger returns a null response, which
+      // MethodChannel surfaces as MissingPluginException. This needs the real
+      // event loop (runAsync) so the platform round-trip actually completes.
+      final c = ViewerTextureController(channel: _defaultTextureChannel);
+      await tester.runAsync(() async {
+        expect(await c.ensureRegistered(0xAA, 16, 9), isNull);
+      });
+      expect(c.available, isFalse);
+      expect(c.textureId, isNull);
+    });
+  });
+
   group('resolvePreview', () {
     final items = [_footage('clip.mp4'), _footage('bg.mp4')];
 
@@ -561,6 +674,153 @@ void main() {
     });
   });
 
+  // The zero-copy shared-texture path (K-177): the engine renders into a shared
+  // GPU texture and Flutter samples it directly. These prove the PreviewSource
+  // orchestration and the airtight fallback chain, driving the platform channel
+  // through a mock messenger (no real runner) and the render through a fake
+  // SharedTextureBridge.
+  group('PreviewSource shared-texture path (K-177)', () {
+    final snap = _snapshot(
+      _comp([_layer(name: 'clip.mp4', inFrame: 0, outFrame: 48)], w: 32, h: 18),
+      [_footage('clip.mp4')],
+    );
+
+    testWidgets('shows the shared texture and feeds the Scopes via read-back',
+        (tester) async {
+      final removeChannel = _mockViewerTextureChannel(tester, 42);
+      final bridge = _SharedBridge(
+        snap,
+        decodeResult: _solid(4, 4, 1, 1, 1),
+        sharedResult: const SharedFrame(handle: 0xABCD, width: 32, height: 18),
+        compResult: _solid(8, 8, 20, 120, 200),
+      );
+      final app = AppStateStub(bridge: bridge);
+      late PreviewSource source;
+      await tester.runAsync(() async {
+        source = PreviewSource(app,
+            textureController:
+                ViewerTextureController(channel: _defaultTextureChannel));
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      });
+
+      expect(source.sharedActive, isTrue,
+          reason: 'the zero-copy path owns the picture');
+      expect(source.textureId, 42, reason: 'the runner registered a texture id');
+      expect(source.sharedAspect, closeTo(32 / 18, 1e-9));
+      expect(bridge.renderedShared, contains('c1@0'),
+          reason: 'it rendered the front comp into the shared texture');
+      expect(source.displayedFrame, isNotNull,
+          reason: 'a throttled read-back still feeds the Scopes their pixels');
+      removeChannel();
+      source.dispose();
+    });
+
+    testWidgets('a null shared render falls back to the read-back comp path',
+        (tester) async {
+      final removeChannel = _mockViewerTextureChannel(tester, 42);
+      final bridge = _SharedBridge(
+        snap,
+        decodeResult: _solid(4, 4, 5, 6, 7),
+        sharedResult: null, // no D3D12 adapter / a transient failure
+        compResult: _solid(8, 8, 9, 9, 9),
+      );
+      final app = AppStateStub(bridge: bridge);
+      late PreviewSource source;
+      await tester.runAsync(() async {
+        source = PreviewSource(app,
+            textureController:
+                ViewerTextureController(channel: _defaultTextureChannel));
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      });
+
+      expect(source.sharedActive, isFalse, reason: 'the shared path declined');
+      expect(bridge.renderedShared, contains('c1@0'),
+          reason: 'the shared path was tried first');
+      expect(source.compActive, isTrue, reason: 'it fell back to the comp path');
+      expect(source.image, isNotNull);
+      removeChannel();
+      source.dispose();
+    });
+
+    testWidgets('a missing platform channel falls back for the session',
+        (tester) async {
+      // No mock handler installed → invokeMethod throws MissingPluginException,
+      // so registration fails and the controller latches unavailable.
+      final bridge = _SharedBridge(
+        snap,
+        decodeResult: _solid(4, 4, 3, 3, 3),
+        sharedResult: const SharedFrame(handle: 0x1, width: 32, height: 18),
+        compResult: _solid(8, 8, 4, 4, 4),
+      );
+      final app = AppStateStub(bridge: bridge);
+      late PreviewSource source;
+      await tester.runAsync(() async {
+        source = PreviewSource(app,
+            textureController:
+                ViewerTextureController(channel: _defaultTextureChannel));
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      });
+
+      expect(source.sharedActive, isFalse,
+          reason: 'registration failed → read-back path');
+      expect(source.compActive, isTrue);
+      expect(source.image, isNotNull);
+      source.dispose();
+    });
+
+    testWidgets('an unsupported bridge never attempts the shared path',
+        (tester) async {
+      final removeChannel = _mockViewerTextureChannel(tester, 42);
+      final bridge = _SharedBridge(
+        snap,
+        decodeResult: _solid(4, 4, 2, 2, 2),
+        sharedResult: const SharedFrame(handle: 0x1, width: 32, height: 18),
+        compResult: _solid(8, 8, 6, 6, 6),
+        supportsShared: false,
+      );
+      final app = AppStateStub(bridge: bridge);
+      late PreviewSource source;
+      await tester.runAsync(() async {
+        source = PreviewSource(app,
+            textureController:
+                ViewerTextureController(channel: _defaultTextureChannel));
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      });
+
+      expect(source.sharedActive, isFalse);
+      expect(bridge.renderedShared, isEmpty,
+          reason: 'an unsupported bridge is never asked to render shared');
+      expect(source.compActive, isTrue, reason: 'the comp path took over');
+      removeChannel();
+      source.dispose();
+    });
+
+    testWidgets('the Viewer paints a Texture widget on the shared path',
+        (tester) async {
+      final removeChannel = _mockViewerTextureChannel(tester, 7);
+      final bridge = _SharedBridge(
+        snap,
+        decodeResult: _solid(4, 4, 1, 1, 1),
+        sharedResult: const SharedFrame(handle: 0x9, width: 32, height: 18),
+        compResult: _solid(8, 8, 30, 30, 30),
+      );
+      final app = AppStateStub(bridge: bridge);
+      // The app's own PreviewSource uses the default controller, which resolves
+      // to the real channel name the mock handler above answers.
+      await tester.runAsync(() async {
+        await tester.pumpWidget(_wrap(ViewerPanel(app: app)));
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      });
+      await tester.pump();
+
+      expect(find.byType(Texture), findsOneWidget,
+          reason: 'the shared texture is shown with a Texture widget');
+      expect(find.byType(RawImage), findsNothing,
+          reason: 'no read-back image on the zero-copy path');
+      removeChannel();
+    });
+  });
+
   // The perf pass render isolate (K-176): the same PreviewSource, but the heavy
   // render/decode is handed to an off-thread [FrameRenderer]. These prove the
   // async control flow — holding the last picture while a frame is in flight,
@@ -649,6 +909,9 @@ class _QueuedRenderer implements FrameRenderer {
   @override
   bool get supportsCompRender => true;
 
+  @override
+  bool get supportsSharedTexture => false;
+
   final List<String> compRequests = [];
   final List<String> decodeRequests = [];
   final List<void Function()> _pending = [];
@@ -660,6 +923,12 @@ class _QueuedRenderer implements FrameRenderer {
       void Function(DecodedFrame?) onFrame) {
     compRequests.add('$compId@$frame');
     _pending.add(() => onFrame(compResult));
+  }
+
+  @override
+  void requestShared(String compId, int frame, int generation,
+      void Function(SharedFrame?) onFrame) {
+    _pending.add(() => onFrame(null));
   }
 
   @override

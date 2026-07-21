@@ -2207,6 +2207,25 @@ calls sixty times a second, so the engine draws each frame into a piece of GPU
 memory that Flutter displays directly — the picture never takes a detour
 through ordinary memory.
 
+**The picture now stays on the graphics card (K-177).** For a while the Viewer
+took exactly that detour: the engine drew the frame on the graphics card, copied
+it down into ordinary memory, passed the bytes across to Flutter, and Flutter
+copied them *back up* onto the card to show them — three copies of a full-size
+picture, every frame. That was the biggest thing making scrubbing feel heavier
+than the old egui app. On Windows this is now removed. The engine asks the
+graphics card for a special *shared* texture — a piece of GPU memory Windows can
+lend by name to another part of the program — draws straight into it, and hands
+Flutter only the name (a small number, an "NT handle"). Flutter opens that name
+and shows the texture directly with a `Texture` widget; no pixels are copied at
+all. It is switched on with a build flag (`--features shared-texture`) and is
+Windows-only, so it can be turned off without touching anything else. If the flag
+is off, the machine has no suitable graphics card, or the runner is an old build,
+everything quietly goes back to the copy-the-bytes way — nothing breaks, it is
+just a little slower. One detail: the Scopes (the waveform/vectorscope displays)
+still need the actual numbers, and the fast path deliberately keeps the picture
+*off* ordinary memory, so the engine also does a slow copy a few times a second
+just to feed the Scopes, while the fast texture drives the Viewer itself.
+
 **Where things are.** `docs/flutter-port/` holds the plan: `01` the strategy
 and phases, `02` an inventory of every surface the egui interface ships (the
 port's shopping list), `03` the bridge design, `04` a table mapping each egui

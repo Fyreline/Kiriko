@@ -2250,3 +2250,41 @@ an engine crate. When the pixel pass is extracted into an engine crate (the shar
 work docs/flutter-port/03 anticipates), the bridge will depend on that crate instead and the
 `lumit-ui` dependency is dropped. Recorded so the dependency edge is understood as scaffolding,
 not the destination.
+
+**K-177 · DECIDED · The Viewer's zero-copy path is a D3D12 shared NT handle Flutter samples
+directly, with the read-back path kept as the airtight fallback.** The recorded top
+performance gap (K-176) was the Viewer's per-frame round trip: render on the GPU → read the
+pixels down to the CPU → copy across FFI → upload back to the GPU. This closes it on Windows.
+wgpu runs over D3D12; behind an **opt-in `shared-texture` feature** (off by default, so every
+existing build and CI gate is byte-for-byte unchanged) the headless renderer reaches through
+wgpu to its D3D12 device (`Device::as_hal`), creates a texture in a **shared heap**
+(`D3D12_HEAP_FLAG_SHARED`, `DXGI_FORMAT_R8G8B8A8_UNORM`, `ALLOW_SIMULTANEOUS_ACCESS`), exports
+an **NT handle** (`ID3D12Device::CreateSharedHandle`), and wraps the same resource back as a
+`wgpu::Texture` (`create_texture_from_hal`). The finished, display-encoded frame is copied
+GPU-to-GPU into it (a valid srgb-differing `copy_texture_to_texture`, no re-encode) and the
+handle is handed across the bridge; the Windows runner registers it with Flutter as a
+`kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle` external texture (the embedder opens the handle
+on its own ANGLE/D3D11 device), and the Viewer shows a `Texture` widget. The pixels never
+leave the graphics card. **Choice made — D3D12-direct, not a separate D3D11 device:** the
+direct route is self-contained (no second device, no D3D11-on-12) and was verified to work end
+to end on the dev machine (the `solid_comp_renders_to_a_stable_shared_handle` test creates the
+shared resource, exports a non-zero handle, and re-uses it across frames). Under the feature
+the headless renderer pins the **D3D12 backend** (the interop needs it); every non-feature
+build keeps the all-backends instance. **Synchronisation:** after the copy we `poll(Wait)` so
+Flutter never samples a half-written frame; a keyed-mutex / shared-fence handshake is the
+recorded follow-up, worth adding only if tearing shows in practice (D3D12 uses fences, not
+keyed mutexes, so a cross-API handshake is non-trivial — deferred until observed). **No new
+runtime dependency:** the plumbing pattern (descriptor shape, the DXGI-shared-handle surface
+type, the register / mark-frame-available dance) follows the MIT-licensed
+`flutter_wgpu_texture` package as a *reference* — pattern borrowed with a code-comment credit,
+not added as a dependency (it owns its own renderer/scene architecture and is very young). The
+`windows` crate is pinned to **0.58** so its D3D12 types unify with the ones wgpu-hal already
+uses. **Fallback is airtight and tested:** `lumit_bridge_shared_supported()` is false for an
+old `.dll`, a non-Windows build, or a feature-less build; `render_to_shared` returns false (Dart
+falls back for that frame) on no D3D12 adapter or any interop error; the platform channel
+missing (an unwired runner) latches the controller off for the session — every seam falls back
+to the read-back path, each covered by a fake in the Dart suite. **Scopes** still need CPU
+pixels (the texture path moves none): a throttled read-back render (~10 Hz) feeds them while
+the texture drives the Viewer. **Remaining after this:** the read-back path stays for scopes
+and for every fallback; engine-side render cancellation and a rendered-frame cache (K-176)
+are still open; the keyed-mutex handshake is the named follow-up.

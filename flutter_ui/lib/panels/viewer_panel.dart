@@ -119,6 +119,20 @@ class _ViewerPanelState extends State<ViewerPanel>
   }
 
   Widget _buildStage(BuildContext context, LumitTheme t) {
+    // The zero-copy shared-texture path (K-177): the engine drew the whole comp
+    // into a GPU texture Flutter samples directly — show it with a `Texture`
+    // widget, fit to the panel. Like the comp path it is self-contained (any
+    // missing layer is slated inside the frame), so no separate slate applies.
+    final texId = source.textureId;
+    if (source.sharedActive && texId != null) {
+      return Center(
+        child: AspectRatio(
+          aspectRatio: source.sharedAspect ?? (16 / 9),
+          child: Texture(textureId: texId),
+        ),
+      );
+    }
+
     final target = source.target;
 
     // On the composited-comp path there is no single-layer [target]: a missing

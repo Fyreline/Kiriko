@@ -112,9 +112,24 @@ where the row is logic).
   output only (full-res internal render — noted). Rust headless + bridge tests
   and Dart fake-bridge selection tests. `headless.rs`, `render.rs`, `ffi.rs`,
   `bridge.dart`, `preview_source.dart`, `viewer_panel.dart`
-- ☐ Shared-texture path (D3D11 interop) remains: the CPU path above reads RGBA
-  back; the zero-copy `Texture`-widget path renders through the same
-  `HeadlessRenderer` and is the future optimisation
+- ☑ Shared-texture path (zero-copy, K-177) — **built on Windows**, opt-in
+  `shared-texture` feature. The engine renders into a **D3D12 shared texture**
+  (shared heap + NT handle via `CreateSharedHandle`, wrapped back into wgpu with
+  `create_texture_from_hal`), the bridge hands the handle across
+  (`lumit_bridge_render_to_shared`/`_shared_supported`, no bytes), the Windows
+  runner registers it as a `kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle`
+  external texture (`windows/runner/viewer_texture_bridge.{h,cpp}`), and the
+  Viewer shows a `Texture` widget (`ViewerTextureController` owns the channel
+  lifecycle). Verified end to end on the dev adapter (`lumit-ui` headless test:
+  non-zero, stable handle across frames). **What remains / stays open:** the
+  read-back path stays as the airtight automatic fallback (old dll / non-Windows
+  / no D3D12 adapter / unwired runner — every seam tested with fakes) and feeds
+  the **Scopes** via a throttled ~10 Hz CPU render (the texture path moves no
+  pixels to the CPU); a keyed-mutex / shared-fence handshake is the named
+  follow-up (only if tearing shows); the rendered-frame cache and engine-side
+  render cancellation (below) are still open. The C++ runner plugin compiles only
+  under `flutter build windows` on the owner's machine (the docs-first sandbox
+  cannot run the Windows app toolchain).
 - ☑ CPU RGBA fallback — **single-layer footage preview** (the fallback when comp
   render is unavailable: an old library, or no GPU adapter). The Viewer resolves
   the front comp's topmost visible footage layer whose span covers the playhead,
@@ -462,9 +477,12 @@ dart` (off-thread renderer) and `test/timeline_columns_session_test.dart`
   `SynchronousFrameRenderer` remains the fallback when isolates are unavailable
   (tests, the placeholder build, a machine where the worker cannot open the
   library).
-  - **Remainder (◐):** the render is still a full-resolution CPU pixel readback
-    per frame; the D3D11 shared-texture / keyed-mutex zero-copy path is the real
-    end-state and is not built. Renders are not cancelled mid-flight engine-side —
+  - **Remainder (◐):** the read-back path is a full-resolution CPU pixel readback
+    per frame. The zero-copy end-state **is now built** (K-177): on Windows, with
+    the `shared-texture` feature, the render stays on the GPU (a D3D12 shared NT
+    handle Flutter samples directly) and the readback path is the fallback. What
+    is still not done on top of that: the render is not cancelled mid-flight
+    engine-side —
     latest-wins only drops the *reply* on the Dart side; a superseded comp render
     still runs to completion in the worker. The worker path is unverified in this
     sandbox (no native build / no `.dll`, and an isolate cannot bind a Dart fake),
@@ -508,9 +526,11 @@ dart` (off-thread renderer) and `test/timeline_columns_session_test.dart`
      Dart-side *reply* (F2 render-isolate remainder); a superseded comp render
      still runs to completion in the worker, stealing the lock the next frame
      wants;
-  3. the **D3D11 shared-texture / keyed-mutex zero-copy path** (no readback at
-     all — the F2 "shared-texture path" row).
-  None started.
+  3. the **shared-texture zero-copy path** (no readback at all — the F2
+     "shared-texture path" row). **Done (K-177)**, shipped as a D3D12 shared NT
+     handle (not the D3D11 route the earlier note guessed at); a keyed-mutex
+     handshake is its own named follow-up.
+  Items 1 and 2 not started; item 3 done.
 
 ## Desk-test round 2 findings (owner, 2026-07-22)
 

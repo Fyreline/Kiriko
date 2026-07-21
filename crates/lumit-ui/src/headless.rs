@@ -75,6 +75,28 @@ pub struct HeadlessRenderer {
     /// Whether each footage item carries an audio stream, cached so building the
     /// export audio jobs probes each file at most once (export path only).
     audio_cache: HashMap<Uuid, bool>,
+    /// The Windows zero-copy Viewer target (K-177), held for the session and
+    /// re-created only when the comp's dimensions change. `None` until the first
+    /// `render_to_shared` call. Present only in the opt-in shared-texture build.
+    #[cfg(all(windows, feature = "shared-texture"))]
+    shared: Option<lumit_gpu::shared::SharedTexture>,
+}
+
+/// A rendered frame that stayed on the GPU: the NT handle of the shared texture
+/// it lives in, plus its dimensions and format (K-177). Handed across the bridge
+/// so the Windows runner can register the texture with Flutter without any pixel
+/// copy. The handle stays valid across frames (the same texture is re-used) and
+/// only changes when the comp is resized.
+#[cfg(all(windows, feature = "shared-texture"))]
+pub struct SharedFrameInfo {
+    /// The NT `HANDLE` value of the shared texture (a
+    /// `kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle` surface).
+    pub handle: u64,
+    pub width: u32,
+    pub height: u32,
+    /// Always RGBA8888 (`DXGI_FORMAT_R8G8B8A8_UNORM` holding sRGB-encoded bytes),
+    /// the identical pixels the read-back path produces.
+    pub format: &'static str,
 }
 
 /// The inputs one export needs, built through the headless seam (K-175) so the
@@ -108,6 +130,8 @@ impl HeadlessRenderer {
             items: HashMap::new(),
             probe_cache: HashMap::new(),
             audio_cache: HashMap::new(),
+            #[cfg(all(windows, feature = "shared-texture"))]
+            shared: None,
         })
     }
 
@@ -303,6 +327,73 @@ impl HeadlessRenderer {
         out
     }
 
+    /// Render composition `comp_id` at integer `frame` into the Windows shared
+    /// GPU texture, returning its NT handle and dimensions ([`SharedFrameInfo`],
+    /// K-177) — the zero-copy sibling of [`Self::render_rgba`]. The frame never
+    /// leaves the graphics card: it is composited and display-encoded exactly as
+    /// `render_rgba` does (preview == export == Flutter, K-031), then copied into
+    /// the shared texture instead of being read back to the CPU.
+    ///
+    /// The shared texture is created on the first call and re-used across frames
+    /// (a stable handle); a comp of different dimensions re-creates it and reports
+    /// the new handle. `Err` on an unknown comp, when wgpu is not on the D3D12
+    /// backend, or any D3D interop failure — the bridge turns that into "no
+    /// shared frame" and Dart falls back to the read-back path.
+    #[cfg(all(windows, feature = "shared-texture"))]
+    pub fn render_to_shared(
+        &mut self,
+        doc: &Document,
+        comp_id: Uuid,
+        frame: u64,
+    ) -> Result<SharedFrameInfo, String> {
+        let comp = doc
+            .comp(comp_id)
+            .ok_or_else(|| "headless render: unknown composition".to_string())?;
+        let (cw, ch) = (comp.width, comp.height);
+        self.sync_items(doc, (cw, ch));
+        let fps = comp.frame_rate.fps().max(1.0);
+        let t = frame as f64 / fps;
+
+        let Some(parts) = self.parts.take() else {
+            return Err("headless render: renderer is unavailable after an earlier fault".into());
+        };
+        let mut renderer = Renderer {
+            doc,
+            items: &self.items,
+            gpu: &self.gpu,
+            colour: parts.colour,
+            compositor: parts.compositor,
+            decoders: parts.decoders,
+            flow: parts.flow,
+            fx: parts.fx,
+            lut_cache: parts.lut_cache,
+        };
+        let mut visited = vec![comp_id];
+        // Ensure the shared texture matches the comp size (create/recreate), then
+        // composite and copy into it — disjoint field borrows (`&self.gpu`
+        // immutable, `&mut self.shared` mutable) so the borrow checker is happy.
+        let out = render_display_into_shared(
+            &mut renderer,
+            comp,
+            t,
+            &mut visited,
+            &self.gpu,
+            &mut self.shared,
+            cw,
+            ch,
+        );
+        // Return the engines and warm decoders to the pool, even on error.
+        self.parts = Some(Parts {
+            colour: renderer.colour,
+            compositor: renderer.compositor,
+            fx: renderer.fx,
+            flow: renderer.flow,
+            lut_cache: renderer.lut_cache,
+            decoders: renderer.decoders,
+        });
+        out
+    }
+
     /// Rebuild the `ItemInfo` map from the document's footage, probing any item
     /// not already in `probe_cache`. Slate items are sized to `slate` (the
     /// comp's dimensions this call), matching export's `item_infos`.
@@ -378,6 +469,47 @@ fn render_to_rgba(
     let sh = ((height as f32 * scale).round() as u32).max(1);
     let scaled = crate::pixels::letterbox_resize(&rgba, width, height, sw, sh);
     Ok((scaled, sw, sh))
+}
+
+/// Composite once, display-encode, and copy the result into the shared texture
+/// (creating/resizing it as needed), returning its handle. Split out so
+/// `render_to_shared` can restore the engine pool on either arm. The composite +
+/// display passes are byte-for-byte what `render_to_rgba` runs; only the final
+/// step differs (a GPU-to-GPU copy instead of a read-back).
+#[cfg(all(windows, feature = "shared-texture"))]
+#[allow(clippy::too_many_arguments)]
+fn render_display_into_shared(
+    renderer: &mut Renderer,
+    comp: &lumit_core::model::Composition,
+    t: f64,
+    visited: &mut Vec<Uuid>,
+    gpu: &lumit_gpu::GpuContext,
+    shared: &mut Option<lumit_gpu::shared::SharedTexture>,
+    width: u32,
+    height: u32,
+) -> Result<SharedFrameInfo, String> {
+    let linear = renderer.render_comp_linear(comp, t, visited)?;
+    let shown = renderer.colour.display(gpu, &linear);
+
+    // Re-create the shared texture when it is missing or the comp changed size —
+    // a new handle is reported then, which the bridge relays so Dart re-registers.
+    let needs_new = match shared.as_ref() {
+        Some(s) => s.width != width || s.height != height,
+        None => true,
+    };
+    if needs_new {
+        *shared = Some(lumit_gpu::shared::SharedTexture::new(gpu, width, height)?);
+    }
+    let target = shared
+        .as_ref()
+        .ok_or_else(|| "headless render: shared texture missing after create".to_string())?;
+    target.present(gpu, &shown);
+    Ok(SharedFrameInfo {
+        handle: target.handle(),
+        width,
+        height,
+        format: "rgba8888",
+    })
 }
 
 /// The on-disk path a footage item points at (absolute when known, else the
@@ -554,6 +686,62 @@ mod tests {
         assert_eq!(rgba.len(), (w * h * 4) as usize);
         let idx = (((h / 2) * w + w / 2) * 4) as usize;
         assert!(rgba[idx + 1] > 200, "green solid stays green after resize");
+    }
+
+    /// The zero-copy path (K-177) renders a real comp into a shared GPU texture
+    /// and reports a non-zero NT handle whose dimensions are stable across two
+    /// frames (the texture is re-used, not re-created). Skips when there is no
+    /// GPU adapter; also skips calmly if this machine's wgpu is not on the D3D12
+    /// backend (the shared path needs D3D12 — the read-back path still works).
+    #[cfg(all(windows, feature = "shared-texture"))]
+    #[test]
+    fn solid_comp_renders_to_a_stable_shared_handle() {
+        let mut r = match HeadlessRenderer::new() {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!("skipping: no GPU adapter");
+                return;
+            }
+        };
+        let (store, comp_id) = doc_with_solid(LinearColour([0.0, 0.0, 1.0, 1.0]), 32, 16);
+        let doc = store.snapshot();
+        let first = match r.render_to_shared(&doc, comp_id, 0) {
+            Ok(info) => info,
+            Err(e) => {
+                // e.g. wgpu chose Vulkan over D3D12, or no shared-heap support.
+                eprintln!("skipping: shared texture unavailable here: {e}");
+                return;
+            }
+        };
+        assert_ne!(first.handle, 0, "a shared render yields a non-zero handle");
+        assert_eq!((first.width, first.height), (32, 16));
+        assert_eq!(first.format, "rgba8888");
+
+        // A second frame re-uses the same texture: same dimensions, same handle.
+        let second = r
+            .render_to_shared(&doc, comp_id, 1)
+            .expect("second shared render");
+        assert_eq!((second.width, second.height), (32, 16));
+        assert_eq!(
+            second.handle, first.handle,
+            "the handle is stable while the comp size is unchanged"
+        );
+    }
+
+    /// An unknown comp id on the shared path is a calm error, never a panic.
+    #[cfg(all(windows, feature = "shared-texture"))]
+    #[test]
+    fn unknown_comp_is_an_error_on_the_shared_path() {
+        let mut r = match HeadlessRenderer::new() {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!("skipping: no GPU adapter");
+                return;
+            }
+        };
+        let (store, _comp_id) = doc_with_solid(LinearColour([1.0, 1.0, 1.0, 1.0]), 4, 4);
+        let doc = store.snapshot();
+        assert!(r.render_to_shared(&doc, Uuid::now_v7(), 0).is_err());
     }
 
     /// An unknown comp id is a calm error, never a panic.

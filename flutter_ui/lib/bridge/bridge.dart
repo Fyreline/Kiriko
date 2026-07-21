@@ -793,6 +793,23 @@ class DecodedFrame {
   });
 }
 
+/// A frame that stayed on the GPU (the zero-copy Viewer path, K-177): the NT
+/// [handle] of the shared texture it lives in, plus its dimensions. No pixels
+/// cross — the Windows runner opens the handle and Flutter samples it directly.
+/// The handle is stable across frames (the same texture is re-used) and changes
+/// only when the composition is resized.
+class SharedFrame {
+  final int handle;
+  final int width;
+  final int height;
+
+  const SharedFrame({
+    required this.handle,
+    required this.width,
+    required this.height,
+  });
+}
+
 /// One node in the Project panel tree. Folders carry nested [children]; every
 /// other kind carries an empty list. A composition additionally carries [comp]
 /// (its size/layers/markers); a footage item carries its probe [status] and,
@@ -1035,6 +1052,17 @@ typedef _RenderC = Pointer<Uint8> Function(Pointer<Char>, Uint64, Float,
 typedef _RenderDart = Pointer<Uint8> Function(
     Pointer<Char>, int, double, Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
 
+// Zero-copy shared-texture path (K-177): no buffer returned — the frame stays on
+// the GPU. `shared_supported` reports whether this build offers it; `render_to_shared`
+// renders comp `id` at `frame` into a shared texture and writes the NT handle +
+// dimensions into the out-pointers, returning true on success.
+typedef _SharedSupportedC = Bool Function();
+typedef _SharedSupportedDart = bool Function();
+typedef _RenderSharedC = Bool Function(Pointer<Char>, Uint64, Pointer<Uint64>,
+    Pointer<Uint32>, Pointer<Uint32>);
+typedef _RenderSharedDart = bool Function(
+    Pointer<Char>, int, Pointer<Uint64>, Pointer<Uint32>, Pointer<Uint32>);
+
 /// The set of document operations the frontend drives the engine through. The
 /// real implementation is [LumitBridge] (dart:ffi over the shared library); the
 /// interface exists so tests can supply a fake without loading the library or
@@ -1273,9 +1301,29 @@ abstract class CompRenderBridge {
   DecodedFrame? renderCompFrame(String compId, int frame, double scale);
 }
 
+/// The zero-copy Viewer capability (K-177), kept as its own interface for the
+/// same reason as [CompRenderBridge]: a bridge either offers it or it does not,
+/// and the many `implements DocumentBridge` fakes need no change. The real
+/// [LumitBridge] implements it; it is offered only when the loaded `.dll` was
+/// built with the `shared-texture` feature on Windows AND exports the symbols.
+abstract class SharedTextureBridge {
+  /// True when this build offers the shared-texture path — the symbols are bound
+  /// AND the engine reports it was compiled with the feature on Windows. False
+  /// for an older library, a non-Windows build, or a feature-less build; the
+  /// Viewer then stays on the read-back path.
+  bool get supportsSharedTexture;
+
+  /// Render the whole composited comp [compId] at [frame] into the shared GPU
+  /// texture, returning its NT [SharedFrame.handle] and dimensions — no pixels
+  /// cross. Null on failure (no D3D12 adapter, an unknown comp, a transient
+  /// error), which sends the Viewer back to the read-back path for that frame.
+  SharedFrame? renderToShared(String compId, int frame);
+}
+
 /// The loaded `lumit_bridge` library, bound to typed calls. Construct with
 /// [tryLoad]; a null result means the app runs on its placeholders.
-class LumitBridge implements DocumentBridge, CompRenderBridge {
+class LumitBridge
+    implements DocumentBridge, CompRenderBridge, SharedTextureBridge {
   final _NoArgDart _version;
   final _NoArgDart _newProject;
   final _StrArgDart _openProject;
@@ -1335,6 +1383,13 @@ class LumitBridge implements DocumentBridge, CompRenderBridge {
   /// keeps its single-layer path. Non-final because it is looked up defensively
   /// in the constructor body, not the initializer list.
   _RenderDart? _renderCompFrame;
+
+  /// The zero-copy shared-texture symbols (K-177). Bound defensively like
+  /// [_renderCompFrame]: an older `.dll` lacks them, and both stay null then, so
+  /// [supportsSharedTexture] is false and the Viewer keeps the read-back path.
+  _SharedSupportedDart? _sharedSupported;
+  _RenderSharedDart? _renderToShared;
+
   final _FreeDart _freeString;
   final _FreeBufferDart _freeBuffer;
 
@@ -1513,6 +1568,19 @@ class LumitBridge implements DocumentBridge, CompRenderBridge {
       );
     } catch (_) {
       _renderCompFrame = null;
+    }
+    // The shared-texture symbols are likewise optional (K-177): an older library
+    // omits them, so bind defensively and leave the capability off if either is
+    // missing.
+    try {
+      _sharedSupported = lib.lookupFunction<_SharedSupportedC,
+          _SharedSupportedDart>('lumit_bridge_shared_supported');
+      _renderToShared = lib.lookupFunction<_RenderSharedC, _RenderSharedDart>(
+        'lumit_bridge_render_to_shared',
+      );
+    } catch (_) {
+      _sharedSupported = null;
+      _renderToShared = null;
     }
   }
 
@@ -2210,6 +2278,41 @@ class LumitBridge implements DocumentBridge, CompRenderBridge {
       malloc.free(outW);
       malloc.free(outH);
       malloc.free(outLen);
+    }
+  }
+
+  @override
+  bool get supportsSharedTexture {
+    final supported = _sharedSupported;
+    // Both the presence of the symbol AND the engine's own answer must agree:
+    // an old library has no symbol; a feature-less or non-Windows build has the
+    // symbol but answers false. `renderToShared` must also be bound to use it.
+    return supported != null && _renderToShared != null && supported();
+  }
+
+  @override
+  SharedFrame? renderToShared(String compId, int frame) {
+    final render = _renderToShared;
+    if (render == null) return null; // old library without the symbol
+    final id = compId.toNativeUtf8();
+    final outHandle = malloc<Uint64>();
+    final outW = malloc<Uint32>();
+    final outH = malloc<Uint32>();
+    try {
+      final ok = render(id.cast(), frame, outHandle, outW, outH);
+      if (!ok || outHandle.value == 0 || outW.value == 0 || outH.value == 0) {
+        return null;
+      }
+      return SharedFrame(
+        handle: outHandle.value,
+        width: outW.value,
+        height: outH.value,
+      );
+    } finally {
+      malloc.free(id);
+      malloc.free(outHandle);
+      malloc.free(outW);
+      malloc.free(outH);
     }
   }
 

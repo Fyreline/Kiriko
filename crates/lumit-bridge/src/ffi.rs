@@ -860,6 +860,97 @@ fn render_to_buffer(_comp_id: &str, _frame: u64, _scale: f32) -> Option<(u32, u3
     None
 }
 
+/// Whether this build offers the Windows zero-copy shared-texture Viewer path
+/// (K-177): `true` only when compiled with the `shared-texture` feature on
+/// Windows. Dart calls this once to decide whether to attempt the `Texture`
+/// widget path at all; `false` keeps it on the read-back path (an old `.dll`,
+/// a non-Windows build, or a build without the feature). Stateless, never fails.
+#[no_mangle]
+pub extern "C" fn lumit_bridge_shared_supported() -> bool {
+    cfg!(all(windows, feature = "shared-texture"))
+}
+
+/// Render composition `comp_id` at `frame` into the Windows shared GPU texture
+/// and report its NT handle and dimensions through the out-pointers (K-177).
+/// Returns `true` on success; on any failure returns `false` and zeroes the
+/// out-pointers, so Dart falls back to [`lumit_bridge_render_comp_frame`] for
+/// that frame. Unlike the read-back calls this returns no buffer to free — the
+/// pixels never leave the GPU. The reported handle is stable across frames (the
+/// same texture is re-used) and changes only when the comp is resized. Without
+/// the `shared-texture` feature, on a non-Windows build, or with no D3D12
+/// adapter, this always returns `false` calmly (never a crash, never a retry
+/// storm).
+///
+/// # Safety
+/// `comp_id` must be null or a valid NUL-terminated UTF-8 C string. `out_handle`
+/// must be null or a valid, writable pointer to a `u64`; `out_w` and `out_h`
+/// must each be null or a valid, writable pointer to a `u32`.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_render_to_shared(
+    comp_id: *const c_char,
+    frame: u64,
+    out_handle: *mut u64,
+    out_w: *mut u32,
+    out_h: *mut u32,
+) -> bool {
+    let write_zero = || {
+        if !out_handle.is_null() {
+            *out_handle = 0;
+        }
+        if !out_w.is_null() {
+            *out_w = 0;
+        }
+        if !out_h.is_null() {
+            *out_h = 0;
+        }
+    };
+
+    let Some(id) = c_str_to_string(comp_id) else {
+        write_zero();
+        return false;
+    };
+
+    // A panic anywhere in the compositor or D3D interop becomes `false`, never an
+    // unwind into Dart. The renderer serialises itself behind its own lock.
+    let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_to_shared_buffer(&id, frame)
+    }))
+    .ok()
+    .flatten();
+
+    match rendered {
+        Some((handle, w, h)) => {
+            if !out_handle.is_null() {
+                *out_handle = handle;
+            }
+            if !out_w.is_null() {
+                *out_w = w;
+            }
+            if !out_h.is_null() {
+                *out_h = h;
+            }
+            true
+        }
+        None => {
+            write_zero();
+            false
+        }
+    }
+}
+
+/// Render `comp_id` at `frame` into the shared texture, returning
+/// `(handle, width, height)`. `None` on any failure. Without the
+/// `shared-texture` feature (or off Windows) this is always `None`.
+#[cfg(all(windows, feature = "shared-texture"))]
+fn render_to_shared_buffer(comp_id: &str, frame: u64) -> Option<(u64, u32, u32)> {
+    crate::render::render_to_shared(comp_id, frame)
+}
+
+#[cfg(not(all(windows, feature = "shared-texture")))]
+fn render_to_shared_buffer(_comp_id: &str, _frame: u64) -> Option<(u64, u32, u32)> {
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Bridge v0.4: export, keyframe interpolation, Retime, and the timeline columns.
 // Each guards its body and returns a JSON reply (a refreshed snapshot for the
@@ -1275,7 +1366,7 @@ mod tests {
         assert!(!ptr.is_null());
         let copied = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
         assert_eq!(parse(&copied)["ok"], json!(true));
-        assert_eq!(parse(&copied)["abi"], json!(5));
+        assert_eq!(parse(&copied)["abi"], json!(6));
         unsafe { lumit_bridge_free_string(ptr) };
 
         let snap_ptr = lumit_bridge_snapshot();
@@ -1326,6 +1417,41 @@ mod tests {
         };
         assert!(ptr.is_null());
         assert_eq!((w, h, len), (0, 0, 0));
+    }
+
+    #[test]
+    fn shared_supported_matches_the_build() {
+        // True only in the opt-in shared-texture build on Windows; false in the
+        // default build every gate runs — never a panic either way.
+        assert_eq!(
+            lumit_bridge_shared_supported(),
+            cfg!(all(windows, feature = "shared-texture"))
+        );
+    }
+
+    #[test]
+    fn render_to_shared_with_a_null_id_returns_false_and_zeroes_outs() {
+        let mut handle: u64 = 7;
+        let mut w: u32 = 7;
+        let mut h: u32 = 7;
+        let ok =
+            unsafe { lumit_bridge_render_to_shared(ptr::null(), 0, &mut handle, &mut w, &mut h) };
+        assert!(!ok);
+        assert_eq!((handle, w, h), (0, 0, 0));
+    }
+
+    #[test]
+    fn render_to_shared_of_an_unknown_comp_returns_false_and_zeroes_outs() {
+        // Unknown comp in the empty global document, or no adapter — either way
+        // `false` with the outs zeroed, the path Dart falls back from.
+        let id = std::ffi::CString::new("018f0e9a-0000-7000-8000-0000000000bb").unwrap();
+        let mut handle: u64 = 5;
+        let mut w: u32 = 5;
+        let mut h: u32 = 5;
+        let ok =
+            unsafe { lumit_bridge_render_to_shared(id.as_ptr(), 0, &mut handle, &mut w, &mut h) };
+        assert!(!ok);
+        assert_eq!((handle, w, h), (0, 0, 0));
     }
 
     #[test]

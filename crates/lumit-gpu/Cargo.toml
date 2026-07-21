@@ -12,6 +12,27 @@ pollster = "0.4"
 thiserror = "2"
 wgpu = "24"
 
+# The Windows-only, zero-copy Viewer path (K-177). Off by default so every
+# existing build is byte-for-byte unchanged; the bridge turns it on to build the
+# shipped `.dll`. It pulls the `windows` crate (pinned to 0.58 so its
+# `ID3D12Device`/`ID3D12Resource` types unify with the ones wgpu-hal's D3D12
+# backend already uses — a mismatched major would be a *different* type and the
+# hal hand-off would not compile). The actual D3D code is additionally
+# `cfg(windows)`-gated, so enabling the feature on a non-Windows target is inert.
+[features]
+shared-texture = ["dep:windows"]
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+optional = true
+default-features = false
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi_Common",
+]
+
 [dev-dependencies]
 # The CPU oracle the WGSL kernels are held to (docs/08 §1.6).
 lumit-core = { path = "../lumit-core" }

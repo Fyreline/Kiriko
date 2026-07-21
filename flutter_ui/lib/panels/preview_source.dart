@@ -31,6 +31,7 @@ import 'package:flutter/foundation.dart';
 
 import '../bridge/bridge.dart';
 import '../state/app_state.dart';
+import 'viewer_texture_controller.dart';
 
 /// What the Viewer previews this frame: a resolved footage [item] and the
 /// [sourceFrame] within it (the comp frame minus the layer's in-point).
@@ -149,8 +150,32 @@ class PreviewSource extends ChangeNotifier {
   bool _disposed = false;
   bool _compActive = false;
 
-  PreviewSource(this.app, {FrameRenderer? renderer})
+  // ---- Zero-copy shared-texture path (K-177) ----
+
+  /// Owns the `lumit/viewer_texture` platform-channel registration. Created only
+  /// when the renderer offers the shared path; null otherwise (and on every
+  /// non-Windows or old build). A test injects a fake so no real runner is hit.
+  late final ViewerTextureController? _textureController;
+
+  /// True when the Viewer is showing the shared GPU texture (a `Texture` widget),
+  /// not a read-back `ui.Image`.
+  bool _sharedActive = false;
+  int? _textureId;
+  int? _sharedWidth;
+  int? _sharedHeight;
+
+  /// A throttled read-back render runs in parallel with the shared path purely
+  /// to feed the Scopes their pixels (the texture path moves no pixels to the
+  /// CPU). Capped at ~10 Hz so it never competes with the Viewer's own cadence.
+  static const int _scopeThrottleMs = 100;
+  int _lastScopeRenderMs = 0;
+  bool _scopePending = false;
+
+  PreviewSource(this.app,
+      {FrameRenderer? renderer, ViewerTextureController? textureController})
       : _renderer = renderer ?? SynchronousFrameRenderer(app) {
+    _textureController = textureController ??
+        (_renderer.supportsSharedTexture ? ViewerTextureController() : null);
     app.addListener(_onAppChanged);
     app.playheadFrame.addListener(_onAppChanged);
     _resolveAndDecode();
@@ -165,6 +190,24 @@ class PreviewSource extends ChangeNotifier {
   /// "single-layer" caveat from its placeholder wording on this path, and treats
   /// the frame as self-contained (any missing layer is slated inside it).
   bool get compActive => _compActive;
+
+  /// True when the Viewer should show the shared GPU texture directly (the
+  /// zero-copy path, K-177) rather than a read-back image. Set once the shared
+  /// render lands and the platform channel has registered the texture.
+  bool get sharedActive => _sharedActive;
+
+  /// The external-texture id to show while [sharedActive], or null.
+  int? get textureId => _textureId;
+
+  /// The shared frame's aspect ratio (width ÷ height), so the Viewer can fit the
+  /// `Texture` to the panel exactly as it fits a read-back image. Null until the
+  /// first shared frame lands.
+  double? get sharedAspect {
+    final w = _sharedWidth;
+    final h = _sharedHeight;
+    if (w == null || h == null || h <= 0) return null;
+    return w / h;
+  }
 
   /// The blit-ready image for the current frame, or null when there is nothing
   /// decoded to show (slate, placeholder, or an in-flight decode).
@@ -185,10 +228,121 @@ class PreviewSource extends ChangeNotifier {
   }
 
   void _resolveAndDecode() {
-    // Prefer the composited-comp path; only when it declines this frame (engine
-    // can't render it) do we fall back to the single-layer decode below.
+    // Prefer the zero-copy shared-texture path (K-177); then the read-back
+    // composited-comp path; only when both decline do we fall to the
+    // single-layer decode. Each returns true when it owns this frame.
+    if (_resolveAndDecodeShared()) return;
     if (_resolveAndDecodeComp()) return;
     _resolveAndDecodeSingleLayer();
+  }
+
+  /// The zero-copy path: ask the engine to render the whole comp into a shared
+  /// GPU texture and show it directly (no pixels cross). Returns true when this
+  /// path owns the frame (a render kicked off, or one already in flight); false
+  /// when it is not applicable at all (no front comp, no shared support, or the
+  /// platform channel is unavailable). A render that comes back null, or a
+  /// registration that fails, falls back to the read-back path from inside the
+  /// async reply — holding the last picture, never blanking.
+  bool _resolveAndDecodeShared() {
+    final controller = _textureController;
+    final compId = app.frontCompIdResolved;
+    if (compId == null ||
+        !_renderer.supportsSharedTexture ||
+        controller == null ||
+        !controller.available) {
+      return false;
+    }
+    final frame = app.previewFrame;
+
+    // Latest-wins: at most one shared render in flight; a newer wanted frame
+    // supersedes the queued one when this reply lands.
+    if (_pendingKey != null) {
+      _wantedDirty = true;
+      return true;
+    }
+    _pendingKey = 'shared:$compId@$frame';
+    var settled = false;
+    _renderer.requestShared(compId, frame, ++_seq, (shared) async {
+      settled = true;
+      if (_disposed) return;
+      _pendingKey = null;
+      if (shared == null) {
+        // The engine could not use the shared path this frame (no D3D12 adapter,
+        // a transient error): fall back to the read-back path, holding the last
+        // picture.
+        _leaveShared();
+        if (!_resolveAndDecodeComp()) _resolveAndDecodeSingleLayer();
+        _drainWanted();
+        return;
+      }
+      final id = await controller.ensureRegistered(
+          shared.handle, shared.width, shared.height);
+      if (_disposed) return;
+      if (id == null) {
+        // The runner has no viewer-texture bridge (or registration failed): the
+        // controller latches unavailable, so the shared path is skipped for the
+        // rest of the session and we fall back now.
+        _leaveShared();
+        if (!_resolveAndDecodeComp()) _resolveAndDecodeSingleLayer();
+        _drainWanted();
+        return;
+      }
+      await controller.frameReady();
+      if (_disposed) return;
+      _enterShared(id, shared.width, shared.height);
+      _generation++;
+      notifyListeners();
+      // Keep the Scopes fed with pixels at a throttled cadence (the texture path
+      // itself moves none to the CPU).
+      _maybeScopeRender(compId, frame);
+      _drainWanted();
+    });
+    if (!settled) {
+      // A genuinely off-thread render is pending: keep the last texture/picture
+      // on screen until it lands (never blank).
+      notifyListeners();
+    }
+    return true;
+  }
+
+  /// Enter shared-texture mode: the Viewer shows the `Texture` widget, and the
+  /// read-back image/target/comp flags are cleared so no stale picture or slate
+  /// shows over it.
+  void _enterShared(int textureId, int width, int height) {
+    _sharedActive = true;
+    _compActive = false;
+    _target = null;
+    _textureId = textureId;
+    _sharedWidth = width;
+    _sharedHeight = height;
+  }
+
+  /// Leave shared-texture mode (a null render or a failed registration), so the
+  /// read-back fallback owns the picture again.
+  void _leaveShared() {
+    _sharedActive = false;
+    _textureId = null;
+  }
+
+  /// A throttled read-back comp render whose only job is to feed the Scopes their
+  /// pixels while the shared texture drives the Viewer. Runs at most every
+  /// [_scopeThrottleMs] (~10 Hz), on its own in-flight guard so it never blocks a
+  /// shared render, and updates [displayedFrame] without touching the shown
+  /// [image] (the picture is the texture, not this).
+  void _maybeScopeRender(String compId, int frame) {
+    if (_scopePending) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastScopeRenderMs < _scopeThrottleMs) return;
+    _lastScopeRenderMs = now;
+    _scopePending = true;
+    _renderer.requestComp(compId, frame, 1.0, ++_seq, (decoded) {
+      _scopePending = false;
+      if (_disposed) return;
+      if (decoded == null || decoded.width == 0 || decoded.height == 0) return;
+      _displayedFrame = decoded;
+      _generation++;
+      notifyListeners();
+    });
   }
 
   /// Ask the engine for the whole composited comp frame. Returns true when this
@@ -380,6 +534,7 @@ class PreviewSource extends ChangeNotifier {
     _disposed = true;
     app.removeListener(_onAppChanged);
     app.playheadFrame.removeListener(_onAppChanged);
+    _textureController?.dispose();
     _renderer.dispose();
     for (final entry in _cache.values) {
       entry.image.dispose();
@@ -401,12 +556,24 @@ abstract class FrameRenderer {
   /// it is only a symbol-presence check, never a render.
   bool get supportsCompRender;
 
+  /// Whether the zero-copy shared-texture path is available (mirrors
+  /// [SharedTextureBridge.supportsSharedTexture], K-177). Only a symbol/flag
+  /// check, safe on the UI isolate.
+  bool get supportsSharedTexture;
+
   /// Render the whole composited comp [compId] at [frame], scaled by [scale].
   /// [generation] tags the request so a stale reply can be dropped. [onFrame]
   /// receives the decoded RGBA frame, or null when the engine cannot composite
   /// it (no adapter / a transient failure).
   void requestComp(String compId, int frame, double scale, int generation,
       void Function(DecodedFrame?) onFrame);
+
+  /// Render the whole composited comp [compId] at [frame] into a shared GPU
+  /// texture (K-177). [onFrame] receives the shared frame's NT handle and
+  /// dimensions, or null when the engine cannot use the shared path this frame
+  /// (no D3D12 adapter, a transient error) — the Viewer then falls back.
+  void requestShared(String compId, int frame, int generation,
+      void Function(SharedFrame?) onFrame);
 
   /// Decode one footage frame [frame] of item [itemId] (the single-layer
   /// fallback). [onFrame] receives the frame, or null on failure.
@@ -432,11 +599,27 @@ class SynchronousFrameRenderer implements FrameRenderer {
   }
 
   @override
+  bool get supportsSharedTexture {
+    final b = app.bridge;
+    return b is SharedTextureBridge &&
+        (b as SharedTextureBridge).supportsSharedTexture;
+  }
+
+  @override
   void requestComp(String compId, int frame, double scale, int generation,
       void Function(DecodedFrame?) onFrame) {
     final b = app.bridge;
     onFrame(b is CompRenderBridge
         ? (b as CompRenderBridge).renderCompFrame(compId, frame, scale)
+        : null);
+  }
+
+  @override
+  void requestShared(String compId, int frame, int generation,
+      void Function(SharedFrame?) onFrame) {
+    final b = app.bridge;
+    onFrame(b is SharedTextureBridge
+        ? (b as SharedTextureBridge).renderToShared(compId, frame)
         : null);
   }
 

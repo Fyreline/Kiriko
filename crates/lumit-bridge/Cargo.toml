@@ -26,6 +26,14 @@ crate-type = ["cdylib", "rlib"]
 default = ["media", "render"]
 media = ["dep:lumit-media"]
 render = ["media", "dep:lumit-ui"]
+# The Windows zero-copy Viewer path (K-177). OFF by default so the standard
+# build and every gate stay identical to today; the owner builds the shipped
+# `.dll` with `--features shared-texture` to turn it on. It implies `render`
+# (the compositor) and forwards to lumit-ui's own `shared-texture` feature,
+# which pins the D3D12 backend and pulls the shared-texture GPU code. The actual
+# D3D interop is `cfg(windows)`-gated on top, so enabling it off Windows is
+# inert. `lumit_bridge_shared_supported()` reports whether this build has it.
+shared-texture = ["render", "lumit-ui/shared-texture"]
 
 [dependencies]
 lumit-core = { path = "../lumit-core" }

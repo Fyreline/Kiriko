@@ -221,23 +221,79 @@ in `crate::retime`). Export lives in `crate::export`.
   where the playhead sits are Dart-owned state, so `SavedSession` stays a
   frontend concern (confirmed for this wave).
 
-## The Viewer texture path (Phase F2)
+## The Viewer texture path (Phase F2) — implemented, K-177
 
-Windows first, matching the project's priorities:
+Windows first, matching the project's priorities. This closes the recorded top
+performance gap (K-176): today's Viewer makes a per-frame round trip — render on
+the GPU, read the pixels down to the CPU, copy them across FFI, upload them back
+to the GPU. The zero-copy path removes it. It is an **opt-in `shared-texture`
+feature**, off by default so every existing build and CI gate is unchanged; the
+owner builds the shipped `.dll` with `--features shared-texture` (see below).
+The friend's diagnosis was exactly right — the readback/re-upload was the cost.
+
+The route actually shipped (the D3D12-direct one, not a separate D3D11 device):
 
 1. The engine renders the composited frame with wgpu exactly as today
-   (preview == export unchanged).
-2. wgpu runs over D3D12; the frame is copied into a **shared D3D11 texture**
-   (keyed mutex handshake), which Flutter's Windows embedder accepts as a
-   `GpuSurfaceTexture` through the texture registrar.
-3. Dart shows it with a `Texture(textureId: …)` widget inside the Viewer panel;
-   the pasteboard around it is `viewer_surround`, drawn by Flutter.
-4. Frame pacing stays engine-side (the K-171 cached/realtime scheduler);
-   Flutter just marks the texture frame available.
+   (preview == export == Flutter unchanged, K-031).
+2. wgpu runs over **D3D12**. The headless renderer reaches through wgpu to its
+   D3D12 device (`Device::as_hal`), creates the display target in a **shared
+   heap** — a `DXGI_FORMAT_R8G8B8A8_UNORM` texture with `D3D12_HEAP_FLAG_SHARED`
+   and `ALLOW_SIMULTANEOUS_ACCESS` — and exports an **NT handle**
+   (`ID3D12Device::CreateSharedHandle`). The same D3D12 resource is wrapped back
+   as a `wgpu::Texture` (`create_texture_from_hal`), so the normal render path
+   copies the finished, display-encoded frame into it (a valid srgb-differing
+   `copy_texture_to_texture` — the bytes are the identical sRGB-encoded pixels
+   the read-back path produced). `crates/lumit-gpu/src/shared.rs`.
+3. The bridge hands the handle across (`lumit_bridge_render_to_shared` →
+   `{handle, width, height}`, no bytes). The Windows runner registers it with
+   Flutter's texture registrar as a
+   **`kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle`** external texture — the
+   embedder opens the NT handle itself on its own ANGLE/D3D11 device, so the
+   runner holds no D3D device of its own. `windows/runner/viewer_texture_bridge.
+   {h,cpp}`, over the `lumit/viewer_texture` method channel; the Dart lifecycle
+   owner is `ViewerTextureController`.
+4. Dart shows it with a `Texture(textureId: …)` widget inside the Viewer panel;
+   the pasteboard around it is `viewer_surround`, drawn by Flutter. Frame pacing
+   stays engine-side; Flutter just marks the texture frame available (`frameReady`).
 
-The CPU fallback (no GPU) mirrors today's path: the bridge hands RGBA bytes and
-Dart blits them through a `ui.Image` — slower, but the slate/placeholder path
-already works that way.
+Why D3D12-direct rather than a dedicated D3D11 device (the documented
+alternative): it is self-contained (no second device, no D3D11-on-12, no
+cross-API copy) and it was verified end to end on the dev machine — the
+`solid_comp_renders_to_a_stable_shared_handle` test creates the shared resource,
+exports a non-zero handle, and re-uses it across frames on the real adapter. Under
+the feature the renderer pins the D3D12 backend (the interop needs it); every
+other build keeps the all-backends instance.
+
+**Synchronisation.** After the copy the renderer `poll(Wait)`s so Flutter never
+samples a half-written frame — zero CPU pixel work still, the bytes never leave
+the card. The texture is re-used each frame (a stable handle; a comp resize makes
+a new one), so a keyed-mutex / shared-fence handshake is the recorded follow-up,
+worth adding only if tearing shows in practice (D3D12 uses fences, not keyed
+mutexes, so a cross-API handshake is non-trivial and deferred until observed).
+
+**No new dependency.** The embedder plumbing (descriptor shape, the DXGI
+shared-handle surface type, the register / mark-frame-available dance) follows
+the MIT-licensed `flutter_wgpu_texture` package as a *reference* — pattern
+borrowed with a code-comment credit, not added as a dependency (it owns its own
+renderer/scene architecture, and is young). The `windows` crate is pinned to
+0.58 so its D3D12 types unify with the ones wgpu-hal already uses.
+
+**The read-back path REMAINS as the airtight, automatic fallback.**
+`lumit_bridge_shared_supported()` is false for an old `.dll`, a non-Windows
+build, or a feature-less build; `render_to_shared` returns false (Dart falls back
+for that frame) on no D3D12 adapter or any interop error; a missing platform
+channel (an unwired runner) latches the controller off for the session. Every
+seam degrades to today's RGBA-readback path (the bridge hands RGBA bytes and Dart
+blits them through a `ui.Image`), each covered by a fake in the Dart suite. The
+**Scopes** still need CPU pixels (the texture path moves none): a throttled
+read-back render (~10 Hz, `PreviewSource._maybeScopeRender`) feeds them while the
+texture drives the Viewer.
+
+**Building it.** The shipped `.dll`:
+`cargo build -p lumit-bridge --release --features shared-texture`. The runner
+plugin (`viewer_texture_bridge.cpp`) compiles only under `flutter build windows`
+on a real machine; it was written against the actual `flutter_windows` /
+texture-registrar headers but cannot be compiled in the docs-first sandbox.
 
 This is the only part of the port with real platform-specific plumbing; it is
 why the Viewer is its own phase.
@@ -293,9 +349,11 @@ piece. It is now closed on the CPU path:
   (the compositor draws `slate::colour_bars` for missing footage and composites
   it like any source), so the Viewer shows no separate slate on the comp path;
   its placeholder wording drops the "single-layer" caveat there.
-- **Still CPU.** This is the RGBA-readback path. The shared-texture path above
-  (zero-copy D3D11) remains the future optimisation; the seam it renders through
-  is the same `HeadlessRenderer`.
+- **CPU and zero-copy.** This is the RGBA-readback path; the zero-copy
+  shared-texture path (K-177, the "Viewer texture path" section above) is now
+  built on Windows behind the opt-in `shared-texture` feature and renders through
+  the same `HeadlessRenderer` (`render_to_shared`, a D3D12 shared NT handle). The
+  readback path remains as the automatic fallback and for the Scopes.
 
 ## Text, fonts, icons
 

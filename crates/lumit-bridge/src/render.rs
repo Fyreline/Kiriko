@@ -89,6 +89,26 @@ fn with_ready<R>(f: impl FnOnce(&mut lumit_ui::headless::HeadlessRenderer) -> R)
     Some(f(renderer))
 }
 
+/// Render composition `comp_id` at `frame` into the Windows shared GPU texture
+/// (K-177), returning `(handle, width, height)` — the zero-copy sibling of
+/// [`render_comp_frame`]. `None` on any failure (an unknown/invalid comp id, no
+/// D3D12 adapter, or a D3D interop error), which the FFI turns into `false` so
+/// Dart falls back to the read-back path. The handle is stable across frames
+/// (the same texture is re-used) and changes only on a comp resize. Present only
+/// in the opt-in shared-texture build on Windows.
+#[cfg(all(windows, feature = "shared-texture"))]
+pub(crate) fn render_to_shared(comp_id: &str, frame: u64) -> Option<(u64, u32, u32)> {
+    let comp = Uuid::parse_str(comp_id).ok()?;
+    let doc = with_bridge(|b| b.store.snapshot());
+    with_ready(|renderer| {
+        renderer
+            .render_to_shared(&doc, comp, frame)
+            .ok()
+            .map(|info| (info.handle, info.width, info.height))
+    })
+    .flatten()
+}
+
 /// Build the footage/audio inputs and a GPU export context for `comp` through
 /// the headless seam (K-175), so the export driver can hand them to the exact
 /// egui exporter (`lumit_ui::export::start`). `None` when the machine has no GPU
@@ -111,6 +131,19 @@ mod tests {
     #[test]
     fn a_bad_comp_id_is_none() {
         assert!(render_comp_frame("not-a-uuid", 0, 1.0).is_none());
+    }
+
+    /// The shared-texture path is `None` for a bad or unknown comp id, never a
+    /// panic — the null path the FFI turns into `false` for Dart's fallback.
+    /// (A real shared render against a live adapter is exercised in `lumit-ui`'s
+    /// headless tests, which own a synthetic document; the bridge's global
+    /// document is empty here.)
+    #[cfg(all(windows, feature = "shared-texture"))]
+    #[test]
+    fn shared_render_of_a_bad_or_unknown_comp_is_none() {
+        assert!(render_to_shared("not-a-uuid", 0).is_none());
+        let unknown = Uuid::now_v7().to_string();
+        assert!(render_to_shared(&unknown, 0).is_none());
     }
 
     /// A well-formed but unknown comp id is `None`. On a GPU-less machine the

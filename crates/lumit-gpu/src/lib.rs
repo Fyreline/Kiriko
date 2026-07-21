@@ -51,6 +51,19 @@ impl GpuContext {
 
     /// Headless context (tests, future CLI export).
     pub fn headless() -> Result<Self, GpuError> {
+        // When the zero-copy Viewer path is compiled in (K-177), pin the D3D12
+        // backend: the shared-texture hand-off reaches through wgpu to its D3D12
+        // device, so the renderer must actually be on D3D12 (not Vulkan). This
+        // only changes which Windows backend is chosen, not any pixel maths, and
+        // only in the opt-in shared-texture build; every other build is
+        // unchanged. Without the feature (or off Windows) this is the same
+        // all-backends instance as before.
+        #[cfg(all(windows, feature = "shared-texture"))]
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::DX12,
+            ..Default::default()
+        });
+        #[cfg(not(all(windows, feature = "shared-texture")))]
         let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -406,6 +419,11 @@ mod tests {
 pub mod composite;
 pub mod fx;
 pub mod oklab;
+/// The Windows-only zero-copy Viewer target (K-177). Present only in the opt-in
+/// `shared-texture` build on Windows; every other build has no shared texture at
+/// all, exactly as it had no D3D interop before.
+#[cfg(all(windows, feature = "shared-texture"))]
+pub mod shared;
 pub use composite::{
     camera_matrix, concat_place, place_matrix, Blend, CompositeLayer, Compositor, MatteInput,
     MbSample,
