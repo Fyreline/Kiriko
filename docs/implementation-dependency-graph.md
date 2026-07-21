@@ -238,7 +238,7 @@ flowchart TD
     AUDIDX["No-panic indexing in the audio callback (14 §4)"]
     HOTSWEEP["Hot-path sweep → enable indexing_slicing /<br/>arithmetic_side_effects lints (14 §4)"]
     FIXTURES["◑ Stress fixture DONE, reference comp remaining (13 §1, §7.3) —<br/>lumit-project::fixtures::stress_document builds the 13 §2.1 doc<br/>(200 comps / 5,000 layers / 250,000 keyframes / 2,000 footage)<br/>deterministically from fixed UUIDs, parameterised (TINY for tests,<br/>REFERENCE for the spec); determinism + spec-count + save/open tested.<br/>Remaining: the faithful 5-layer reference comp (§1, LUT/glow/retime)"]
-    BENCH["Headless benchmark harness B3–B11 (13 §7.3)"]
+    BENCH["◑ Benchmark harness started (13 §7.3) — a criterion bench<br/>(lumit-project/benches/document_scale) measures the document-scale<br/>S2–S5 on the REFERENCE stress fixture: save, open (~194 ms locally),<br/>commit, undo. Runs on demand (cargo bench); compiles in CI but is not<br/>a gate yet. Remaining: the B3–B11 render/playback/export benches<br/>(need the pixel-pass migration) and wiring budgets into CI (PERFCI)"]
     PERFCI["Perf budgets gate merges in CI (13 §7.3, 16)"]
     EXRGOLD["Golden-frame EXR tests per platform (14 §6)"]
     KITTEST["egui_kittest UI test harness"]
