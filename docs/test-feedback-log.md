@@ -561,3 +561,15 @@ hotkeys, and their absence makes testing feel clunky).
   file is where the project expects it". Threaded as a `ProjectFilter` rather than more
   loose parameters. Test:
   `missing_only_filter_keeps_the_path_to_broken_items`.
+
+- [x] TF-39 **Motion-blur icon replaced with the owner's own artwork.** Iconoir has no
+  motion-blur glyph — the stand-in was `fast-arrow-right`, which reads as "next", not
+  "blur". The new mark (a ring with speed streaks running into it, two rows broken by a
+  second dash) is *drawn* rather than typeset: `icons::draw_motion_blur` maps the SVG's own
+  24×24 coordinates onto whatever rect the caller gives, so it stays sharp at any size and
+  weight-matches the stroked Iconoir set around it without adding an asset or an SVG
+  rasteriser. `Icon::drawn()` marks such icons: they are exempt from the pack-resolution
+  test, and `icons::text` returns empty for them (the timeline's motion-blur master toggle
+  now allocates a chip and paints, rather than typesetting a glyph). Test:
+  `drawn_icons_paint_without_the_pack_and_have_no_text_form` counts the shapes `paint` adds
+  with no fonts installed — verified to fail if the drawing is skipped.
