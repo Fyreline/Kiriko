@@ -1,10 +1,17 @@
 // The live Project panel (phase F1 + the interactive slice): one row per
 // document item, folders nesting their children. A click selects (highlight); a
+// second click on the selected row renames it in place (→ `renameItem`); a
 // double-click opens a composition (fronts it) or places a footage item into the
 // front comp as a new layer; a right-click raises the egui project menu
 // (Composition settings / Relink / Find missing footage / Move to root / Delete);
-// and a footage row is Draggable onto the Timeline lane. An empty document shows
-// a quiet hint.
+// and a footage row is Draggable onto the Timeline lane. A missing footage row
+// wears a "missing" badge with an inline Relink… button (docs/07 §3.3), and a
+// "Show only missing footage" toggle appears in the header when anything IS
+// missing. An empty document shows a quiet hint.
+//
+// Thumbnails (docs/06 §5) await a `thumbnail` bridge binding — the perf pass is
+// to land one; until then the rows carry the type glyph only (annotated on the
+// ledger).
 
 import 'package:flutter/widgets.dart';
 
@@ -12,12 +19,54 @@ import '../bridge/bridge.dart';
 import '../icons/icons.dart';
 import '../shell/dialogs.dart';
 import '../state/app_state.dart';
+import '../state/file_dialogs.dart';
 import '../theme/theme.dart';
 import '../widgets/controls.dart';
 
-class ProjectPanel extends StatelessWidget {
+class ProjectPanel extends StatefulWidget {
   final AppStateStub app;
-  const ProjectPanel({super.key, required this.app});
+
+  /// The relink file picker seam (path chosen → its path, or null when
+  /// cancelled). Defaults to the real footage picker's single-file variant;
+  /// tests inject their own so no plugin channel opens.
+  final Future<String?> Function()? relinkPicker;
+
+  const ProjectPanel({super.key, required this.app, this.relinkPicker});
+
+  @override
+  State<ProjectPanel> createState() => _ProjectPanelState();
+}
+
+class _ProjectPanelState extends State<ProjectPanel> {
+  bool _missingOnly = false;
+
+  AppStateStub get app => widget.app;
+
+  Future<String?> _relink() async {
+    final picker = widget.relinkPicker;
+    if (picker != null) return picker();
+    final paths = await pickFootage();
+    return paths.isEmpty ? null : paths.first;
+  }
+
+  /// Every footage item id whose file is missing, across the snapshot tree.
+  Set<String> _missingIds(List<BridgeItem> items) {
+    final out = <String>{};
+    void walk(BridgeItem item) {
+      if (item.kind == BridgeItemKind.footage &&
+          item.status == BridgeMediaStatus.missing) {
+        out.add(item.id);
+      }
+      for (final c in item.children) {
+        walk(c);
+      }
+    }
+
+    for (final item in items) {
+      walk(item);
+    }
+    return out;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -39,9 +88,28 @@ class ProjectPanel extends StatelessWidget {
             ),
           );
         }
+        final missing = _missingIds(items);
+        // The filter only bites while something is missing; a healthy project
+        // never traps the user behind an empty "missing only" view.
+        final missingOnly = _missingOnly && missing.isNotEmpty;
+
         final rows = <Widget>[];
         void walk(BridgeItem item, int depth) {
-          rows.add(_ProjectRow(app: app, item: item, depth: depth));
+          // In missing-only mode, show only the missing footage rows (every
+          // visible row is then something to fix, docs/07 §3.3).
+          final show = !missingOnly ||
+              (item.kind == BridgeItemKind.footage && missing.contains(item.id));
+          if (show) {
+            rows.add(_ProjectRow(
+              key: ValueKey<String>('project-row-${item.id}'),
+              app: app,
+              item: item,
+              depth: depth,
+              missing: missing.contains(item.id),
+              relink: _relink,
+              onFindMissing: () => setState(() => _missingOnly = true),
+            ));
+          }
           for (final child in item.children) {
             walk(child, depth + 1);
           }
@@ -50,11 +118,67 @@ class ProjectPanel extends StatelessWidget {
         for (final item in items) {
           walk(item, 0);
         }
-        return ListView(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          children: rows,
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (missing.isNotEmpty)
+              _MissingHeader(
+                count: missing.length,
+                active: missingOnly,
+                onToggle: () => setState(() => _missingOnly = !_missingOnly),
+              ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                children: rows,
+              ),
+            ),
+          ],
         );
       },
+    );
+  }
+}
+
+/// The header strip shown when the project has missing footage: a count and a
+/// "show only missing" toggle (the egui missing-only control, panels.rs:176).
+class _MissingHeader extends StatelessWidget {
+  final int count;
+  final bool active;
+  final VoidCallback onToggle;
+  const _MissingHeader({
+    required this.count,
+    required this.active,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    return LumitTooltip(
+      message: active
+          ? 'Showing only missing footage — click to show everything'
+          : 'Show only missing footage',
+      child: GestureDetector(
+        key: const ValueKey('missing-toggle'),
+        behavior: HitTestBehavior.opaque,
+        onTap: onToggle,
+        child: Container(
+          height: 24,
+          color: active ? t.accent.withValues(alpha: 0.12) : t.surface1,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(
+            children: [
+              lumitIcon(LumitIcon.unlink, size: 13, color: t.warning),
+              const SizedBox(width: 6),
+              Text(
+                '$count missing file${count == 1 ? '' : 's'}',
+                style: t.small.copyWith(color: t.warning),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -63,15 +187,23 @@ class ProjectPanel extends StatelessWidget {
 /// reads well), the item name, indented 14 px per level. Selected rows carry the
 /// `surface2` highlight, hovered rows the `surface4` fill. A composition
 /// double-click fronts it; a footage double-click (or a drag onto the Timeline)
-/// places it as a layer; a right-click raises the project context menu.
+/// places it as a layer; a second click on the selected row renames it in place;
+/// a right-click raises the project context menu.
 class _ProjectRow extends StatefulWidget {
   final AppStateStub app;
   final BridgeItem item;
   final int depth;
+  final bool missing;
+  final Future<String?> Function() relink;
+  final VoidCallback onFindMissing;
   const _ProjectRow({
+    super.key,
     required this.app,
     required this.item,
     required this.depth,
+    required this.missing,
+    required this.relink,
+    required this.onFindMissing,
   });
 
   @override
@@ -80,9 +212,49 @@ class _ProjectRow extends StatefulWidget {
 
 class _ProjectRowState extends State<_ProjectRow> {
   bool _hover = false;
+  bool _renaming = false;
+  TextEditingController? _rename;
+  final FocusNode _renameFocus = FocusNode();
 
   AppStateStub get app => widget.app;
   BridgeItem get item => widget.item;
+
+  @override
+  void dispose() {
+    _rename?.dispose();
+    _renameFocus.dispose();
+    super.dispose();
+  }
+
+  void _startRename() {
+    setState(() {
+      _renaming = true;
+      _rename = TextEditingController(text: item.name);
+    });
+    _renameFocus.requestFocus();
+  }
+
+  void _commitRename() {
+    final text = _rename?.text.trim() ?? '';
+    if (text.isNotEmpty && text != item.name) {
+      app.renameItem(item.id, text);
+    }
+    setState(() {
+      _renaming = false;
+      _rename?.dispose();
+      _rename = null;
+    });
+  }
+
+  void _handleTap() {
+    // A second click on the already-selected row starts an in-place rename
+    // (the AE click-to-rename-when-selected gesture).
+    if (app.selectedProjectItem == item.id && !_renaming) {
+      _startRename();
+    } else {
+      app.selectProjectItem(item.id);
+    }
+  }
 
   void _handleDoubleTap() {
     switch (item.kind) {
@@ -93,9 +265,13 @@ class _ProjectRowState extends State<_ProjectRow> {
       case BridgeItemKind.folder:
       case BridgeItemKind.solid:
       case BridgeItemKind.unknown:
-        // Folders and solids have no double-click action (matching egui).
         break;
     }
+  }
+
+  Future<void> _doRelink() async {
+    final path = await widget.relink();
+    if (path != null) app.relink(item.id, path);
   }
 
   @override
@@ -108,7 +284,7 @@ class _ProjectRowState extends State<_ProjectRow> {
       onExit: (_) => setState(() => _hover = false),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => app.selectProjectItem(item.id),
+        onTap: _handleTap,
         onDoubleTap: _handleDoubleTap,
         onSecondaryTapDown: (d) {
           app.selectProjectItem(item.id);
@@ -116,36 +292,49 @@ class _ProjectRowState extends State<_ProjectRow> {
             context: context,
             app: app,
             item: item,
+            missing: widget.missing,
             position: d.globalPosition,
+            onFindMissing: widget.onFindMissing,
+            onRelink: _doRelink,
           );
         },
         child: Container(
-          height: 22,
+          constraints: const BoxConstraints(minHeight: 22),
           color: selected
               ? t.surface2
               : _hover
                   ? t.surface4
                   : null,
-          padding:
-              EdgeInsets.only(left: 6.0 + widget.depth * 14.0, right: 6),
+          padding: EdgeInsets.only(left: 6.0 + widget.depth * 14.0, right: 6),
           child: Row(
             children: [
-              lumitIcon(icon, size: 14, color: tint),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  item.name,
-                  style: t.body,
-                  overflow: TextOverflow.ellipsis,
-                ),
+              lumitIcon(
+                widget.missing ? LumitIcon.unlink : icon,
+                size: 14,
+                color: widget.missing ? t.warning : tint,
               ),
+              const SizedBox(width: 6),
+              Expanded(child: _nameOrEditor(t)),
+              if (widget.missing) ...[
+                const SizedBox(width: 6),
+                Text('missing',
+                    style: t.small.copyWith(color: t.warning)),
+                const SizedBox(width: 6),
+                LumitTooltip(
+                  message: 'Relink this file to its new location',
+                  child: HouseButton(
+                    key: ValueKey<String>('relink-${item.id}'),
+                    small: true,
+                    onPressed: _doRelink,
+                    child: Text('Relink…', style: t.small),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
       ),
     );
-    // A footage row is draggable onto the Timeline lane (the drop places it as a
-    // new layer). Non-footage rows are plain.
     if (item.kind == BridgeItemKind.footage) {
       return Draggable<FootageDragData>(
         data: FootageDragData(item.id, item.name),
@@ -157,9 +346,31 @@ class _ProjectRowState extends State<_ProjectRow> {
     return row;
   }
 
-  /// The icon and its tint for a kind. Footage/composition/solid take their
-  /// layer colours; folders take the muted text colour (they are structure, not
-  /// content); an unknown kind falls back to a plain muted dot-style icon.
+  Widget _nameOrEditor(LumitTheme t) {
+    if (_renaming && _rename != null) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+        decoration: BoxDecoration(
+          color: t.surface0,
+          borderRadius: BorderRadius.circular(t.tokens.controlRadius),
+          border: Border.all(color: t.accent),
+        ),
+        child: EditableText(
+          key: const ValueKey('rename-field'),
+          controller: _rename!,
+          focusNode: _renameFocus,
+          style: t.body,
+          cursorColor: t.accent,
+          backgroundCursorColor: t.surface2,
+          selectionColor: t.accent.withValues(alpha: 0.5),
+          onSubmitted: (_) => _commitRename(),
+          onTapOutside: (_) => _commitRename(),
+        ),
+      );
+    }
+    return Text(item.name, style: t.body, overflow: TextOverflow.ellipsis);
+  }
+
   (LumitIcon, Color) _iconFor(BridgeItemKind kind, LumitTheme t) =>
       switch (kind) {
         BridgeItemKind.footage => (LumitIcon.footage, t.layer.footage),
@@ -195,8 +406,9 @@ class _DragFeedback extends StatelessWidget {
 }
 
 /// The actions the project context menu can raise (the egui project row menu,
-/// panels.rs:909). Only [compSettings] is wired to a real op; the rest are
-/// honest notice stubs pending their bridge ops (see 05-PARITY-CHECKLIST).
+/// panels.rs:909). All are now wired to real v0.5 ops; the item set matches
+/// egui (Relink and Find missing footage on footage rows, Composition settings
+/// on comps).
 enum _ProjectMenuAction {
   compSettings,
   relink,
@@ -206,15 +418,17 @@ enum _ProjectMenuAction {
 }
 
 /// Show the project context menu at [position] and run the chosen action.
-/// Mirrors the egui item set; the entries without a bridge op speak through the
-/// status line rather than doing nothing.
 Future<void> showProjectContextMenu({
   required BuildContext context,
   required AppStateStub app,
   required BridgeItem item,
+  required bool missing,
   required Offset position,
+  required VoidCallback onFindMissing,
+  required Future<void> Function() onRelink,
 }) async {
   final isComp = item.kind == BridgeItemKind.composition;
+  final isFootage = item.kind == BridgeItemKind.footage;
   final action = await showLumitPopup<_ProjectMenuAction>(
     context: context,
     position: position,
@@ -224,18 +438,23 @@ Future<void> showProjectContextMenu({
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          MenuRow(
-            onPressed: () => close(_ProjectMenuAction.compSettings),
-            child: const Text('Composition settings…'),
-          ),
-          MenuRow(
-            onPressed: () => close(_ProjectMenuAction.relink),
-            child: const Text('Relink…'),
-          ),
-          MenuRow(
-            onPressed: () => close(_ProjectMenuAction.findMissing),
-            child: const Text('Find missing footage'),
-          ),
+          if (isComp)
+            MenuRow(
+              onPressed: () => close(_ProjectMenuAction.compSettings),
+              child: const Text('Composition settings…'),
+            ),
+          // Relink is offered on a missing footage row (egui: footage && missing).
+          if (isFootage && missing)
+            MenuRow(
+              onPressed: () => close(_ProjectMenuAction.relink),
+              child: const Text('Relink…'),
+            ),
+          // Find missing is offered on any footage row (egui panels.rs:923).
+          if (isFootage)
+            MenuRow(
+              onPressed: () => close(_ProjectMenuAction.findMissing),
+              child: const Text('Find missing footage'),
+            ),
           MenuRow(
             onPressed: () => close(_ProjectMenuAction.moveToRoot),
             child: const Text('Move to root'),
@@ -253,22 +472,19 @@ Future<void> showProjectContextMenu({
   switch (action) {
     case _ProjectMenuAction.compSettings:
       if (isComp) {
-        // Front the comp so the settings dialogue seeds and commits to it.
         app.frontCompSelect(item.id);
         await showCompositionSettingsDialog(context, app);
       } else {
         app.setNotice('Composition settings apply to a composition');
       }
     case _ProjectMenuAction.relink:
-      // Awaits a relink bridge op (05-PARITY-CHECKLIST).
-      app.setNotice('Relink — engine op arrives with the media relink pass');
+      await onRelink();
     case _ProjectMenuAction.findMissing:
-      app.setNotice('Find missing footage — engine op still to arrive');
+      onFindMissing();
     case _ProjectMenuAction.moveToRoot:
-      app.setNotice('Move to root — engine op still to arrive');
+      app.moveToRoot(item.id);
     case _ProjectMenuAction.delete:
-      // No delete-item bridge op exists yet (state.rs/edits.rs have only
-      // delete_layer); honest notice until one lands.
-      app.setNotice('Delete item — engine op still to arrive');
+      // The egui Delete has no confirm (panels.rs:935) — it is one undo step.
+      app.deleteItem(item.id);
   }
 }

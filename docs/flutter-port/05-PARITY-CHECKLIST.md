@@ -25,7 +25,18 @@ where the row is logic).
 - ☑ Bare-pane affordances: right-click "Pop out into its own window" (surfaces
   the multi-window notice for now); the corner drag grip built (2×3 dot grid,
   drags the pane exactly like a tab)
-- ☐ Pop out a panel into its own OS window (multi-window; deferred, see 04)
+- ☐ Pop out a panel into its own OS window (multi-window) — **BLOCKED with
+  evidence (2026-07-22, section-E burn-down)**. The pinned SDK (stable 3.44.7)
+  ships multi-window only as an `@internal`, feature-flag-gated experimental
+  surface (`_window.dart`; `isWindowingEnabled` reads a build-time flag that is
+  off by default, `_features.dart`) whose own header says not to use it in
+  production and to switch to the main channel — using it would fail the
+  `flutter analyze` gate. The community `desktop_multi_window` route runs each
+  window in its own engine/isolate (a separate Dart heap), so it cannot host a
+  panel over the SAME app state (the F0 requirement). Kept as the graceful
+  notice (`shell/shell.dart` `onPopOut`), no real window opened, tests never
+  spawn one. Full evidence on 06 §E. Re-attempt when the official API lands
+  un-gated on stable (flutter/flutter#30701).
 - ☑ Menu bar: File / Edit / Composition / Window with the full shipped item set
   (engine-backed items dispatch to the stub state and surface a notice)
 - ☑ Status line: notices, error tint rule, export-progress slot
@@ -39,8 +50,11 @@ where the row is logic).
   text-field focus gate
 - ☑ Panel stubs: all seven panels with real chrome (Viewer surround, scope
   graticule placeholder, timeline strip skeleton) so the workspace reads right
-- ☑ Splash boot card (K-008: centred card, boot lines, click to skip; the
-  engine's real boot log streams in at F1) — widget-tested
+- ☑ Splash boot card (K-008: centred card, boot lines; the engine's real boot
+  log now streams in — `app.bootLog()` from bridge v0.7, pulled once at start-up
+  and passed to `SplashOverlay(lines:)`; a bridge-less build falls back to the
+  canned chrome lines) — widget-tested (`splash_bootlog_test.dart`: streams a
+  supplied log, falls back on an empty/null one)
 - ☑ Active-panel accent edge (last click wins, one pane at a time) —
   widget-tested
 - ☐ Sharp/Round: Round cards ☑ (fill, radius, padding, gap, shadow); window
@@ -143,9 +157,12 @@ where the row is logic).
   engine resolves everything). Unit- and widget-tested. `preview_source.dart`,
   `viewer_panel.dart`
 - ◐ Transport: play/pause on a Ticker at the comp's rational fps, looping the
-  composition (mirrors the egui transport, which loops the work area); frame +
-  SMPTE timecode readout; `Full` resolution label as-is. Remaining: the
-  resolution ladder is engine-side (a later phase), so the label is static
+  **work area** `[in, out)` when one is set (else the whole comp) — a playhead
+  scrubbed outside snaps back to the start and a large step wraps modularly,
+  mirroring the egui transport (`playback.rs comp_cached_tick`); unit-tested via
+  the pure `workAreaLoopFrame` (`viewer_panel.dart`, 2026-07-22). Frame + SMPTE
+  timecode readout; `Full` resolution label as-is. Remaining: the resolution
+  ladder is engine-side (a later phase), so the label is static
 
 ## Bridge v0.2 data + ops (done, feeds F2/F3/F4)
 
@@ -186,9 +203,17 @@ where the row is logic).
   (all `SetLayerEffects`). Point/file/layer param kinds are read-back only
 - ◑ Footage probing on import/open (`media` feature): resolution, rate, frame
   count and status carried in the snapshot; missing files probe to `missing`,
-  never an error. Synchronous at this phase; not yet off-thread, no thumbnails
-- ◐ Transport ☑ (play/pause, frame + timecode, `Full` label); resolution picker
-  + realtime tier readout ☐ (the ladder is engine-side, a later phase)
+  never an error. Thumbnails ☑ (bridge v0.8 `thumbnail(item_id, max_edge)` —
+  decode-once + box-downscale + engine-side cache, exposed as the
+  `ThumbnailBridge` capability). Probing still **synchronous**, not off-thread —
+  a named, deferred follow-up (coupled to the synchronous probe consumers; see
+  06 §B)
+- ◐ Transport ☑ (play/pause, frame + timecode); resolution picker ☑ (Full/Half/
+  Third/Quarter `BareDropdown` driving `AppStateStub.previewScale`, honest
+  tooltip that it is a preview downsample). Named remainders: the perf-pass
+  `PreviewSource` still renders at scale 1.0 and must adopt `previewScale`; the
+  realtime-tier readout is engine `RealtimeController` machinery the bridge does
+  not run (a later phase). `viewer_panel.dart`
 - ☑ Missing-footage slate: generated colour bars (band-for-band from
   `lumit-media/src/slate.rs`, drawn from `documentColour`, never a bundled
   asset) with the item path overlaid; a present-but-unreadable file shows a
@@ -201,7 +226,18 @@ where the row is logic).
   held when a frame is momentarily unavailable (K-130). Scope maths ported
   one-for-one from `scopes.rs` and unit-tested. `scopes_panel.dart`,
   `scope_maths.dart`
-- ☐ Eyedropper magnifier; transform overlays
+- ◐ Viewer toolbar ☑ (Select/Hand/Shape/Pen tool row above the stage, the Shape
+  button's right-click Rectangle/Ellipse/Star picker, `AppStateStub.viewerTool`/
+  `viewerShape` mirroring the egui `ToolMode`/`ShapeKind`); a Shape drag commits
+  a default mask via `addMask` (geometry cannot cross — named remainder).
+  `viewer_toolbar.dart`
+- ◐ Viewer overlays ☑: the selected 2D layer's anchor crosshair, draggable to
+  move its Position (`setTransform`); the eyedropper magnifier (armed from a
+  colour param's dropper button, sampling the shown `PreviewSource` frame — or a
+  one-off `renderCompFrame` readback on the shared path — Shift+scroll widens the
+  average, a click commits through `setEffectParamColour`). Named remainders: the
+  pan-behind anchor maths, the bounding box and scale handles await the
+  `LayerMap` port. `viewer_overlays.dart`
 
 ## Bridge v0.4 export + Retime + last columns (done, feeds F3/F4)
 
@@ -265,12 +301,12 @@ where the row is logic).
   snapping rounds drags to whole seconds and marker frames — widget-tested
 - ☑ Bottom bar: zoom − / + / Fit + percentage readout, magnet snap toggle, graph
   lens toggle (kept from the F0 skeleton, zoom readout corrected to `zoom×100`).
-  Wave 3 adds the **composition motion-blur master** here (`_MotionBlurMaster`,
-  toggling `setMotionBlur` while preserving the shutter angle/phase/samples). The
-  egui frontend puts it in the Timeline top row; that strip is shared, so it sits
-  in the bottom bar for now — INTEGRATOR to move it up once the top row is owned
-  in one place. The leading cluster scrolls horizontally so it never overflows a
-  narrow panel — widget-tested
+  The leading cluster scrolls horizontally so it never overflows a narrow panel
+  — widget-tested
+- ☑ Composition **motion-blur master** (`_MotionBlurMaster`, toggling
+  `setMotionBlur` while preserving the shutter angle/phase/samples): now in the
+  Timeline **top row** beside the layer search, egui's home for it (moved off the
+  bottom bar, 2026-07-22) — widget-tested
 - ☑ Outline twirls + Transform property rows (wave 2): each layer row gains a
   disclosure twirl; open reveals a Transform group header and one 22 px row per
   transform property (Anchor point, Position, Scale, Rotation, Opacity — x/y
@@ -326,18 +362,32 @@ where the row is logic).
   map derivative, segment-at-frame, boundary hit-test/clamp) + widget-tested
   (appears with the lens + a footage selection; preset click stamps the playhead
   frame; →Rate surfaces the notice; boundary drag commits `dragBoundary`).
-  **Named remainder** (deliberately out of this slice — the egui graph editor's
-  own gaps or bridge-plumbing limits): the Retime **Time**/value (source-
-  position) lens and the transform value/speed graph (egui offers both, but the
-  bridge's graph ops are speed-lens only, so a non-footage or un-retimed
-  selection shows a calm hint rather than a value graph); the RATE/MAP
-  **type chips** and ease-name label (§9.4), **kink badges** (§6.1) and overrun
-  **hatching** (§7.2), per-boundary/per-segment **numeric % / t·s entry** fields
-  (§9.3), the boundary-drag **beat/frame snapping**, the Vegas default-lens
-  preference, and speed-keyframe (plain-store) drag handles
-- ☐ Remainder (still open): matte/blend/parent columns, the top-row MB-master
-  toggle, beat markers/cache bar, sequence sub-bars and the overrun HOLD hatch,
-  resizable outline column, keyframe copy/paste
+  **Named remainder** — the genuine parity gap (egui *ships* it, big build): the
+  Retime **Time**/value (source-position) lens and the transform value/speed
+  graph (`graph.rs:86-94`, K-078); egui draws both, the Flutter graph editor
+  ports only the speed lens, so a non-footage or un-retimed selection shows a
+  calm hint. Its dependents ride that build: the **Vegas default-lens preference**
+  (`graph.rs:164`, inert until the Time lens exists), **boundary beat/frame
+  snapping** on graph drags (`graph.rs:1616-1628`), and value-key bezier/speed
+  handles. **egui-gap verdicts (2026-07-22 — 04-RETIMING spec-only; verified
+  absent in graph.rs, excluded from parity):** RATE/MAP **type chips** + ease-name
+  label (§9.4), **kink badges** (§6.1), the graph's own **overrun hatching**
+  (§7.2 — egui hatches overrun only on the clip bar, `panel.rs:992`), and the
+  per-boundary/per-segment **numeric % / t·s entry** fields (§9.3 — no `TextEdit`/
+  `DragValue`/type-to-edit in graph.rs).
+- ☑ Timeline top row / session (wave 3, 2026-07-22): the composition
+  **motion-blur master** moved into the top row beside the layer search
+  (`timeline_panel.dart` `_MotionBlurMaster`); a **resizable outline column**
+  (the outline/lane divider drags `_outlineWidth`, session state); **keyframe
+  copy/paste** (Ctrl+C/V through the additive `AppStateStub.copySelectedKeyframes`
+  /`pasteKeyframes` seam the shell drives, clipboard logic + pure round-trip in
+  `keyframe_clipboard.dart`) — all unit/widget-tested
+- ☐ Remainder (blocked, verified 2026-07-22): matte/blend/parent columns;
+  **beat markers drawn distinctly** and **sequence sub-bars** and the **overrun
+  HOLD hatch** — all blocked on the snapshot (markers carry no kind
+  `snapshot.rs:137`; `BridgeLayer` has no `clips`; no `start_offset`/local in-out
+  for `overrun_span_secs`); the **cache bar** awaits a `cache_stats` Dart binding
+  (the `framecache.rs` FFI export landed, the Dart accessor did not)
 
 ## Phase F4 — editors (in progress)
 
@@ -350,12 +400,11 @@ First slice (2026-07-21):
 - ☑ Hierarchy: the front comp's layer tree — comp header (accent glyph + name),
   layers indented with the layer-type glyph/colour, precomp rows twirl open to
   reveal the nested comp's layers, click selects a layer by its stable id.
-  `hierarchy_panel.dart`, widget-tested. Nesting is resolved by matching the
-  precomp layer's *name* against the project's compositions, because snapshot v2
-  tagged a precomp only as `kind:"precomp"`. Snapshot v3 now carries
-  `source_comp_id` (and `source_item_id`/`colour`), so the panel can match by id
-  and comp-scoped selection becomes possible — a panel adoption still to land.
-  The full project flowchart / node graph is later.
+  `hierarchy_panel.dart`, widget-tested. Nesting is now resolved by the precomp
+  layer's `source_comp_id` (snapshot v4), with a by-name fallback for a pre-v4
+  snapshot; selecting a nested layer fronts its owning composition first, then
+  selects it (comp-scoped selection), mirroring the egui hierarchy click. Cycle-
+  guarded by comp id. The full project flowchart / node graph is later.
 - ◐ Effect controls: the selected layer's **Transform** rows and its **effect
   stack**, in the settings-card style. `effect_controls_panel.dart`, widget-
   tested (`f4_effects_test.dart`).
@@ -382,20 +431,19 @@ First slice (2026-07-21):
     (`setEffectParamScalar`, unclamped drag since ranges are not in the
     snapshot), colour as a swatch opening `showColourPicker`
     (`setEffectParamColour`), and the three `channel_colour_1..3` params folded
-    into one channel-picker row (K-143). enum/bool/seed/point/file/layer show
-    their value read-only with an "edits arrive with the matching bridge op"
-    tooltip — no faked edits.
-  - Named remainder: the bridge now exposes (v0.7) the enum/bool/seed/point
-    parameter setters (`set_effect_param_choice`/`_bool`/`_seed`/`_point`), the
-    param **ranges** in the snapshot (`range: {min, max, slider_min, slider_max}`
-    or `{options}`; `BridgeParamRange` parses them), effect **reorder**
-    (`reorder_effect`), and the single-undo **keyframe batch**
-    (`apply_keyframe_batch`, one `Op::Batch` for a linked x/y pair) — with matching
-    `AppStateStub` pass-throughs. Still to wire in the panel (section D): the
-    enum/bool/seed/point controls, the range-clamped drags, drag-to-reorder, and
-    the linked-pair batch on Anchor/Position/Scale. Still no bridge surface:
-    file/layer parameter edits, per-parameter keyframe stopwatch/navigator, and
-    the eyedropper.
+    into one channel-picker row (K-143). **enum/bool/seed/point are now editable**
+    (section D): enum as a `BareDropdown` over the range's option labels
+    (`setEffectParamChoice`), bool as a `HouseCheckbox` (`setEffectParamBool`),
+    seed as a `DragValueField` (`setEffectParamSeed`), point as an x/y pair
+    (`setEffectParamPoint`); a scalar drag now clamps to the range and paces its
+    sensitivity by the slider span (`BridgeParamRange`). A colour param carries an
+    **eyedropper** dropper button (arms the Viewer sample). file/layer stay
+    read-only. `effect_controls_panel.dart`, widget-tested (`section_d_test.dart`).
+  - Named remainders: drag-to-reorder (`reorder_effect`) and the linked-pair
+    keyframe batch on Anchor/Position/Scale (`apply_keyframe_batch`) are still to
+    wire; no bridge surface for file/layer parameter edits or per-parameter
+    keyframe stopwatch/navigator (only value setters exist — no effect-param
+    keyframe ops).
 - ☑ Comp settings: the composition-settings / new-composition dialogue in the
   Settings-window visual style (name, size, frame-rate preset dropdown,
   duration), shown through the app Overlay. `dialogs.dart`, wired from the
@@ -412,14 +460,16 @@ First slice (2026-07-21):
   effects listed, applied to the selected layer of the front comp
   (`app.addEffect`) by double-clicking a row or the Add button that appears on
   a hovered row; no selected layer shows a quiet hint. `effects_presets_panel.
-  dart`, widget-tested (`f4_effects_test.dart`). The egui `effects_panel` groups
-  the built-ins by `FxCategory` and lists user presets above them; the Dart
-  registry now carries the category (v0.7: `BridgeEffectInfo {name, label,
-  category, categoryLabel}` from `list_effects`), so the panel **can** group —
-  the grouping UI itself is the section-D wave. Named remainder: the `.lumfx`
-  **preset save/load** (needs the file + preset bridge ops — a placeholder row at
-  the bottom says exactly that), the category-grouping UI, and drag-onto-a-layer
-  application.
+  dart`, widget-tested (`f4_effects_test.dart`, `section_d_test.dart`). Effects
+  are now **grouped under collapsing category headers** (the registry's
+  `category`/`categoryLabel`, v0.7) — an uncategorised registry lists flat. Each
+  row is **Draggable** and the Effect controls panel is a `DragTarget` that
+  applies a dropped effect to the shown layer (`addEffect`). Named remainders: the
+  `.lumfx` **preset save/load** cannot round-trip byte-compatibly from the
+  snapshot (it flattens each effect's `EffectKey` — namespace/version dropped —
+  and each parameter's animation), so it awaits a preset bridge op (serialising
+  the engine `EffectInstance`) or an `EffectInstance` read-back; and the
+  Timeline-row drop target awaits the timeline agent's `DragTarget` seam.
 - ☑ Add mask ▸ Rectangle/Ellipse/Star: wired from the **layer context menu**
   (`addMask`, wave 3) and from the **Composition ▸ Add mask** menu bar
   (`shell/menu_bar.dart:90-94` → `addMaskToSelected`, corrected 2026-07-22 audit —
@@ -535,7 +585,18 @@ dart` (off-thread renderer) and `test/timeline_columns_session_test.dart`
      "shared-texture path" row). **Done (K-177)**, shipped as a D3D12 shared NT
      handle (not the D3D11 route the earlier note guessed at); a keyed-mutex
      handshake is its own named follow-up.
-  Items 1 and 2 not started; item 3 done.
+  Items 1, 2 and 3 **done** (bridge v0.8, ABI 8). Item 1: the bridge-side
+  rendered-frame cache (`crates/lumit-bridge/src/framecache.rs`), keyed
+  `(comp, frame, scale, document epoch)` where the epoch is the pinned identity
+  of the current `Arc<Document>` snapshot — an ABA-safe mirror of egui's
+  `Arc::as_ptr` doc-identity; a re-scrubbed frame skips the GPU (render-counter
+  test), with `clear_cache`/`set_cache_budget`/`cache_stats` FFI. Item 2:
+  engine-side cancellation (`cancel.rs` + `render_comp_frame_gen` +
+  `render_cancel_stale`), the worker threading its latest-wins generation and
+  `PreviewSource` publishing it so a stale render queued behind the renderer
+  lock is skipped before it starts (the granularity the monolithic headless
+  render allows, reported honestly). The remaining keyed-mutex handshake stays a
+  verify-first follow-up (06 §B).
 
 ## Desk-test round 2 findings (owner, 2026-07-22)
 
@@ -553,12 +614,12 @@ The owner wants right-click menus everywhere egui offers one. Per-surface audit
 |---|---|---|---|
 | Bare pane | Pop out into its own window (`shell/dock.rs:231`) | Yes — Pop out, surfaces the multi-window notice (`shell/dock_widget.dart:642`) | **parity** (pop-out itself still deferred) |
 | Layer row (outline name) | Rename · Add effect ▸ (categorised) · Add mask ▸ · Duplicate · Delete · Solo · Enabled · Motion blur · Convert to sequenced · **Trim to source end** (retimed footage) (`shell/timeline/menu.rs:27`, opened at `timeline/panel.rs:816`) | Rename\* · Add effect\* · Add mask ▸ · **Blend mode ▸ · Matte ▸ · Parent ▸** · Duplicate · Delete · Solo · Enabled · Motion blur · Convert\* (`panels/timeline/layer_menu.dart`) | **partial** — Rename / Add effect / Convert are stubs (`app.engine(…)`, layer_menu.dart:152-156); **Trim to source end missing**; Add effect not categorised. Blend/Matte/Parent added deliberately (narrow column, K-note) |
-| Lane / property keyframe | Timeline lane key: right-click removes; graph-editor key: Easy ease · Linear · Hold · Unify handles · Delete key (`shell/graph.rs:1676`) | Property-row key right-click **removes only** (`panels/timeline/property_row.dart:137`) | **partial** — interpolation-set menu (Easy ease/Linear/Hold/Unify) missing; the graph-editor's own key right-click is entirely absent (`graph_editor.dart` has no `onSecondaryTap`) |
-| Empty timeline lane | Composition settings · Reveal in project · Show time grid · Beat sensitivity slider + Detect beats · Clear beat markers (`timeline/panel.rs:384`) | none | **whole menu missing** |
-| Comp-tab strip (empty space) | Pop out timeline (`shell/panels.rs:1139`) | none (`panels/timeline/comp_tabs.dart` is tap-only) | **missing** |
-| Project row | Composition settings · Relink… (missing footage) · Find missing footage · Move to root · Delete (`shell/panels.rs:909`) | Composition settings… · Relink… · Find missing footage · Move to root · Delete (`panels/project_panel.dart` `showProjectContextMenu`) | **parity of items** — Comp settings wired to the dialogue; Relink / Find missing / Move to root / Delete are honest notice stubs (no bridge ops yet) |
-| Viewer toolbar Shape tool | Rectangle / Ellipse / Star mask shape (`shell/app_update.rs:971`) | none — the Viewer has no draw-tool row | **missing** |
-| Value field (DragValue) | egui built-in Reset / Copy / Paste on every drag box | none (`DragValueField`) | **missing** (minor) |
+| Lane / property keyframe | Timeline lane key: right-click removes; graph-editor key: Easy ease · Linear · Hold · Unify handles · Delete key (`shell/graph.rs:1676`) | Lane key right-click opens Easy ease · Linear · Hold · Unify (broken bezier only) · Delete key (`panels/timeline/keyframe_interp_menu.dart`, wired at `property_row.dart`) | **parity for lane keys** (2026-07-22) — Easy ease = `EASY_EASE`, Unify averages both slopes keeping each reach; a multi-selection all take the choice (per-key `setKeyframeInterp`, multi-delete via `applyKeyframeBatch`). The **graph-editor** key menu rides the unbuilt transform value graph (no value keys to right-click yet) |
+| Empty timeline lane | Composition settings · Reveal in project · Show time grid · Beat sensitivity slider + Detect beats · Clear beat markers (`timeline/panel.rs:384`) | Composition settings… · Reveal in project · Show time grid · Beat sensitivity slider + Detect beats · Clear beat markers (`panels/timeline/lane_context_menu.dart`) | **parity** (2026-07-22) — Reveal → `selectProjectItem`; grid is session-only lane state; Detect/Clear → `detectBeats`/`clearBeatMarkers` |
+| Comp-tab strip (empty space) | Pop out timeline (`shell/panels.rs:1139`) | Pop out timeline → the multi-window notice (`panels/timeline/comp_tabs.dart`) | **parity** (2026-07-22, pop-out itself deferred to E — same notice the dock seam uses) |
+| Project row | Composition settings · Relink… (missing footage) · Find missing footage · Move to root · Delete (`shell/panels.rs:909`) | Composition settings… · Relink… (missing only) · Find missing footage (footage) · Move to root · Delete (`panels/project_panel.dart` `showProjectContextMenu`) | **parity** — Relink/Find-missing are footage-scoped as in egui; Comp settings opens the dialogue; Relink→`relink`, Find missing→missing-only filter, Move to root→`moveToRoot`, Delete→`deleteItem` (no confirm, as egui). Missing rows carry a "missing" badge + inline Relink…; a second click renames in place (`renameItem`) |
+| Viewer toolbar Shape tool | Rectangle / Ellipse / Star mask shape (`shell/app_update.rs:971`) | Select/Hand/Shape/Pen tool row + Shape right-click Rectangle/Ellipse/Star picker (`panels/viewer_toolbar.dart`) | **parity** — tool state on `AppStateStub.viewerTool`/`viewerShape`; a Shape drag commits a default mask (`addMask` carries no geometry — named remainder) |
+| Value field (DragValue) | egui built-in Reset / Copy / Paste on every drag box | Reset / Copy / Paste on `DragValueField` (`widgets/controls.dart`, 2026-07-22) | **done** — Copy/Paste via the system clipboard (parse-on-paste with the field's clamp); Reset shows only when a call site passes the new optional `resetTo` default. **Call-site wiring still wanted** (all in other agents' files, `resetTo` defaults null so nothing breaks): `settings_window.dart` (Default::default numbers), `effect_controls_panel.dart` transform rows (the property default), `dialogs.dart` comp-settings (the defaults) |
 | Dock tab pill (inside a tab group) | none (egui gives only bare panes a menu) | none | parity |
 
 ### 2. "The layer area being in the wrong order" — investigated
@@ -653,35 +714,63 @@ is a genuine miss (fires even with a live bridge) unless marked otherwise.
   Timeline, and a **right-click** raises the egui project menu (Composition
   settings…, Relink…, Find missing footage, Move to root, Delete). Composition
   settings opens the existing dialogue (fronting that comp first); the other four
-  are honest notice stubs — **Delete** has no delete-item bridge op yet (state.rs
-  / edits.rs carry only `delete_layer`), and Relink / Find missing footage /
-  Move to root await their engine ops. Widget-tested. Still open: thumbnails, the
-  missing-footage badge, rename, and the four stubbed menu ops.
+  are now **wired to real v0.5 ops** — Relink→`relink` (via a footage picker seam),
+  Find missing footage→a missing-only filter toggle, Move to root→`moveToRoot`,
+  Delete→`deleteItem` (no confirm, as egui). Missing footage rows carry a
+  crossed-link **"missing" badge** + an inline **Relink…** button and a header
+  "show only missing" toggle; a **second click on a selected row renames it in
+  place** (`renameItem`). Widget-tested (`section_d_test.dart`). Still open:
+  **thumbnails** — the `thumbnail` bridge binding (`ThumbnailBridge`, v0.8) has
+  landed; rendering it in the rows (async `DecodedFrame`→image + cache) is the
+  remaining step.
 
 ### Settings & window
 
-- ☐ **UI-scale persisted but never applied.** The Interface page writes
-  `ws.interface.uiScale` (`shell/settings_window.dart:276-284`) and it round-trips
-  to the workspace JSON, but **nothing consumes it** — no `MediaQuery` /
-  `TextScaler` / window-metrics wiring exists in `flutter_ui/lib`, so the slider is
-  inert. egui applies UI scale on slider release (K-117, 02-UI-INVENTORY §10).
-- ☐ **Cache controls stubbed.** Performance page "Clear cache"
-  (`settings_window.dart:334`) and "Choose cache root folder"
-  (`settings_window.dart:367`) call `app.engine(…)`; no bridge cache op backs them.
-- ◐ **Tooltip coverage is partial.** `LumitTooltip` exists and honours "Show
-  tooltips", but it is applied to only a subset of controls (effects list, effect-
-  controls rows, dock grip, Viewer play, a few timeline buttons, graph header).
-  Many egui `on_hover_text` surfaces have none yet — layer switches, transport
-  step/loop buttons, the ruler, the scopes header. Breadth gap, not a defect.
+- ☑ **UI-scale applied (2026-07-22, section-E).** `main.dart` wraps the shell in
+  `UiScaleView` (`widgets/ui_scale.dart`), the Flutter counterpart of egui's
+  `ctx.set_pixels_per_point(scale)` — the whole interface scales, layout AND
+  hit-testing together. **Mechanism chosen and why**: a `Transform.scale` at the
+  top-left over an `OverflowBox` that hands the child constraints of
+  `logical = physical / scale`, so the child lays out at the scaled size and,
+  once Transform multiplies by `scale`, fills the window; `MediaQuery.size` is
+  corrected for descendants that read it. `Transform` carries the inverse matrix
+  into hit-testing (pointer events map correctly), and the transform is applied
+  to vector draw ops so glyphs stay crisp. Rejected alternatives (recorded): a
+  `MediaQuery.devicePixelRatio` override does nothing (the render tree reads the
+  real `FlutterView.devicePixelRatio`), and the genuine pipeline-DPR route needs
+  the experimental multi-window `View` API the pinned stable SDK gates behind an
+  `@internal` flag. Commit-on-release is already handled by the settings slider
+  (K-117). Widget-tested (`ui_scale_test.dart`: a 2× child lays out at half the
+  window yet paints full-window; a 1.5× tap still hits its target; 1× is a plain
+  pass-through). Range 0.75–2.0, mirroring egui.
+- ☑ **Cache controls wired (bridge v0.8).** Performance page "Clear cache"
+  calls `clear_cache` **and** empties the Dart decoded-frame LRU
+  (`AppStateStub.clearCache` → `PreviewSource.clearDecodedCache`); the Memory
+  budget field drives `set_cache_budget`. "Choose cache root folder" targets the
+  **disk** cache root the bridge does not have yet — the picker stays and its
+  hint now says the folder is remembered for the engine disk tier when it lands
+  (honest, not a fake op). `CacheControlBridge` capability + `cache_stats` export.
+- ◐ **Tooltip coverage — shell + widgets done (2026-07-22, section-E).**
+  `LumitTooltip` now also covers the status-line export-cancel button
+  (`shell/shell.dart`) and the dock bare-pane drag grip (`shell/dock_widget.dart`);
+  the dock tab pop-out button already had one. Deliberately none (egui parity)
+  on menu-bar items, the splash, command-palette rows and dock tab pills. The
+  remaining `on_hover_text` surfaces — layer switches, transport step/loop, the
+  ruler, the scopes header — live in the timeline/editors agents' files and are
+  their rows to cover, not shell + widgets.
 
 ### Editors & viewer
 
-- ◐ **Property editors beyond Transform — bridge ops landed (v0.7).** The setters
-  now exist: `set_text_content(text, size, fill)`, `set_solid(colour, size)` (via
-  the shared `SolidDef`, every layer using it updates), `set_camera_zoom`, with
-  `AppStateStub.setTextContent`/`setSolid`/`setCameraZoom` pass-throughs. Still
-  open: the editors themselves in `panels/effect_controls_panel.dart` (section D —
-  text content is the sharp one).
+- ☑ **Property editors beyond Transform — built (2026-07-22, section D).** The
+  Effect controls panel now shows a kind-specific asset group below Transform: a
+  **Text** group (multi-line content editor, size box, fill swatch →
+  `setTextContent`), a **Solid** group (colour swatch seeding from the snapshot's
+  `layer.colour`, width×height → `setSolid`), and a **Camera** group (zoom →
+  `setCameraZoom`). `effect_controls_panel.dart`, widget-tested
+  (`section_d_test.dart`). Named remainder — read-back: text content, solid size
+  and camera zoom are held in an `AppStateStub` session-edit map because the
+  snapshot does not carry them back (only the solid colour reads back); true
+  read-back awaits those snapshot fields.
 - ◐ **Retime reverse toggle and interpolation switch — bridge setters landed
   (v0.7).** `set_retime_reverse` and `set_retime_interpolation`
   (`nearest`/`blend`/`flow`) edit the store fields (seed identity when the layer
@@ -689,18 +778,29 @@ is a genuine miss (fires even with a live bridge) unless marked otherwise.
   the egui Flow toggle) + `AppStateStub.setRetimeReverse`/`setRetimeInterpolation`.
   Still open: the graph-header toggle/switch UI (`panels/timeline/graph_editor.dart`,
   section C).
-- ◐ **Recovery modal — bridge ops landed (v0.7), modal still to build.**
-  `list_autosaves` (pure folder scan, `[{slot, path}]`) and `restore_journal`
-  (open + replay the crash journal, reply carries `replayed`/`journal_total`) +
-  `AppStateStub.listAutosaves`/`restoreJournal`. The modal surface itself
-  (`shell/dialogs.dart`) is section E. NB the bridge does not yet *write* the
-  journal on commit, so restore currently finds a journal a prior session left
-  (named follow-up in 06 §A).
-- ◐ **Splash boot log — bridge op landed (v0.7), splash still to wire.**
-  `lumit_bridge_boot_log()` returns the engine's honest lines (library version,
-  ABI, compiled feature set — no fabricated module lines) + `AppStateStub.bootLog`.
-  Still open: streaming them into the splash (section E; the splash still shows
-  canned lines).
+- ☑ **Recovery modal built (2026-07-22, section-E).** `shell/recovery_dialog.dart`
+  — on launch with a bridge, `maybeShowRecovery` probes and, when a rotating
+  autosave is newer than the project's own file (the checkable stand-in for "the
+  last session ended without saving"), shows the three-option modal: **Restore
+  journal** (`app.restoreJournal`), **Open last save** (dismiss — the save is the
+  already-loaded document), **Open an autosave** (the whole `list_autosaves` list,
+  each slot a row → `app.openPath(path, rememberAs: project)`). Mirrors egui's
+  `dialogs.rs::recovery_modal` (no scrim-dismiss); Escape resolves to Open last
+  save, the neutral choice (egui has no Escape here — a benign enhancement).
+  Two honest limits, from the bridge shape: `restore_journal` REPLAYS as it
+  applies (no non-destructive "does a journal exist?" probe), so the trigger is
+  the autosave-newer signal and no change count is shown up front; and "Open an
+  autosave" loads the autosave content but the engine's own loaded path follows
+  it (the workspace still remembers the real project) until the bridge grows a
+  load-but-keep-path op. Unit + widget tested with a fake bridge and injected
+  file times (`recovery_test.dart` — probe decision, each option's callback,
+  Escape, the shell trigger). NB the bridge still does not *write* the journal on
+  commit (06 §A follow-up), so a journal is only found if a prior session left one.
+- ☑ **Splash boot log wired (2026-07-22, section-E).** The shell pulls
+  `app.bootLog()` once at start-up and passes it to `SplashOverlay(lines:)`
+  (`shell/shell.dart`, `shell/splash.dart`); a bridge-less build gets an empty
+  log and falls back to the canned chrome lines. Widget-tested
+  (`splash_bootlog_test.dart`).
 
 ### Unwired `app.engine(…)` action strings (full inventory)
 
@@ -716,7 +816,7 @@ not a true gap); "**stub**" = fires even with a live bridge.
 | Export comp | palette default / `shell/shell.dart:120` | fallback when no export opener is wired in that context |
 | Cut clip at playhead / Delete clip at playhead | menu bar (`menu_bar.dart:76-77`) | bridge op **landed** (v0.7, `AppStateStub.cutClipAtPlayhead`/`deleteClipAtPlayhead`); menu-bar repoint pending (section C) |
 | Detect beats (sensitivity N) / Clear beat markers | menu bar (`menu_bar.dart:87-89`) | bridge op **landed** (v0.7, `AppStateStub.detectBeats`/`clearBeatMarkers`); menu repoint pending (sections B/C) |
-| Clear cache / Choose cache root folder | settings (`settings_window.dart:334,367`) | **stub** — awaits a cache bridge op (section B) |
+| Clear cache / Choose cache root folder | settings (`settings_window.dart`) | Clear cache ☑ (`clear_cache` + Dart LRU); Memory budget → `set_cache_budget` ☑; cache-root folder is the future **disk** tier (hint says so, no fake op) |
 | Rename layer / Convert to sequenced layer | layer context menu (`layer_menu.dart:152-156`) | bridge op **landed** (v0.7, `AppStateStub.renameLayer`/`convertToSequenced`; `trimToSourceEnd` too); the in-place rename editor + Convert/Trim menu repoint pending (section C) |
 | Add effect (categorised) | layer context menu | bridge exposes the category now (v0.7 `list_effects` carries it); the categorised layer-menu picker is section C |
 

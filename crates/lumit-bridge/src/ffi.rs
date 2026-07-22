@@ -952,6 +952,234 @@ fn render_to_shared_buffer(_comp_id: &str, _frame: u64) -> Option<(u64, u32, u32
 }
 
 // ---------------------------------------------------------------------------
+// Bridge v0.8 (ABI 8): the rendered-frame cache (K-176) and its controls,
+// engine-side render cancellation, and the Project-panel thumbnail path.
+// ---------------------------------------------------------------------------
+
+/// Render composition `comp_id` at `frame` to RGBA8 with a latest-wins
+/// `generation` for engine-side cancellation (K-176) — the generation-aware
+/// sibling of [`lumit_bridge_render_comp_frame`]. Identical ownership contract
+/// (free with [`lumit_bridge_free_buffer`] passing the exact length). A frame
+/// already rendered under the current document is served from the bridge cache
+/// without touching the GPU; a cache **miss** whose `generation` has been
+/// superseded by a newer request returns null (the stale render is skipped
+/// engine-side rather than stealing the renderer lock). The Dart worker passes
+/// its own monotonic generation so a scrub aborts stale renders. Null with
+/// zeroed outs on any failure (unknown comp, no adapter, or a superseded miss).
+///
+/// # Safety
+/// `comp_id` must be null or a valid NUL-terminated UTF-8 C string. `out_w`,
+/// `out_h` and `out_len` must each be null or a valid, writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_render_comp_frame_gen(
+    comp_id: *const c_char,
+    frame: u64,
+    scale: f32,
+    generation: u64,
+    out_w: *mut u32,
+    out_h: *mut u32,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let write_zero = || {
+        if !out_w.is_null() {
+            *out_w = 0;
+        }
+        if !out_h.is_null() {
+            *out_h = 0;
+        }
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+    };
+
+    let Some(id) = c_str_to_string(comp_id) else {
+        write_zero();
+        return ptr::null_mut();
+    };
+
+    let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_to_buffer_gen(&id, frame, scale, generation)
+    }))
+    .ok()
+    .flatten();
+
+    match rendered {
+        Some((w, h, bytes)) => {
+            let len = bytes.len();
+            let raw = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+            if !out_w.is_null() {
+                *out_w = w;
+            }
+            if !out_h.is_null() {
+                *out_h = h;
+            }
+            if !out_len.is_null() {
+                *out_len = len;
+            }
+            raw
+        }
+        None => {
+            write_zero();
+            ptr::null_mut()
+        }
+    }
+}
+
+#[cfg(feature = "render")]
+fn render_to_buffer_gen(
+    comp_id: &str,
+    frame: u64,
+    scale: f32,
+    generation: u64,
+) -> Option<(u32, u32, Vec<u8>)> {
+    crate::render::render_comp_frame_gen(comp_id, frame, scale, generation)
+}
+
+#[cfg(not(feature = "render"))]
+fn render_to_buffer_gen(
+    _comp_id: &str,
+    _frame: u64,
+    _scale: f32,
+    _generation: u64,
+) -> Option<(u32, u32, Vec<u8>)> {
+    None
+}
+
+/// Mark every render generation below `generation` as superseded (K-176), so a
+/// stale comp render already queued behind the renderer lock is skipped when it
+/// wakes. The Dart worker calls this when it abandons a request without issuing a
+/// newer render. Stateless and always available (a no-op path in a build without
+/// `render`). Returns `{"ok":true}`.
+#[no_mangle]
+pub extern "C" fn lumit_bridge_render_cancel_stale(generation: u64) -> *mut c_char {
+    guard(move || {
+        crate::cancel::cancel_stale(generation);
+        json_ok()
+    })
+}
+
+/// Set the rendered-frame cache's RAM budget in **bytes** (Settings →
+/// Performance → Memory budget). Evicts down to the new budget immediately.
+/// Returns the fresh cache stats (see [`lumit_bridge_cache_stats`]).
+#[no_mangle]
+pub extern "C" fn lumit_bridge_set_cache_budget(bytes: u64) -> *mut c_char {
+    guard(move || {
+        let stats = crate::framecache::set_budget(bytes as usize);
+        cache_stats_json(stats)
+    })
+}
+
+/// Empty the rendered-frame cache now (Settings → Clear cache). Returns the
+/// fresh cache stats.
+#[no_mangle]
+pub extern "C" fn lumit_bridge_clear_cache() -> *mut c_char {
+    guard(|| cache_stats_json(crate::framecache::clear()))
+}
+
+/// The rendered-frame cache's current stats:
+/// `{"ok":true,"used_bytes","budget_bytes","entries","hits","misses"}`.
+#[no_mangle]
+pub extern "C" fn lumit_bridge_cache_stats() -> *mut c_char {
+    guard(|| cache_stats_json(crate::framecache::stats()))
+}
+
+/// Build the cache-stats reply from a `(used, budget, entries, hits, misses)`
+/// tuple.
+fn cache_stats_json(stats: (usize, usize, usize, u64, u64)) -> String {
+    let (used, budget, entries, hits, misses) = stats;
+    serde_json::json!({
+        "ok": true,
+        "used_bytes": used,
+        "budget_bytes": budget,
+        "entries": entries,
+        "hits": hits,
+        "misses": misses,
+    })
+    .to_string()
+}
+
+/// `{"ok":true}` — the shared reply for a stateless success with no payload.
+fn json_ok() -> String {
+    serde_json::json!({ "ok": true }).to_string()
+}
+
+/// Decode a representative frame of footage item `item_id` and downscale it so
+/// its longer edge is at most `max_edge`, returning tightly-packed RGBA8 (the
+/// Project-panel thumbnail path). Same ownership contract as
+/// [`lumit_bridge_decode_frame`] (free with [`lumit_bridge_free_buffer`] passing
+/// the exact length). The result is cached on the bridge, so each thumbnail
+/// decodes once. Null with zeroed outs on any failure (unknown/non-footage item,
+/// missing/unreadable file), and always null without the `media` feature.
+///
+/// # Safety
+/// `item_id` must be null or a valid NUL-terminated UTF-8 C string. `out_w`,
+/// `out_h` and `out_len` must each be null or a valid, writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn lumit_bridge_thumbnail(
+    item_id: *const c_char,
+    max_edge: u32,
+    out_w: *mut u32,
+    out_h: *mut u32,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let write_zero = || {
+        if !out_w.is_null() {
+            *out_w = 0;
+        }
+        if !out_h.is_null() {
+            *out_h = 0;
+        }
+        if !out_len.is_null() {
+            *out_len = 0;
+        }
+    };
+
+    let Some(id) = c_str_to_string(item_id) else {
+        write_zero();
+        return ptr::null_mut();
+    };
+
+    let thumb = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        thumbnail_to_buffer(&id, max_edge)
+    }))
+    .ok()
+    .flatten();
+
+    match thumb {
+        Some((w, h, bytes)) => {
+            let len = bytes.len();
+            let raw = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+            if !out_w.is_null() {
+                *out_w = w;
+            }
+            if !out_h.is_null() {
+                *out_h = h;
+            }
+            if !out_len.is_null() {
+                *out_len = len;
+            }
+            raw
+        }
+        None => {
+            write_zero();
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Resolve `id` to a thumbnail `(width, height, rgba)`. `None` on any failure.
+/// Without the `media` feature there is no decoder, so this is always `None`.
+#[cfg(feature = "media")]
+fn thumbnail_to_buffer(id: &str, max_edge: u32) -> Option<(u32, u32, Vec<u8>)> {
+    with_bridge(|b| crate::media::thumbnail(b, id, max_edge))
+}
+
+#[cfg(not(feature = "media"))]
+fn thumbnail_to_buffer(_id: &str, _max_edge: u32) -> Option<(u32, u32, Vec<u8>)> {
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Bridge v0.4: export, keyframe interpolation, Retime, and the timeline columns.
 // Each guards its body and returns a JSON reply (a refreshed snapshot for the
 // mutating ops, or a small purpose-built object for the reads/export).
@@ -1900,7 +2128,7 @@ mod tests {
         assert!(!ptr.is_null());
         let copied = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
         assert_eq!(parse(&copied)["ok"], json!(true));
-        assert_eq!(parse(&copied)["abi"], json!(7));
+        assert_eq!(parse(&copied)["abi"], json!(8));
         unsafe { lumit_bridge_free_string(ptr) };
 
         let snap_ptr = lumit_bridge_snapshot();
@@ -1986,6 +2214,73 @@ mod tests {
             unsafe { lumit_bridge_render_to_shared(id.as_ptr(), 0, &mut handle, &mut w, &mut h) };
         assert!(!ok);
         assert_eq!((handle, w, h), (0, 0, 0));
+    }
+
+    #[test]
+    fn cache_controls_report_stats_and_clear() {
+        // clear_cache and cache_stats always return a well-formed stats reply,
+        // and set_cache_budget round-trips the budget — in every build (the
+        // cache is always compiled; only its population is render-gated).
+        let cleared_ptr = lumit_bridge_clear_cache();
+        let cleared = unsafe { CStr::from_ptr(cleared_ptr) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { lumit_bridge_free_string(cleared_ptr) };
+        let v = parse(&cleared);
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["used_bytes"], json!(0));
+
+        let budget_ptr = lumit_bridge_set_cache_budget(64 * 1024 * 1024);
+        let budget = unsafe { CStr::from_ptr(budget_ptr) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { lumit_bridge_free_string(budget_ptr) };
+        let v = parse(&budget);
+        assert_eq!(v["budget_bytes"], json!(64 * 1024 * 1024));
+
+        let stats_ptr = lumit_bridge_cache_stats();
+        let stats = unsafe { CStr::from_ptr(stats_ptr) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { lumit_bridge_free_string(stats_ptr) };
+        assert_eq!(parse(&stats)["budget_bytes"], json!(64 * 1024 * 1024));
+
+        // Restore a sane default so other tests are unaffected.
+        let restore = lumit_bridge_set_cache_budget(512 * 1024 * 1024);
+        unsafe { lumit_bridge_free_string(restore) };
+    }
+
+    #[test]
+    fn render_cancel_stale_is_ok_and_freeable() {
+        let ptr = lumit_bridge_render_cancel_stale(1);
+        let reply = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+        unsafe { lumit_bridge_free_string(ptr) };
+        assert_eq!(parse(&reply)["ok"], json!(true));
+    }
+
+    #[test]
+    fn thumbnail_with_a_null_id_returns_null_and_zeroes_outs() {
+        let mut w: u32 = 7;
+        let mut h: u32 = 7;
+        let mut len: usize = 7;
+        let ptr = unsafe { lumit_bridge_thumbnail(ptr::null(), 128, &mut w, &mut h, &mut len) };
+        assert!(ptr.is_null());
+        assert_eq!((w, h, len), (0, 0, 0));
+    }
+
+    #[test]
+    fn render_comp_frame_gen_with_a_null_id_returns_null_and_zeroes_outs() {
+        let mut w: u32 = 9;
+        let mut h: u32 = 9;
+        let mut len: usize = 9;
+        let ptr = unsafe {
+            lumit_bridge_render_comp_frame_gen(ptr::null(), 0, 1.0, 1, &mut w, &mut h, &mut len)
+        };
+        assert!(ptr.is_null());
+        assert_eq!((w, h, len), (0, 0, 0));
     }
 
     #[test]

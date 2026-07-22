@@ -53,14 +53,34 @@ pub(crate) struct MediaInfo {
 
 /// Cached probe results keyed by footage item id. Always present on the bridge;
 /// populated on import/open when the `media` feature is on, cleared on new/open.
+/// Also holds the Project-panel thumbnail cache (one downscaled RGBA per
+/// `(item, max_edge)`), decoded once and reused (media feature).
 #[derive(Default)]
 pub(crate) struct MediaCache {
     map: HashMap<Uuid, MediaStatus>,
+    /// Downscaled thumbnails, keyed `(item id, max_edge)`. Populated lazily by
+    /// [`thumbnail`], cleared with the probe cache on new/open/relink.
+    #[cfg(feature = "media")]
+    thumbs: HashMap<(Uuid, u32), (u32, u32, Vec<u8>)>,
 }
 
 impl MediaCache {
     pub fn clear(&mut self) {
         self.map.clear();
+        #[cfg(feature = "media")]
+        self.thumbs.clear();
+    }
+
+    /// A cached thumbnail for `(id, max_edge)`, if one was decoded already.
+    #[cfg(feature = "media")]
+    fn thumb_get(&self, id: Uuid, max_edge: u32) -> Option<(u32, u32, Vec<u8>)> {
+        self.thumbs.get(&(id, max_edge)).cloned()
+    }
+
+    /// Store a decoded thumbnail for `(id, max_edge)`.
+    #[cfg(feature = "media")]
+    fn thumb_put(&mut self, id: Uuid, max_edge: u32, w: u32, h: u32, rgba: Vec<u8>) {
+        self.thumbs.insert((id, max_edge), (w, h, rgba));
     }
 
     /// Read a cached entry (used by the media-feature probe path).
@@ -160,6 +180,82 @@ pub(crate) fn decode_frame(
     decoder.frame_rgba(n, None).ok()
 }
 
+/// Decode a representative frame of footage item `item_id` and downscale it so
+/// its longer edge is at most `max_edge`, caching the result on the bridge's
+/// [`MediaCache`] so the Project panel decodes each thumbnail exactly once
+/// (`media` feature only). Frame 0 is the representative frame. `None` on any
+/// failure (unknown/non-footage item, missing/unreadable file, empty index) —
+/// the null the FFI turns into "no thumbnail". A `max_edge` of 0 is treated as
+/// 1; oversized values are clamped so a thumbnail never allocates unbounded.
+///
+/// The downscale never *upscales*: a source already within `max_edge` is
+/// returned at its own size, so a tiny clip is not blown up.
+#[cfg(feature = "media")]
+pub(crate) fn thumbnail(
+    bridge: &mut crate::state::Bridge,
+    item_id: &str,
+    max_edge: u32,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let id = Uuid::parse_str(item_id).ok()?;
+    let max_edge = max_edge.clamp(1, 4096);
+    if let Some(hit) = bridge.media.thumb_get(id, max_edge) {
+        return Some(hit);
+    }
+    let path = crate::state::footage_path(bridge, item_id)?;
+    let frame = decode_frame(&path, 0)?;
+    let (w, h, rgba) = downscale_to_max_edge(frame.width, frame.height, &frame.rgba, max_edge);
+    bridge.media.thumb_put(id, max_edge, w, h, rgba.clone());
+    Some((w, h, rgba))
+}
+
+/// Downscale tightly-packed RGBA8 `src` (`sw`×`sh`) so its longer edge is at
+/// most `max_edge`, preserving aspect. A box (area-average) filter — cheap and
+/// clean enough for a panel thumbnail. Returns the source unchanged when it
+/// already fits (never upscales) or when a degenerate size would result.
+#[cfg(feature = "media")]
+fn downscale_to_max_edge(sw: u32, sh: u32, src: &[u8], max_edge: u32) -> (u32, u32, Vec<u8>) {
+    if sw == 0 || sh == 0 || src.len() < (sw as usize * sh as usize * 4) {
+        return (sw, sh, src.to_vec());
+    }
+    let longer = sw.max(sh);
+    if longer <= max_edge {
+        return (sw, sh, src.to_vec());
+    }
+    let scale = f64::from(max_edge) / f64::from(longer);
+    let dw = ((f64::from(sw) * scale).round() as u32).max(1);
+    let dh = ((f64::from(sh) * scale).round() as u32).max(1);
+    let mut out = vec![0u8; dw as usize * dh as usize * 4];
+    let (sw_u, sh_u, dw_u, dh_u) = (sw as usize, sh as usize, dw as usize, dh as usize);
+    for dy in 0..dh_u {
+        // The source-row band this destination row averages over.
+        let y0 = dy * sh_u / dh_u;
+        let y1 = (((dy + 1) * sh_u).div_ceil(dh_u)).min(sh_u).max(y0 + 1);
+        for dx in 0..dw_u {
+            let x0 = dx * sw_u / dw_u;
+            let x1 = (((dx + 1) * sw_u).div_ceil(dw_u)).min(sw_u).max(x0 + 1);
+            let (mut r, mut g, mut b, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1 {
+                let row = sy * sw_u * 4;
+                for sx in x0..x1 {
+                    let i = row + sx * 4;
+                    r += u32::from(src[i]);
+                    g += u32::from(src[i + 1]);
+                    b += u32::from(src[i + 2]);
+                    a += u32::from(src[i + 3]);
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            let o = (dy * dw_u + dx) * 4;
+            out[o] = (r / n) as u8;
+            out[o + 1] = (g / n) as u8;
+            out[o + 2] = (b / n) as u8;
+            out[o + 3] = (a / n) as u8;
+        }
+    }
+    (dw, dh, out)
+}
+
 /// Load the cached frame index for `path` if one matches, else build it and try
 /// to cache it. `None` when the index cannot be built (unreadable/truncated).
 #[cfg(feature = "media")]
@@ -253,5 +349,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gone.mp4");
         assert!(decode_frame(&path, 0).is_none());
+    }
+
+    /// The thumbnail downscaler halves a 4×2 source to 2×1 with the longer edge
+    /// capped, preserves aspect, and averages the covered pixels.
+    #[cfg(feature = "media")]
+    #[test]
+    fn downscale_caps_the_longer_edge_and_averages() {
+        // 4×2 RGBA: left half red (255,0,0), right half green (0,255,0).
+        let mut src = Vec::new();
+        for _y in 0..2 {
+            for x in 0..4 {
+                if x < 2 {
+                    src.extend_from_slice(&[255, 0, 0, 255]);
+                } else {
+                    src.extend_from_slice(&[0, 255, 0, 255]);
+                }
+            }
+        }
+        let (w, h, out) = downscale_to_max_edge(4, 2, &src, 2);
+        assert_eq!((w, h), (2, 1), "longer edge (4) capped to 2, aspect kept");
+        assert_eq!(out.len(), 8);
+        // Left destination pixel averages the two red source columns → red.
+        assert!(out[0] > 200 && out[1] < 60, "left thumbnail pixel is red");
+        // Right destination pixel averages the two green source columns → green.
+        assert!(
+            out[4] < 60 && out[5] > 200,
+            "right thumbnail pixel is green"
+        );
+    }
+
+    /// A source already within `max_edge` is returned unchanged (never upscaled).
+    #[cfg(feature = "media")]
+    #[test]
+    fn downscale_never_upscales() {
+        let src = vec![7u8; 2 * 2 * 4];
+        let (w, h, out) = downscale_to_max_edge(2, 2, &src, 256);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(out, src);
+    }
+
+    /// The thumbnail cache round-trips through the bridge: an unknown item is
+    /// `None` (never a panic), and the cache stores keyed on `(item, max_edge)`.
+    #[cfg(feature = "media")]
+    #[test]
+    fn thumbnail_of_an_unknown_item_is_none() {
+        let mut bridge = crate::state::Bridge::new();
+        assert!(thumbnail(&mut bridge, "not-a-uuid", 128).is_none());
+        let unknown = Uuid::now_v7().to_string();
+        assert!(thumbnail(&mut bridge, &unknown, 128).is_none());
     }
 }

@@ -2226,6 +2226,25 @@ still need the actual numbers, and the fast path deliberately keeps the picture
 *off* ordinary memory, so the engine also does a slow copy a few times a second
 just to feed the Scopes, while the fast texture drives the Viewer itself.
 
+**Re-scrubbing a frame is now free (the frame cache, K-176).** Drawing one
+composited comp frame — every layer, transform, blend and effect — is the most
+expensive thing the Viewer does, and until now the Flutter app re-did it *every*
+time you passed over a frame, even one you had just seen. The old egui app never
+did that: it keeps a shelf of already-drawn frames in memory and, when you scrub
+back over one, just takes it off the shelf. The bridge now has the same shelf
+(`crates/lumit-bridge/src/framecache.rs`). Each finished frame is filed on the
+shelf under a label that says *which* comp, *which* frame, at *what* preview
+size, and *which version of the document* it belongs to — so scrubbing back and
+forth is a shelf lookup with no drawing at all. The "which version" part matters:
+the moment you edit anything, the document becomes a new version and every frame
+on the shelf is thrown away, because they now show the old picture — you can
+never be handed a stale frame. There is a size limit (a few hundred megabytes by
+default, adjustable in Settings → Performance); when the shelf is full the
+least-recently-seen frames are dropped to make room, and "Clear cache" empties it
+on demand. A companion tidy-up: when you scrub quickly, a frame you have already
+moved past no longer wastes a full draw finishing after you have gone — a newer
+request tells the engine "that one is stale, skip it" before it starts.
+
 **Where things are.** `docs/flutter-port/` holds the plan: `01` the strategy
 and phases, `02` an inventory of every surface the egui interface ships (the
 port's shopping list), `03` the bridge design, `04` a table mapping each egui
@@ -2579,3 +2598,38 @@ hidden: beat detection runs in one go here (the old app did it on a background
 thread — fine for short clips, a later change if long songs feel slow), and the
 crash-journal recovery can replay a journal a previous session left but the
 Flutter side does not yet *write* one on every edit (a named follow-up).
+
+**Finishing the chrome: the splash log, the recovery prompt, and making the
+whole interface bigger (section E).** Three of the remaining chrome pieces are
+now wired up. The **splash** — the little card that appears while the app starts
+— used to list four made-up steps ("workspace store", "theme"…); it now shows
+the engine's *own* honest boot lines (its version, which features it was built
+with) when the real library is present, and falls back to the old canned list
+only when it is not. The **recovery prompt** answers a simple worry: if the app
+closed unexpectedly last time, did you lose work. When Lumit opens a project and
+notices its automatic spare copies (the *autosaves*) are newer than the file
+itself — the tell-tale of a session that ended without saving — it puts up a
+small window offering three choices: replay the interrupted changes, keep the
+last saved version, or open one of the spare copies. Two honesties are written
+into it: the engine can only replay the interrupted changes by actually applying
+them (there is no way to peek first and count them), so the window is triggered
+by the "spare copy is newer" signal rather than by counting changes; and opening
+a spare copy loads its contents while still remembering the real project as the
+one you are working on. Finally, the **UI scale** slider in Settings now does
+something: dragging it makes the entire interface draw larger or smaller. The way
+this works is worth a sentence, because the obvious approaches are traps —
+telling Flutter a fake "pixel density" changes nothing, and simply blowing the
+picture up leaves the buttons in the wrong places for the mouse. Instead the
+whole app is *scaled like a drawing* (a `Transform`), but first given a smaller
+imaginary canvas to lay itself out on, so that once it is scaled back up it fills
+the window exactly — and because Flutter applies that same scaling to where your
+mouse clicks land, the buttons stay clickable and the text stays sharp. (The one
+genuinely seamless way, matching what the old egui app does internally, needs an
+experimental Flutter feature the pinned version keeps switched off — so this is
+the best available, and it is a good one.) The one piece of section E that could
+*not* be done is popping a panel out into its own separate desktop window: the
+pinned Flutter version only offers that behind an experimental, switched-off flag
+that our checks forbid using, and the add-on packages that fake it run each
+window as a wholly separate program that could not share the one live document —
+so pop-out stays the calm "arrives with multi-window support" note for now, with
+the full reasoning written down so a future version can pick it straight back up.

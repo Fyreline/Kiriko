@@ -49,22 +49,53 @@ static RENDERER: OnceLock<Mutex<Slot>> = OnceLock::new();
 /// id, no GPU adapter, or a render error — mirroring `decode_frame`'s null
 /// contract so the FFI boundary treats it as "no frame". `scale` of 1.0 is the
 /// comp's own resolution; a smaller positive value downsamples the output.
+///
+/// The result is served from the bridge-side rendered-frame cache
+/// ([`crate::framecache`]) when this comp/frame/scale was already rendered under
+/// the current document — a re-scrubbed frame skips the GPU entirely. The legacy
+/// (generation-less) entry point; [`render_comp_frame_gen`] adds latest-wins
+/// cancellation for the worker's newer calls.
 pub(crate) fn render_comp_frame(
     comp_id: &str,
     frame: u64,
     scale: f32,
 ) -> Option<(u32, u32, Vec<u8>)> {
+    render_comp_frame_gen(comp_id, frame, scale, 0)
+}
+
+/// [`render_comp_frame`] with a `generation` for latest-wins cancellation
+/// (K-176): a cache hit is served regardless of generation, but a cache **miss**
+/// aborts before the GPU render when a newer request has already superseded this
+/// one (see [`crate::cancel`]). So a stale render queued behind the renderer lock
+/// is skipped rather than stealing a full render from the frame the user wants.
+pub(crate) fn render_comp_frame_gen(
+    comp_id: &str,
+    frame: u64,
+    scale: f32,
+    generation: u64,
+) -> Option<(u32, u32, Vec<u8>)> {
     let comp = Uuid::parse_str(comp_id).ok()?;
-    // Take a cheap snapshot (an `Arc<Document>` clone) under the document lock,
-    // then release it before the slow GPU work under the renderer lock.
+    // Take a cheap snapshot (an `Arc<Document>` clone) under the document lock;
+    // its identity is this render's cache epoch. Released before the GPU work.
     let doc = with_bridge(|b| b.store.snapshot());
-    with_ready(|renderer| {
-        renderer
-            .render_rgba(&doc, comp, frame, scale)
-            .ok()
-            .map(|(rgba, w, h)| (w, h, rgba))
+    let key = crate::framecache::FrameKey::new(comp, frame, scale);
+    crate::framecache::get_or_render(&doc, key, || {
+        // A genuine miss: only render if this generation is still the latest
+        // wanted — the stale-request skip (checked once the renderer lock is in
+        // hand, the granularity the monolithic headless render allows).
+        // Generation 0 is the legacy, non-cancellable entry point (the old FFI
+        // call): it always renders and never touches the high-water mark.
+        if generation != 0 && !crate::cancel::should_render(generation) {
+            return None;
+        }
+        with_ready(|renderer| {
+            renderer
+                .render_rgba(&doc, comp, frame, scale)
+                .ok()
+                .map(|(rgba, w, h)| (w, h, rgba))
+        })
+        .flatten()
     })
-    .flatten()
 }
 
 /// Run `f` against the session-lifetime headless renderer, building it lazily on

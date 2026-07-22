@@ -70,15 +70,33 @@ class EffectControlsPanel extends StatelessWidget {
             ),
           );
         }
-        return ListView(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          children: [
-            _LayerTitle(layer: layer),
-            const SizedBox(height: 6),
-            _TransformGroup(app: app, compId: compId, layer: layer),
-            const SizedBox(height: 10),
-            _EffectStack(app: app, compId: compId, layer: layer),
-          ],
+        final resolvedLayer = layer;
+        // The whole panel is a drop target for an effect dragged from the
+        // Effects & presets panel — dropping applies it to this shown layer
+        // through `addEffect` (the drag-an-effect-onto-a-layer gesture, docs/07
+        // §7). The Timeline-row drop target awaits the timeline agent's seam.
+        return DragTarget<EffectDragData>(
+          onAcceptWithDetails: (details) =>
+              app.addEffect(compId, resolvedLayer.id, details.data.effectName),
+          builder: (context, candidate, rejected) => Container(
+            decoration: candidate.isNotEmpty
+                ? BoxDecoration(border: Border.all(color: t.accent, width: 1.5))
+                : null,
+            child: ListView(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              children: [
+                _LayerTitle(layer: resolvedLayer),
+                const SizedBox(height: 6),
+                _TransformGroup(app: app, compId: compId, layer: resolvedLayer),
+                // The kind-specific property group (Text / Solid / Camera),
+                // between Transform and the effect stack — mirroring where the
+                // egui inspector puts a layer's asset properties.
+                ..._assetGroup(app, compId, resolvedLayer),
+                const SizedBox(height: 10),
+                _EffectStack(app: app, compId: compId, layer: resolvedLayer),
+              ],
+            ),
+          ),
         );
       },
     );
@@ -140,6 +158,278 @@ class _Card extends StatelessWidget {
         Text(title!, style: t.small),
         const SizedBox(height: 4),
         surface,
+      ],
+    );
+  }
+}
+
+/// The kind-specific asset property group for the selected layer: a Text group
+/// for text layers, a Solid group for solids, a Camera group for cameras.
+/// Empty for every other kind. Values seed from the snapshot where it carries
+/// them (a solid's colour) and from the session-edit maps otherwise (text
+/// content, solid size, camera zoom — the snapshot does not carry these back).
+List<Widget> _assetGroup(AppStateStub app, String compId, BridgeLayer layer) {
+  final Widget? group = switch (layer.kind) {
+    BridgeLayerKind.text => _TextGroup(app: app, compId: compId, layer: layer),
+    BridgeLayerKind.solid =>
+      _SolidGroup(app: app, compId: compId, layer: layer),
+    BridgeLayerKind.camera =>
+      _CameraGroup(app: app, compId: compId, layer: layer),
+    _ => null,
+  };
+  if (group == null) return const [];
+  return [const SizedBox(height: 10), group];
+}
+
+/// The Text group: a multi-line content editor, a size box and a fill swatch,
+/// committed together through `setTextContent`. The content reads from the
+/// session-edit map (snapshot v5 carries no text read-back — annotated).
+class _TextGroup extends StatefulWidget {
+  final AppStateStub app;
+  final String compId;
+  final BridgeLayer layer;
+  const _TextGroup({
+    required this.app,
+    required this.compId,
+    required this.layer,
+  });
+
+  @override
+  State<_TextGroup> createState() => _TextGroupState();
+}
+
+class _TextGroupState extends State<_TextGroup> {
+  late final TextEditingController _content;
+  final FocusNode _focus = FocusNode();
+
+  TextContent get _held => widget.app.textContentFor(widget.layer.id);
+
+  @override
+  void initState() {
+    super.initState();
+    _content = TextEditingController(text: _held.text);
+    // Commit the content when the multi-line editor loses focus.
+    _focus.addListener(() {
+      if (!_focus.hasFocus) _commit(text: _content.text);
+    });
+  }
+
+  @override
+  void dispose() {
+    _content.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _commit({String? text, double? size, List<double>? rgba}) {
+    final content = _held.copyWith(text: text, size: size, rgba: rgba);
+    widget.app.commitTextContent(widget.compId, widget.layer.id, content);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    final held = _held;
+    return _Card(
+      title: 'Text',
+      rows: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('Content', style: t.small.copyWith(color: t.textSecondary)),
+              const SizedBox(height: 4),
+              LumitTooltip(
+                message: 'The text this layer shows (multi-line)',
+                child: Container(
+                  constraints: const BoxConstraints(minHeight: 44),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: t.surface0,
+                    borderRadius: BorderRadius.circular(t.tokens.controlRadius),
+                    border: Border.all(
+                        color: _focus.hasFocus ? t.accent : t.hairline),
+                  ),
+                  child: EditableText(
+                    key: const ValueKey('text-content'),
+                    controller: _content,
+                    focusNode: _focus,
+                    style: t.bodyPrimary,
+                    maxLines: null,
+                    cursorColor: t.accent,
+                    backgroundCursorColor: t.surface2,
+                    selectionColor: t.accent.withValues(alpha: 0.5),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Expanded(child: Text('Size', style: t.bodyPrimary)),
+              const SizedBox(width: 12),
+              SizedBox(
+                width: _cellWidth,
+                child: DragValueField(
+                  key: const ValueKey('text-size'),
+                  value: held.size,
+                  min: 1,
+                  max: 2000,
+                  speed: 0.5,
+                  decimals: 0,
+                  suffix: ' pt',
+                  onChanged: (v) => _commit(size: v.toDouble()),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Expanded(child: Text('Fill', style: t.bodyPrimary)),
+              const SizedBox(width: 12),
+              _ColourSwatch(
+                key: const ValueKey('text-fill'),
+                rgba: held.rgba,
+                onPicked: (r, g, b, a) => _commit(rgba: [r, g, b, a]),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The Solid group: a colour swatch (seeding from the snapshot's `layer.colour`)
+/// and a width×height size, committed together through `setSolid`. The size
+/// reads from the session-edit map (the snapshot carries no solid size —
+/// annotated).
+class _SolidGroup extends StatelessWidget {
+  final AppStateStub app;
+  final String compId;
+  final BridgeLayer layer;
+  const _SolidGroup({
+    required this.app,
+    required this.compId,
+    required this.layer,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    final rgba = app.solidColourFor(layer);
+    final size = app.solidSizeFor(layer.id);
+    return _Card(
+      title: 'Solid',
+      rows: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Expanded(child: Text('Colour', style: t.bodyPrimary)),
+              const SizedBox(width: 12),
+              _ColourSwatch(
+                key: const ValueKey('solid-colour'),
+                rgba: rgba,
+                onPicked: (r, g, b, a) =>
+                    app.commitSolid(compId, layer.id, [r, g, b, a], size),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Expanded(child: Text('Size', style: t.bodyPrimary)),
+              const SizedBox(width: 12),
+              SizedBox(
+                width: _cellWidth,
+                child: DragValueField(
+                  key: const ValueKey('solid-width'),
+                  value: size.width,
+                  min: 1,
+                  max: 16384,
+                  speed: 2,
+                  onChanged: (v) => app.commitSolid(compId, layer.id, rgba,
+                      SolidSize(v.round(), size.height)),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: Text('×', style: t.small),
+              ),
+              SizedBox(
+                width: _cellWidth,
+                child: DragValueField(
+                  key: const ValueKey('solid-height'),
+                  value: size.height,
+                  min: 1,
+                  max: 16384,
+                  speed: 2,
+                  onChanged: (v) => app.commitSolid(compId, layer.id, rgba,
+                      SolidSize(size.width, v.round())),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The Camera group: a zoom box, committed through `setCameraZoom`. The zoom
+/// reads from the session-edit map (the snapshot carries no camera zoom —
+/// annotated).
+class _CameraGroup extends StatelessWidget {
+  final AppStateStub app;
+  final String compId;
+  final BridgeLayer layer;
+  const _CameraGroup({
+    required this.app,
+    required this.compId,
+    required this.layer,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    final zoom = app.cameraZoomFor(layer.id);
+    return _Card(
+      title: 'Camera',
+      rows: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Expanded(child: Text('Zoom', style: t.bodyPrimary)),
+              const SizedBox(width: 12),
+              SizedBox(
+                width: _cellWidth,
+                child: DragValueField(
+                  key: const ValueKey('camera-zoom'),
+                  value: zoom,
+                  min: 1,
+                  max: 100000,
+                  speed: 1,
+                  decimals: 0,
+                  suffix: ' px',
+                  onChanged: (v) =>
+                      app.commitCameraZoom(compId, layer.id, v.toDouble()),
+                ),
+              ),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -717,49 +1007,166 @@ class _EffectParamRow extends StatelessWidget {
   Widget _paramControl(BuildContext context, LumitTheme t) {
     switch (param.kind) {
       case 'scalar':
-        // Ranges are not in the snapshot, so this is an unclamped drag with a
-        // gentle speed; the engine clamps on its side.
+        // Snapshot v5 carries the declared range: the drag clamps to min/max and
+        // paces its sensitivity by the slider span (a wide span drags coarser).
+        // An older library (no range) falls back to an unclamped gentle drag.
         final v = param.value is num ? (param.value as num).toDouble() : 0.0;
+        final range = param.range;
+        final min = range?.min ?? -1000000;
+        final max = range?.max ?? 1000000;
+        final span = (range?.sliderMax ?? max) - (range?.sliderMin ?? min);
+        final speed = range == null || span <= 0 ? 0.5 : (span / 200).abs();
         return SizedBox(
           width: _cellWidth,
           child: DragValueField(
             key: ValueKey<String>('fxparam-${effect.id}-${param.name}'),
             value: v,
-            min: -1000000,
-            max: 1000000,
-            speed: 0.5,
+            min: min,
+            max: max,
+            speed: speed <= 0 ? 0.5 : speed,
             decimals: 2,
             onChanged: (nv) => app.setEffectParamScalar(
                 compId, layer.id, effect.id, param.name, nv.toDouble()),
           ),
         );
       case 'colour':
-        return _ColourSwatch(
-          key: ValueKey<String>('fxcolour-${effect.id}-${param.name}'),
-          rgba: _rgbaOf(param.value),
-          onPicked: (r, g, b, a) => app.setEffectParamColour(
-              compId, layer.id, effect.id, param.name, r, g, b, a),
+        // A swatch, with an eyedropper button that arms a Viewer sample.
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _EyedropperButton(
+              key: ValueKey<String>('fxdropper-${effect.id}-${param.name}'),
+              onTap: () => app.armEyedropper(EyedropperArm(
+                compId: compId,
+                layerId: layer.id,
+                effectId: effect.id,
+                paramName: param.name,
+                alpha: _rgbaOf(param.value).length > 3
+                    ? _rgbaOf(param.value)[3]
+                    : 1.0,
+              )),
+            ),
+            const SizedBox(width: 4),
+            _ColourSwatch(
+              key: ValueKey<String>('fxcolour-${effect.id}-${param.name}'),
+              rgba: _rgbaOf(param.value),
+              onPicked: (r, g, b, a) => app.setEffectParamColour(
+                  compId, layer.id, effect.id, param.name, r, g, b, a),
+            ),
+          ],
         );
-      default:
-        // enum / bool / seed / point / file / layer: read-only until the
-        // matching bridge op lands. Show the value honestly, do not fake edits.
-        return LumitTooltip(
-          message: 'Edits arrive with the matching bridge op',
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 120),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: t.surface3,
-              borderRadius: BorderRadius.circular(t.tokens.controlRadius),
-            ),
-            child: Text(
-              _displayValue(param.value),
-              style: t.body.copyWith(color: t.textSecondary),
-              overflow: TextOverflow.ellipsis,
-            ),
+      case 'enum':
+        // A Choice: the option index. The range carries the option labels
+        // (snapshot v5); an older library shows the bare index read-only.
+        final options = param.range?.options ?? const [];
+        final index = param.value is num ? (param.value as num).toInt() : 0;
+        if (options.isEmpty) return _readOnly(t);
+        return BareDropdown<int>(
+          key: ValueKey<String>('fxenum-${effect.id}-${param.name}'),
+          value: index.clamp(0, options.length - 1),
+          options: [for (var i = 0; i < options.length; i++) i],
+          label: (i) => options[i],
+          onChanged: (i) => app.setEffectParamChoice(
+              compId, layer.id, effect.id, param.name, i),
+        );
+      case 'bool':
+        return HouseCheckbox(
+          key: ValueKey<String>('fxbool-${effect.id}-${param.name}'),
+          value: param.value == true,
+          onChanged: (v) => app.setEffectParamBool(
+              compId, layer.id, effect.id, param.name, v),
+        );
+      case 'seed':
+        final seed = param.value is num ? (param.value as num).toInt() : 0;
+        return SizedBox(
+          width: _cellWidth,
+          child: DragValueField(
+            key: ValueKey<String>('fxseed-${effect.id}-${param.name}'),
+            value: seed,
+            min: 0,
+            max: 2147483647,
+            speed: 1,
+            onChanged: (v) => app.setEffectParamSeed(
+                compId, layer.id, effect.id, param.name, v.round()),
           ),
         );
+      case 'point':
+        final xy = _rgbaOf(param.value); // tolerant [x, y]
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: _cellWidth,
+              child: DragValueField(
+                key: ValueKey<String>('fxpointx-${effect.id}-${param.name}'),
+                value: xy[0],
+                min: -1000000,
+                max: 1000000,
+                speed: 0.5,
+                decimals: 1,
+                onChanged: (v) => app.setEffectParamPoint(compId, layer.id,
+                    effect.id, param.name, v.toDouble(), xy[1]),
+              ),
+            ),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: _cellWidth,
+              child: DragValueField(
+                key: ValueKey<String>('fxpointy-${effect.id}-${param.name}'),
+                value: xy[1],
+                min: -1000000,
+                max: 1000000,
+                speed: 0.5,
+                decimals: 1,
+                onChanged: (v) => app.setEffectParamPoint(compId, layer.id,
+                    effect.id, param.name, xy[0], v.toDouble()),
+              ),
+            ),
+          ],
+        );
+      default:
+        // file / layer: read-only until the matching bridge op lands. Show the
+        // value honestly, do not fake edits.
+        return _readOnly(t);
     }
+  }
+
+  /// A read-only value chip (a kind with no editor yet: file / layer).
+  Widget _readOnly(LumitTheme t) => LumitTooltip(
+        message: 'Edits arrive with the matching bridge op',
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 120),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: t.surface3,
+            borderRadius: BorderRadius.circular(t.tokens.controlRadius),
+          ),
+          child: Text(
+            _displayValue(param.value),
+            style: t.body.copyWith(color: t.textSecondary),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      );
+}
+
+/// The eyedropper button beside a Colour parameter: arms a Viewer sample.
+class _EyedropperButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _EyedropperButton({super.key, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    return LumitTooltip(
+      message: 'Eyedropper: sample a colour from the Viewer',
+      child: HouseButton(
+        frameless: true,
+        small: true,
+        onPressed: onTap,
+        child: lumitIcon(LumitIcon.eyedropper, size: 13, color: t.textMuted),
+      ),
+    );
   }
 }
 

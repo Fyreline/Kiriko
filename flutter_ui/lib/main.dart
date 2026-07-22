@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'bridge/bridge.dart';
 import 'shell/shell.dart';
 import 'state/workspace.dart';
+import 'widgets/ui_scale.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,17 +26,21 @@ class LumitApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // WidgetsApp-level infrastructure only — no Material chrome
-    // (docs/flutter-port/04 "Why not Material chrome"). Phase F0 renders at
-    // native scale, exactly like a fresh egui install; the UI-scale setting
-    // starts applying when the setting is wired to the window in a later
-    // slice.
+    // (docs/flutter-port/04 "Why not Material chrome"). Settings → Interface →
+    // UI scale is applied here via [UiScaleView], the Flutter counterpart of
+    // egui's `ctx.set_pixels_per_point` — layout and hit-testing scale together
+    // (see widgets/ui_scale.dart for why this mechanism, not a devicePixelRatio
+    // override). The slider commits on release; this just reflects the value.
     return ListenableBuilder(
       listenable: workspace,
       builder: (context, _) => Directionality(
         textDirection: TextDirection.ltr,
         child: ColoredBox(
           color: workspace.theme.surface0,
-          child: LumitShell(workspace: workspace, bridge: bridge),
+          child: UiScaleView(
+            scale: workspace.interface.uiScale,
+            child: LumitShell(workspace: workspace, bridge: bridge),
+          ),
         ),
       ),
     );

@@ -335,10 +335,12 @@ void main() {
       expect(find.text('Tint'), findsOneWidget);
       expect(find.text('Mode'), findsOneWidget);
       expect(find.text('Invert'), findsOneWidget);
-      // The scalar has an editable value box; the read-only kinds show values.
+      // The scalar has an editable value box; the bool has an editable
+      // checkbox; the enum without declared options (this fake) stays a
+      // read-only value chip.
       expect(find.byKey(const ValueKey('fxparam-e1-radius')), findsOneWidget);
-      expect(find.text('2'), findsOneWidget); // enum value, read-only
-      expect(find.text('On'), findsOneWidget); // bool value, read-only
+      expect(find.text('2'), findsOneWidget); // enum value, read-only (no range)
+      expect(find.byKey(const ValueKey('fxbool-e1-invert')), findsOneWidget);
     });
 
     testWidgets('editing the scalar commits setEffectParamScalar',
@@ -365,7 +367,9 @@ void main() {
       await tester.pumpWidget(_host(EffectControlsPanel(app: app)));
       await tester.pump();
 
-      await tester.tap(find.byType(HouseCheckbox));
+      // The effect-enable checkbox is the first (the Invert bool param adds a
+      // second checkbox below it).
+      await tester.tap(find.byType(HouseCheckbox).first);
       await tester.pump();
       expect(fake.ops, contains('fxenabled:c1/l0/e1=false'));
 

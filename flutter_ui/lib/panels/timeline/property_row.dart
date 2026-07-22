@@ -15,6 +15,7 @@ import '../../theme/theme.dart';
 import '../../widgets/controls.dart';
 import 'key_glyph.dart';
 import 'key_nav.dart';
+import 'keyframe_interp_menu.dart';
 import 'lane_host.dart';
 import 'lane_scale.dart';
 import 'lane_selection.dart';
@@ -90,6 +91,34 @@ class _PropertyRowState extends State<PropertyRow> {
       HardwareKeyboard.instance.isShiftPressed ||
       HardwareKeyboard.instance.isMetaPressed;
 
+  /// Right-click a lane key: open the interpolation menu (Easy ease / Linear /
+  /// Hold / Unify / Delete). It applies to the whole lane selection when the
+  /// clicked key is part of a multi-selection, else to that key alone — the same
+  /// single-vs-selection split the egui graph context menu makes.
+  void _openInterpMenu(LaneKeyId hit, Offset globalPosition) {
+    BridgeKeyframe? hitKey;
+    for (final k in _keys) {
+      if (k.frame == hit.frame) {
+        hitKey = k;
+        break;
+      }
+    }
+    if (hitKey == null) return;
+    final sel = widget.host.selectedKeys;
+    final targets = (sel.contains(hit) && sel.length > 1)
+        ? Set<LaneKeyId>.from(sel)
+        : {hit};
+    showKeyframeInterpMenu(
+      context: context,
+      app: app,
+      compId: widget.compId,
+      hit: hitKey,
+      hitId: hit,
+      targets: targets,
+      position: globalPosition,
+    );
+  }
+
   void _stopwatch() {
     final frame = _playhead;
     for (final name in spec.props) {
@@ -136,7 +165,7 @@ class _PropertyRowState extends State<PropertyRow> {
                 },
                 onSecondaryTapDown: (d) {
                   final hit = _hitKey(d.localPosition.dx);
-                  if (hit != null) widget.host.keyRemove(hit);
+                  if (hit != null) _openInterpMenu(hit, d.globalPosition);
                 },
                 onHorizontalDragStart: (_) {
                   final hit = _hitKey(_downLocalX);

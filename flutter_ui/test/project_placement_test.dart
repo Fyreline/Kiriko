@@ -264,16 +264,17 @@ void main() {
       expect(app.selectedProjectItem, 'f0');
     });
 
-    testWidgets('right-click renders the egui item set and Composition settings '
-        'opens the dialogue', (tester) async {
+    testWidgets('a composition right-click shows the comp item set and '
+        'Composition settings opens the dialogue', (tester) async {
       final app = AppStateStub(bridge: _Fake());
       await tester.pumpWidget(_host(ProjectPanel(app: app)));
       await tester.tap(find.text('Scene'), buttons: kSecondaryButton);
       await tester.pumpAndSettle();
-      // The full egui project menu.
+      // A composition row: Composition settings, Move to root, Delete. Relink
+      // and Find missing footage are footage-only (egui panels.rs:916).
       expect(find.text('Composition settings…'), findsOneWidget);
-      expect(find.text('Relink…'), findsOneWidget);
-      expect(find.text('Find missing footage'), findsOneWidget);
+      expect(find.text('Relink…'), findsNothing);
+      expect(find.text('Find missing footage'), findsNothing);
       expect(find.text('Move to root'), findsOneWidget);
       expect(find.text('Delete'), findsOneWidget);
       // Composition settings opens the settings dialogue (title + Apply button).
@@ -283,14 +284,19 @@ void main() {
       expect(find.text('Apply'), findsOneWidget);
     });
 
-    testWidgets('a stub menu entry surfaces a calm notice', (tester) async {
+    testWidgets('a footage right-click shows Find missing / Move to root / '
+        'Delete, and no Relink for a present file', (tester) async {
       final app = AppStateStub(bridge: _Fake());
       await tester.pumpWidget(_host(ProjectPanel(app: app)));
       await tester.tap(find.text('clip.mp4'), buttons: kSecondaryButton);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Relink…'));
-      await tester.pumpAndSettle();
-      expect(app.notice, contains('Relink'));
+      // A present footage row: Find missing footage, Move to root, Delete. No
+      // Relink (that appears only on a missing file) and no Composition settings.
+      expect(find.text('Composition settings…'), findsNothing);
+      expect(find.text('Relink…'), findsNothing);
+      expect(find.text('Find missing footage'), findsOneWidget);
+      expect(find.text('Move to root'), findsOneWidget);
+      expect(find.text('Delete'), findsOneWidget);
     });
   });
 }

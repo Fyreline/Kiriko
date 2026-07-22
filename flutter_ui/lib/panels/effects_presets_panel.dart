@@ -1,15 +1,19 @@
-// The Effects & presets panel (phase F4): a search field over the built-in
-// effect registry (`app.listEffects()`), the matching effects listed, and
-// Apply — double-click a row, or the Add button on the hovered/selected row,
-// applies the effect to the selected layer of the front composition
-// (`app.addEffect`). No selected layer shows a quiet hint.
+// The Effects & presets panel (phase F-D): a search field over the built-in
+// effect registry (`app.listEffects()`), the matching effects grouped under
+// collapsing category headers (the registry's `category`/`categoryLabel`, from
+// bridge v0.5), and Apply — double-click a row, or the Add button on the hovered
+// row, applies the effect to the selected layer of the front composition. Each
+// row is also Draggable: dropping it on the Effect controls panel applies it to
+// the shown layer (a DragTarget there). No selected layer shows a quiet hint.
 //
-// The egui `effects_panel` (shell/panels.rs) groups the built-ins by
-// `FxCategory` and lists user `.lumfx` presets above them. The Dart registry
-// (`BridgeEffectInfo {name, label}`) carries no category, so the list here is
-// flat — the honest mirror of what the bridge exposes. The .lumfx preset
-// save/load stays out until the file + preset bridge ops exist; a placeholder
-// row at the bottom says exactly that.
+// Grounding: the egui `effects_panel` (crates/lumit-ui/src/shell/panels.rs)
+// groups the built-ins by `FxCategory` and lists user `.lumfx` presets above
+// them. The category grouping is now mirrored. The `.lumfx` preset save/load is
+// annotated below: it cannot round-trip byte-compatibly from the snapshot, which
+// flattens each effect's `EffectKey` (its namespace and version are dropped, only
+// the match name survives) and each parameter's animation — so a faithful preset
+// awaits a preset bridge op (which serialises the engine `EffectInstance`) or an
+// `EffectInstance` read-back in the snapshot.
 
 import 'package:flutter/widgets.dart';
 
@@ -30,6 +34,10 @@ class _EffectsPresetsPanelState extends State<EffectsPresetsPanel> {
   final TextEditingController _search = TextEditingController();
   final FocusNode _searchFocus = FocusNode();
   String _needle = '';
+
+  /// Collapsed category keys (empty = all open). Keyed by the stable category
+  /// machine key so the fold survives a rebuild.
+  final Set<String> _collapsed = {};
 
   @override
   void dispose() {
@@ -57,6 +65,14 @@ class _EffectsPresetsPanelState extends State<EffectsPresetsPanel> {
                 .where((e) => e.label.toLowerCase().contains(needle))
                 .toList();
 
+        // Group by category, preserving the registry's order (first-seen wins).
+        final groups = <String, _Category>{};
+        for (final e in shown) {
+          final key = e.category.isEmpty ? '' : e.category;
+          final label = e.categoryLabel.isEmpty ? 'Effects' : e.categoryLabel;
+          (groups[key] ??= _Category(key, label)).effects.add(e);
+        }
+
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -79,19 +95,13 @@ class _EffectsPresetsPanelState extends State<EffectsPresetsPanel> {
             Expanded(
               child: shown.isEmpty
                   ? _emptyHint(t, all.isEmpty, needle)
-                  : ListView.builder(
+                  : ListView(
                       padding: const EdgeInsets.symmetric(horizontal: 6),
-                      itemCount: shown.length,
-                      itemBuilder: (context, i) {
-                        final e = shown[i];
-                        return _EffectRow(
-                          info: e,
-                          canApply: canApply,
-                          onApply: canApply
-                              ? () => app.addEffect(compId, layerId, e.name)
-                              : null,
-                        );
-                      },
+                      children: [
+                        for (final group in groups.values)
+                          ..._categorySection(
+                              group, canApply, compId, layerId, needle),
+                      ],
                     ),
             ),
             _PresetPlaceholder(),
@@ -101,6 +111,38 @@ class _EffectsPresetsPanelState extends State<EffectsPresetsPanel> {
     );
   }
 
+  /// A category header (collapsing) plus its effect rows when open. A single
+  /// uncategorised group (an older registry) shows no header — the list stays
+  /// flat, the honest fallback.
+  List<Widget> _categorySection(_Category group, bool canApply, String? compId,
+      String? layerId, String needle) {
+    final app = widget.app;
+    final soleUncategorised =
+        group.key.isEmpty; // no category field: skip the header
+    // While searching, keep every matching category expanded so a hit is never
+    // hidden behind a collapsed header.
+    final collapsed = needle.isEmpty && _collapsed.contains(group.key);
+    return [
+      if (!soleUncategorised)
+        _CategoryHeader(
+          label: group.label,
+          collapsed: collapsed,
+          onTap: () => setState(() {
+            if (!_collapsed.remove(group.key)) _collapsed.add(group.key);
+          }),
+        ),
+      if (soleUncategorised || !collapsed)
+        for (final e in group.effects)
+          _EffectRow(
+            info: e,
+            canApply: canApply,
+            onApply: canApply
+                ? () => app.addEffect(compId!, layerId!, e.name)
+                : null,
+          ),
+    ];
+  }
+
   Widget _emptyHint(LumitTheme t, bool registryEmpty, String needle) {
     final text = registryEmpty
         ? 'No effects available.'
@@ -108,6 +150,48 @@ class _EffectsPresetsPanelState extends State<EffectsPresetsPanel> {
     return Padding(
       padding: const EdgeInsets.all(10),
       child: Text(text, style: t.small.copyWith(color: t.textMuted)),
+    );
+  }
+}
+
+/// One category and the effects that fall under it, in registry order.
+class _Category {
+  final String key;
+  final String label;
+  final List<BridgeEffectInfo> effects = [];
+  _Category(this.key, this.label);
+}
+
+/// A collapsing category header (the egui `FxCategory` heading).
+class _CategoryHeader extends StatelessWidget {
+  final String label;
+  final bool collapsed;
+  final VoidCallback onTap;
+  const _CategoryHeader({
+    required this.label,
+    required this.collapsed,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+        child: Row(
+          children: [
+            Text(collapsed ? '▸' : '▾',
+                style: t.small.copyWith(color: t.textMuted)),
+            const SizedBox(width: 6),
+            Text(label,
+                style: t.small.copyWith(
+                    color: t.textSecondary, fontWeight: FontWeight.w600)),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -148,7 +232,10 @@ class _SearchField extends StatelessWidget {
 }
 
 /// One effect row: the label, and — when a layer is selected — an Add button
-/// that appears on hover. Double-clicking the row applies the effect too.
+/// that appears on hover. Double-clicking the row applies the effect; the row is
+/// Draggable (drop it on the Effect controls panel to apply it to the shown
+/// layer). The Timeline-row drop target awaits the timeline agent's DragTarget
+/// seam (annotated on the ledger).
 class _EffectRow extends StatefulWidget {
   final BridgeEffectInfo info;
   final bool canApply;
@@ -169,7 +256,7 @@ class _EffectRowState extends State<_EffectRow> {
   @override
   Widget build(BuildContext context) {
     final t = ThemeScope.of(context).theme;
-    return MouseRegion(
+    final row = MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
       child: GestureDetector(
@@ -206,11 +293,38 @@ class _EffectRowState extends State<_EffectRow> {
         ),
       ),
     );
+    // Draggable onto a layer (the Effect controls DragTarget). The payload is
+    // the effect's match name; the drop applies it through `addEffect`.
+    return Draggable<EffectDragData>(
+      data: EffectDragData(widget.info.name, widget.info.label),
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      feedback: _EffectDragFeedback(label: widget.info.label),
+      child: row,
+    );
   }
 }
 
-/// The .lumfx preset row: honestly disabled until the file + preset bridge ops
-/// exist.
+/// The floating label shown under the pointer while an effect row is dragged.
+class _EffectDragFeedback extends StatelessWidget {
+  final String label;
+  const _EffectDragFeedback({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    return FloatSurface(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: Text(label, style: t.small),
+      ),
+    );
+  }
+}
+
+/// The .lumfx preset row: honestly disabled until a preset bridge op exists.
+/// The snapshot flattens each effect's EffectKey (namespace/version dropped) and
+/// its parameter animation, so a byte-compatible `.lumfx` cannot be produced
+/// Dart-side — the file would not round-trip into the egui app.
 class _PresetPlaceholder extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
@@ -221,8 +335,9 @@ class _PresetPlaceholder extends StatelessWidget {
         border: Border(top: BorderSide(color: t.hairline)),
       ),
       child: Text(
-        'Saving and loading .lumfx presets arrives with the file and preset '
-        'bridge ops.',
+        'Saving and loading .lumfx presets arrives with a preset bridge op — the '
+        'snapshot does not carry enough of an effect to write an interoperable '
+        'file.',
         style: t.small.copyWith(color: t.textMuted),
       ),
     );

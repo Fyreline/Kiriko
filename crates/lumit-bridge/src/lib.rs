@@ -54,15 +54,24 @@
 //! - `render` — the composited-comp Viewer path, gated behind the `render`
 //!   feature; holds one session-lifetime headless renderer borrowed from
 //!   `lumit-ui` and turns `(comp, frame)` into an RGBA8 buffer (K-175).
+//! - [`framecache`] — the rendered-frame cache (K-176): an LRU of RGBA frames
+//!   keyed by comp/frame/scale under a document epoch, so a re-scrubbed frame
+//!   skips the GPU. Its budget/clear/stats back the Settings → Performance cache
+//!   controls; always compiled (inert without `render`, which is what fills it).
+//! - [`cancel`] — engine-side render cancellation (K-176): a latest-wins
+//!   generation high-water mark so a superseded comp render is skipped before it
+//!   starts rather than stealing the renderer lock the next frame wants.
 //! - [`ffi`] — the `extern "C"` surface: pointer marshalling, `catch_unwind`
 //!   guards, and the string/buffer ownership contracts.
 
 mod assets;
 mod beats;
+mod cancel;
 mod columns;
 mod edits;
 mod export;
 mod ffi;
+mod framecache;
 mod fxparams;
 mod items;
 mod media;
@@ -98,10 +107,15 @@ use serde_json::json;
 /// property ops, recovery (`list_autosaves`/`restore_journal`), the `boot_log`,
 /// the enum/bool/seed/point effect-param setters plus `reorder_effect`, the
 /// param **ranges** and effect **category** in the snapshot, and the single-undo
-/// `apply_keyframe_batch`. Every addition is *additive*, so an older Dart client
-/// still reads every field it knew, but the ABI number rises so a client that
-/// needs the new calls can insist on them.
-pub(crate) const ABI_VERSION: u32 = 7;
+/// `apply_keyframe_batch`. v8 (this build) burns down the parity ledger's
+/// performance section: the bridge-side rendered-frame cache and its controls
+/// (`set_cache_budget`/`clear_cache`/`cache_stats`), engine-side render
+/// cancellation (`render_comp_frame_gen` carrying a latest-wins generation, and
+/// `render_cancel_stale`), and the Project-panel thumbnail path (`thumbnail`).
+/// Every addition is *additive*, so an older Dart client still reads every field
+/// it knew, but the ABI number rises so a client that needs the new calls can
+/// insist on them.
+pub(crate) const ABI_VERSION: u32 = 8;
 
 /// `{"ok":false,"error":"…"}`. serde escapes any control character, so the
 /// resulting string never carries an interior NUL and always makes a `CString`.

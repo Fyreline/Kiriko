@@ -4,7 +4,7 @@
 
 import 'dart:async';
 
-import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../theme/theme.dart';
@@ -365,7 +365,9 @@ class _TickPainter extends CustomPainter {
   bool shouldRepaint(_TickPainter old) => old.color != color;
 }
 
-/// egui's DragValue: drag horizontally to adjust, click to type.
+/// egui's DragValue: drag horizontally to adjust, click to type, right-click
+/// for Reset / Copy / Paste (egui's built-in drag-value menu). [resetTo] is the
+/// field's known default — Reset appears only when a call site supplies one.
 class DragValueField extends StatefulWidget {
   final num value;
   final num min;
@@ -373,6 +375,7 @@ class DragValueField extends StatefulWidget {
   final double speed;
   final int decimals;
   final String? suffix;
+  final num? resetTo;
   final ValueChanged<num> onChanged;
 
   const DragValueField({
@@ -384,6 +387,7 @@ class DragValueField extends StatefulWidget {
     this.speed = 1,
     this.decimals = 0,
     this.suffix,
+    this.resetTo,
   });
 
   @override
@@ -429,6 +433,60 @@ class _DragValueFieldState extends State<DragValueField> {
     setState(() => _editing = false);
   }
 
+  /// The plain numeric string (no suffix) — what Copy puts on the clipboard and
+  /// what Paste parses back, so a value round-trips between fields.
+  String _plain(num v) => widget.decimals == 0
+      ? v.round().toString()
+      : v.toDouble().toStringAsFixed(widget.decimals);
+
+  /// The egui drag-value right-click menu: Reset (when a default is known),
+  /// Copy and Paste, over the system clipboard with the field's own clamp.
+  void _contextMenu(BuildContext context, Offset globalPos) {
+    showLumitPopup<void>(
+      context: context,
+      position: globalPos,
+      builder: (close) => FloatSurface(
+        child: IntrinsicWidth(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (widget.resetTo != null)
+                MenuRow(
+                  onPressed: () {
+                    close(null);
+                    widget.onChanged(
+                        widget.resetTo!.clamp(widget.min, widget.max));
+                  },
+                  child: const Text('Reset'),
+                ),
+              MenuRow(
+                onPressed: () {
+                  close(null);
+                  Clipboard.setData(ClipboardData(text: _plain(widget.value)));
+                },
+                child: const Text('Copy'),
+              ),
+              MenuRow(
+                onPressed: () async {
+                  close(null);
+                  final data = await Clipboard.getData(Clipboard.kTextPlain);
+                  final raw =
+                      data?.text?.replaceAll(widget.suffix ?? '', '').trim();
+                  final parsed = raw == null ? null : num.tryParse(raw);
+                  if (parsed != null) {
+                    widget.onChanged(parsed.clamp(widget.min, widget.max));
+                  }
+                },
+                child: const Text('Paste'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = ThemeScope.of(context).theme;
@@ -469,6 +527,7 @@ class _DragValueFieldState extends State<DragValueField> {
           });
           _focus.requestFocus();
         },
+        onSecondaryTapDown: (d) => _contextMenu(context, d.globalPosition),
         onHorizontalDragStart: (_) => _dragAccum = 0,
         onHorizontalDragUpdate: (d) {
           _dragAccum += d.delta.dx * widget.speed;

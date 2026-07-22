@@ -40,6 +40,13 @@ typedef _RenderC = Pointer<Uint8> Function(
     Pointer<Char>, Uint64, Float, Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
 typedef _RenderDart = Pointer<Uint8> Function(
     Pointer<Char>, int, double, Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
+// The ABI-8 generation-aware comp render (K-176): the worker prefers this so a
+// superseded render is skipped engine-side before it starts. Same shape as
+// `_Render*` with a u64 generation folded in ahead of the out-pointers.
+typedef _RenderGenC = Pointer<Uint8> Function(Pointer<Char>, Uint64, Float,
+    Uint64, Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
+typedef _RenderGenDart = Pointer<Uint8> Function(Pointer<Char>, int, double, int,
+    Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
 typedef _DecodeC = Pointer<Uint8> Function(
     Pointer<Char>, Uint64, Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
 typedef _DecodeDart = Pointer<Uint8> Function(
@@ -294,6 +301,7 @@ void _workerMain(_WorkerInit init) {
   }
 
   _RenderDart? render;
+  _RenderGenDart? renderGen;
   _DecodeDart? decode;
   _RenderSharedDart? renderShared;
   _FreeBufferDart? freeBuffer;
@@ -302,6 +310,12 @@ void _workerMain(_WorkerInit init) {
         'lumit_bridge_render_comp_frame');
   } catch (_) {
     render = null;
+  }
+  try {
+    renderGen = lib.lookupFunction<_RenderGenC, _RenderGenDart>(
+        'lumit_bridge_render_comp_frame_gen');
+  } catch (_) {
+    renderGen = null;
   }
   try {
     decode =
@@ -336,7 +350,7 @@ void _workerMain(_WorkerInit init) {
       return;
     }
     final reply = (kind == 'comp')
-        ? _renderOne(render, freeBuffer, id, frame, scale)
+        ? _renderOne(render, renderGen, freeBuffer, id, frame, scale, generation)
         : _decodeOne(decode, freeBuffer, id, frame);
     init.mainPort.send([generation, reply.$1, reply.$2, reply.$3]);
   });
@@ -364,16 +378,29 @@ void _workerMain(_WorkerInit init) {
   }
 }
 
-/// Run one comp render on the worker; returns `(width, height, ttd?)`.
-(int, int, TransferableTypedData?) _renderOne(_RenderDart? render,
-    _FreeBufferDart? freeBuffer, String compId, int frame, double scale) {
-  if (render == null || freeBuffer == null) return (0, 0, null);
+/// Run one comp render on the worker; returns `(width, height, ttd?)`. Prefers
+/// the generation-aware entry point (`render_comp_frame_gen`) so a superseded
+/// render is skipped engine-side (K-176); falls back to the plain render when an
+/// older library lacks the symbol.
+(int, int, TransferableTypedData?) _renderOne(
+    _RenderDart? render,
+    _RenderGenDart? renderGen,
+    _FreeBufferDart? freeBuffer,
+    String compId,
+    int frame,
+    double scale,
+    int generation) {
+  if ((render == null && renderGen == null) || freeBuffer == null) {
+    return (0, 0, null);
+  }
   final id = compId.toNativeUtf8();
   final outW = malloc<Uint32>();
   final outH = malloc<Uint32>();
   final outLen = malloc<Size>();
   try {
-    final ptr = render(id.cast(), frame, scale, outW, outH, outLen);
+    final ptr = renderGen != null
+        ? renderGen(id.cast(), frame, scale, generation, outW, outH, outLen)
+        : render!(id.cast(), frame, scale, outW, outH, outLen);
     if (ptr == nullptr) return (0, 0, null);
     final len = outLen.value;
     try {

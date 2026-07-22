@@ -638,7 +638,8 @@ void main() {
       expect(shifts, ['shift_keys:c0/l0/position_x+$expected']);
     });
 
-    testWidgets('right-clicking a keyframe removes it', (tester) async {
+    testWidgets('right-clicking a keyframe opens the interp menu; Delete removes it',
+        (tester) async {
       final fake = _TimelineFake();
       final app = AppStateStub(bridge: fake);
       await tester.pumpWidget(_host(app));
@@ -651,6 +652,10 @@ void main() {
         Offset(glyphX, rowRect.center.dy),
         buttons: kSecondaryButton,
       );
+      await tester.pump();
+      // The interpolation menu opens (egui graph.rs:1676), not an instant remove.
+      expect(find.text('Easy ease'), findsOneWidget);
+      await tester.tap(find.text('Delete key'));
       await tester.pump();
       expect(fake.ops, contains('remove_key:c0/l0/position_x@120'));
     });

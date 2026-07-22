@@ -22,7 +22,13 @@ class CompTabStrip extends StatelessWidget {
     final frontId = app.frontCompIdResolved;
     final comp = app.frontComp;
     final fps = comp?.fps.fps ?? 0;
-    return Container(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      // Right-click the comp-tab strip: pop the Timeline out into its own window
+      // (routed to the multi-window notice until the shell pop-out lands, exactly
+      // as the dock's own pop-out seam does).
+      onSecondaryTapDown: (d) => _showStripMenu(context, d.globalPosition),
+      child: Container(
       height: 28,
       color: t.surface2,
       padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -66,6 +72,34 @@ class CompTabStrip extends StatelessWidget {
               ),
             ),
         ],
+      ),
+      ),
+    );
+  }
+
+  /// The comp-strip context menu: a single "Pop out timeline" entry that routes
+  /// to the multi-window notice (the shell pop-out lands separately). Mirrors the
+  /// dock's own pop-out wording so a later real seam reads identically.
+  void _showStripMenu(BuildContext context, Offset position) {
+    showLumitPopup<void>(
+      context: context,
+      position: position,
+      builder: (close) => FloatSurface(
+        width: 180,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            MenuRow(
+              onPressed: () {
+                close(null);
+                app.setNotice(
+                    'Timeline: pop out arrives with multi-window support');
+              },
+              child: const Text('Pop out timeline'),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -1138,6 +1138,17 @@ typedef _RenderSharedC = Bool Function(Pointer<Char>, Uint64, Pointer<Uint64>,
 typedef _RenderSharedDart = bool Function(
     Pointer<Char>, int, Pointer<Uint64>, Pointer<Uint32>, Pointer<Uint32>);
 
+// Bridge v0.8 (ABI 8): cache controls, render cancellation, thumbnails. The
+// cache controls and render_cancel_stale take/return JSON like the other ops;
+// set_cache_budget and render_cancel_stale take a single u64. thumbnail mirrors
+// decode but takes a u32 max-edge instead of a u64 frame.
+typedef _U64ArgC = Pointer<Char> Function(Uint64);
+typedef _U64ArgDart = Pointer<Char> Function(int);
+typedef _ThumbC = Pointer<Uint8> Function(
+    Pointer<Char>, Uint32, Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
+typedef _ThumbDart = Pointer<Uint8> Function(
+    Pointer<Char>, int, Pointer<Uint32>, Pointer<Uint32>, Pointer<Size>);
+
 // Bridge v0.5 signatures.
 typedef _TextContentC = Pointer<Char> Function(Pointer<Char>, Pointer<Char>,
     Pointer<Char>, Double, Double, Double, Double, Double);
@@ -1422,6 +1433,82 @@ abstract class SharedTextureBridge {
   SharedFrame? renderToShared(String compId, int frame);
 }
 
+/// The rendered-frame cache's live stats (ABI 8, `cacheStats`): the bytes
+/// [usedBytes] of the [budgetBytes] cap, the number of cached frames [entries],
+/// and the lifetime [hits]/[misses]. The default (no library / a parse failure)
+/// is an empty cache at a zero budget.
+class BridgeCacheStats {
+  final int usedBytes;
+  final int budgetBytes;
+  final int entries;
+  final int hits;
+  final int misses;
+
+  const BridgeCacheStats({
+    this.usedBytes = 0,
+    this.budgetBytes = 0,
+    this.entries = 0,
+    this.hits = 0,
+    this.misses = 0,
+  });
+
+  static const empty = BridgeCacheStats();
+
+  factory BridgeCacheStats.fromJson(Map<String, dynamic> m) => BridgeCacheStats(
+        usedBytes: _asInt(m['used_bytes']),
+        budgetBytes: _asInt(m['budget_bytes']),
+        entries: _asInt(m['entries']),
+        hits: _asInt(m['hits']),
+        misses: _asInt(m['misses']),
+      );
+}
+
+/// The rendered-frame cache controls (ABI 8, K-176), kept as their own
+/// capability so the many `implements DocumentBridge` fakes need no change. The
+/// real [LumitBridge] implements it; a bridge either offers the symbols or it
+/// does not. These back Settings → Performance (Clear cache, Memory budget).
+abstract class CacheControlBridge {
+  /// True when the loaded library exports the cache-control symbols (ABI 8+).
+  bool get supportsCacheControl;
+
+  /// Empty the rendered-frame cache now; returns the fresh stats.
+  BridgeCacheStats clearCache();
+
+  /// Set the cache's RAM budget in bytes; returns the fresh stats.
+  BridgeCacheStats setCacheBudget(int bytes);
+
+  /// The cache's current stats.
+  BridgeCacheStats cacheStats();
+}
+
+/// The latest-wins render-cancellation control (ABI 8, K-176): the UI isolate
+/// marks every render generation below [generation] as superseded so a stale
+/// comp render queued behind the renderer lock is skipped before it starts. A
+/// fast atomic store, safe to call on the UI isolate. Its own capability so the
+/// fakes need no change.
+abstract class RenderCancelBridge {
+  /// True when the loaded library exports `render_cancel_stale` (ABI 8+).
+  bool get supportsRenderCancel;
+
+  /// Publish [generation] as the newest wanted render; lower ones are stale.
+  void renderCancelStale(int generation);
+}
+
+/// The Project-panel thumbnail path (ABI 8): decode + downscale a footage item's
+/// representative frame once, caching it engine-side. Its own capability so the
+/// many `implements DocumentBridge` fakes need no change; a panel builds its UI
+/// against this and a fake supplies a synthetic thumbnail.
+abstract class ThumbnailBridge {
+  /// True when the loaded library exports `thumbnail` (ABI 8+).
+  bool get supportsThumbnail;
+
+  /// A thumbnail of footage [itemId] whose longer edge is at most [maxEdge],
+  /// or null on failure (unknown/non-footage item, missing/unreadable file, an
+  /// older library). The pixels are copied out of the engine buffer, which is
+  /// freed immediately, so the returned frame owns them.
+  DecodedFrame? thumbnail(String itemId, int maxEdge);
+}
+
 /// The bridge v0.5 edit ops, kept as their own capability interface (like
 /// [CompRenderBridge]) so the many `implements DocumentBridge` fakes across the
 /// suite need no change: a bridge either offers this capability or it does not.
@@ -1487,6 +1574,9 @@ class LumitBridge
         DocumentBridge,
         CompRenderBridge,
         SharedTextureBridge,
+        CacheControlBridge,
+        RenderCancelBridge,
+        ThumbnailBridge,
         EditOpsBridge {
   final _NoArgDart _version;
   final _NoArgDart _newProject;
@@ -1580,6 +1670,15 @@ class LumitBridge
   /// [supportsSharedTexture] is false and the Viewer keeps the read-back path.
   _SharedSupportedDart? _sharedSupported;
   _RenderSharedDart? _renderToShared;
+
+  /// The ABI-8 cache-control, render-cancellation and thumbnail symbols. Bound
+  /// defensively: an older `.dll` lacks them, so each capability reports itself
+  /// off and its methods degrade (empty stats / no-op / null thumbnail).
+  _NoArgDart? _clearCache;
+  _U64ArgDart? _setCacheBudget;
+  _NoArgDart? _cacheStats;
+  _U64ArgDart? _renderCancelStale;
+  _ThumbDart? _thumbnail;
 
   final _FreeDart _freeString;
   final _FreeBufferDart _freeBuffer;
@@ -1854,6 +1953,38 @@ class LumitBridge
     } catch (_) {
       _sharedSupported = null;
       _renderToShared = null;
+    }
+    // The ABI-8 cache/cancel/thumbnail symbols are optional (an older library
+    // omits them). Bind each independently so a partial upgrade still offers
+    // what it can.
+    try {
+      _clearCache = lib.lookupFunction<_NoArgC, _NoArgDart>(
+        'lumit_bridge_clear_cache',
+      );
+      _setCacheBudget = lib.lookupFunction<_U64ArgC, _U64ArgDart>(
+        'lumit_bridge_set_cache_budget',
+      );
+      _cacheStats = lib.lookupFunction<_NoArgC, _NoArgDart>(
+        'lumit_bridge_cache_stats',
+      );
+    } catch (_) {
+      _clearCache = null;
+      _setCacheBudget = null;
+      _cacheStats = null;
+    }
+    try {
+      _renderCancelStale = lib.lookupFunction<_U64ArgC, _U64ArgDart>(
+        'lumit_bridge_render_cancel_stale',
+      );
+    } catch (_) {
+      _renderCancelStale = null;
+    }
+    try {
+      _thumbnail = lib.lookupFunction<_ThumbC, _ThumbDart>(
+        'lumit_bridge_thumbnail',
+      );
+    } catch (_) {
+      _thumbnail = null;
     }
   }
 
@@ -2586,6 +2717,85 @@ class LumitBridge
       malloc.free(outHandle);
       malloc.free(outW);
       malloc.free(outH);
+    }
+  }
+
+  // --- Bridge v0.8: cache controls, render cancellation, thumbnails ------
+
+  @override
+  bool get supportsCacheControl =>
+      _clearCache != null && _setCacheBudget != null && _cacheStats != null;
+
+  @override
+  BridgeCacheStats clearCache() {
+    final fn = _clearCache;
+    if (fn == null) return BridgeCacheStats.empty;
+    return _parseCacheStats(_callNoArg(fn));
+  }
+
+  @override
+  BridgeCacheStats setCacheBudget(int bytes) {
+    final fn = _setCacheBudget;
+    if (fn == null) return BridgeCacheStats.empty;
+    return _parseCacheStats(_readReply(fn(bytes)));
+  }
+
+  @override
+  BridgeCacheStats cacheStats() {
+    final fn = _cacheStats;
+    if (fn == null) return BridgeCacheStats.empty;
+    return _parseCacheStats(_callNoArg(fn));
+  }
+
+  BridgeCacheStats _parseCacheStats(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map && decoded['ok'] == true) {
+        return BridgeCacheStats.fromJson(decoded.cast<String, dynamic>());
+      }
+    } catch (_) {}
+    return BridgeCacheStats.empty;
+  }
+
+  @override
+  bool get supportsRenderCancel => _renderCancelStale != null;
+
+  @override
+  void renderCancelStale(int generation) {
+    final fn = _renderCancelStale;
+    if (fn == null) return;
+    // Frees the small {"ok":true} reply; the effect is the engine-side atomic.
+    _readReply(fn(generation));
+  }
+
+  @override
+  bool get supportsThumbnail => _thumbnail != null;
+
+  @override
+  DecodedFrame? thumbnail(String itemId, int maxEdge) {
+    final fn = _thumbnail;
+    if (fn == null) return null;
+    final id = itemId.toNativeUtf8();
+    final outW = malloc<Uint32>();
+    final outH = malloc<Uint32>();
+    final outLen = malloc<Size>();
+    try {
+      final ptr = fn(id.cast(), maxEdge, outW, outH, outLen);
+      if (ptr == nullptr) return null;
+      final len = outLen.value;
+      try {
+        // Copy the pixels out before the buffer is freed back to Rust — the same
+        // contract as decodeFrame (one boxed slice, freed as a whole).
+        final rgba = Uint8List.fromList(ptr.asTypedList(len));
+        return DecodedFrame(width: outW.value, height: outH.value, rgba: rgba);
+      } finally {
+        _freeBuffer(ptr, len);
+      }
+    } finally {
+      malloc.free(id);
+      malloc.free(outW);
+      malloc.free(outH);
+      malloc.free(outLen);
     }
   }
 

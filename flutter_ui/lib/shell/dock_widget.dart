@@ -758,25 +758,28 @@ class _PaneGripState extends State<_PaneGrip> {
     return _DragSource(
       panel: widget.panel,
       drag: widget.drag,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.grab,
-        onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = false),
-        child: AnimatedBuilder(
-          animation: widget.drag,
-          builder: (context, _) {
-            final t = ThemeScope.of(context).theme;
-            final lit = _hover || widget.drag.dragged == widget.panel;
-            return SizedBox(
-              width: 16,
-              height: 16,
-              child: CustomPaint(
-                painter: _GripPainter(
-                  lit ? t.textSecondary : t.textMuted.withValues(alpha: 0.5),
+      child: LumitTooltip(
+        message: 'Drag to move this panel',
+        child: MouseRegion(
+          cursor: SystemMouseCursors.grab,
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: AnimatedBuilder(
+            animation: widget.drag,
+            builder: (context, _) {
+              final t = ThemeScope.of(context).theme;
+              final lit = _hover || widget.drag.dragged == widget.panel;
+              return SizedBox(
+                width: 16,
+                height: 16,
+                child: CustomPaint(
+                  painter: _GripPainter(
+                    lit ? t.textSecondary : t.textMuted.withValues(alpha: 0.5),
+                  ),
                 ),
-              ),
-            );
-          },
+              );
+            },
+          ),
         ),
       ),
     );

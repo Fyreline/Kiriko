@@ -1,7 +1,8 @@
 // The boot splash (K-008, splash.rs): the app opens as a small centred card
 // listing each module as it comes up, then gives way to the application.
-// Phase F0 has no engine to boot, so the lines are the chrome's own start-up
-// steps; the bridge's real boot log replaces them in F1. A click skips it.
+// With a live bridge the lines are the engine's OWN boot log (library version,
+// ABI, the compiled feature set — `app.bootLog()`, honoured here); the F0
+// placeholder build (no bridge) falls back to the canned chrome start-up steps.
 //
 // Driven by one AnimationController rather than timers, so tests can
 // pumpAndSettle through it and nothing is left pending.
@@ -10,8 +11,8 @@ import 'package:flutter/widgets.dart';
 
 import '../widgets/controls.dart';
 
-/// The F0 boot lines. Real plumbing arrives with the bridge (F1) — the
-/// engine's own boot log streams into this list then.
+/// The fallback boot lines shown without an engine bridge (the F0 placeholder
+/// build). A live bridge replaces these with `app.bootLog()`.
 const List<String> bootLines = [
   'workspace store',
   'theme',
@@ -21,7 +22,13 @@ const List<String> bootLines = [
 
 class SplashOverlay extends StatefulWidget {
   final VoidCallback onDone;
-  const SplashOverlay({super.key, required this.onDone});
+
+  /// The engine's real boot log to stream, when a bridge supplied one. Null or
+  /// empty falls back to the canned [bootLines] (the F0 promise: the real log
+  /// streams here once the bridge is present).
+  final List<String>? lines;
+
+  const SplashOverlay({super.key, required this.onDone, this.lines});
 
   @override
   State<SplashOverlay> createState() => _SplashOverlayState();
@@ -32,9 +39,16 @@ class _SplashOverlayState extends State<SplashOverlay>
   static const _perLine = Duration(milliseconds: 180);
   static const _hold = Duration(milliseconds: 600);
 
+  /// The lines actually shown: the engine's boot log when non-empty, else the
+  /// canned fallback.
+  late final List<String> _lines =
+      (widget.lines != null && widget.lines!.isNotEmpty)
+          ? widget.lines!
+          : bootLines;
+
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: _perLine * bootLines.length + _hold,
+    duration: _perLine * _lines.length + _hold,
   )
     ..addListener(() => setState(() {}))
     ..addStatusListener((status) {
@@ -54,7 +68,7 @@ class _SplashOverlayState extends State<SplashOverlay>
     final elapsed = _controller.value * total;
     return (elapsed / _perLine.inMilliseconds)
         .floor()
-        .clamp(0, bootLines.length);
+        .clamp(0, _lines.length);
   }
 
   @override
@@ -88,7 +102,7 @@ class _SplashOverlayState extends State<SplashOverlay>
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 1),
                     child: Text(
-                      bootLines[i],
+                      _lines[i],
                       style: i == _shown - 1 &&
                               _controller.status != AnimationStatus.completed
                           ? t.bodyPrimary

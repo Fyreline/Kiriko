@@ -24,6 +24,7 @@ import 'command_palette.dart';
 import 'dock_widget.dart';
 import 'export_dialog.dart';
 import 'menu_bar.dart';
+import 'recovery_dialog.dart';
 import 'settings_window.dart';
 import 'splash.dart';
 
@@ -95,6 +96,10 @@ class _ShellBodyState extends State<_ShellBody> {
   bool splashDone = false;
   final ValueNotifier<Panel?> activePanel = ValueNotifier(null);
   final FocusNode _rootFocus = FocusNode(debugLabel: 'lumit-shell');
+
+  /// The engine's boot log, pulled once at start-up (empty without a bridge, so
+  /// the splash falls back to its canned lines) — streamed by the splash card.
+  late final List<String> _bootLog = app.bootLog();
 
   /// The ~4 Hz export-progress poll: alive only while an export runs, driven by
   /// app-state notifications (a running export → start the timer; idle → stop).
@@ -272,6 +277,14 @@ class _ShellBodyState extends State<_ShellBody> {
                       buildPanelBody(context, panel, app),
                   onLayoutChanged: ws.save,
                   activePanel: activePanel,
+                  // Multi-window pop-out is the graceful-degradation seam. The
+                  // pinned Flutter SDK (stable 3.44.7) ships multi-window only as
+                  // an @internal, feature-flag-gated experimental API that would
+                  // fail `flutter analyze`, and no maintained package can host a
+                  // panel over the SAME app state (each runs its own engine
+                  // isolate) — so pop-out stays this calm notice, no real window
+                  // is opened, and tests never spawn one. Recorded as
+                  // blocked-with-evidence on the ledger E row + docs/flutter-port/05.
                   onPopOut: (panel) => app.setNotice(
                       '${panel.title}: pop out arrives with multi-window support'),
                 ),
@@ -301,7 +314,17 @@ class _ShellBodyState extends State<_ShellBody> {
           if (!splashDone)
             Positioned.fill(
               child: SplashOverlay(
-                onDone: () => setState(() => splashDone = true),
+                lines: _bootLog,
+                onDone: () {
+                  setState(() => splashDone = true);
+                  // Once the shell is up, offer recovery if the last project's
+                  // autosaves look newer than its save (see recovery_dialog).
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (!mounted || widget.bridge == null) return;
+                    maybeShowRecovery(context, app,
+                        projectPath: ws.lastProjectPath);
+                  });
+                },
               ),
             ),
         ],
@@ -336,10 +359,13 @@ class _StatusLine extends StatelessWidget {
               Text(app.exportStatusText!,
                   style: t.small.copyWith(color: t.accent)),
               const SizedBox(width: 6),
-              HouseButton(
-                small: true,
-                onPressed: app.cancelExport,
-                child: const Text('×'),
+              LumitTooltip(
+                message: 'Cancel export',
+                child: HouseButton(
+                  small: true,
+                  onPressed: app.cancelExport,
+                  child: const Text('×'),
+                ),
               ),
             ],
             const Spacer(),

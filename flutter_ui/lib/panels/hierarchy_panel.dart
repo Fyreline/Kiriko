@@ -9,11 +9,13 @@
 // row selects it; it changes nothing. This is the simple tree form of the
 // future node-graph flowchart.
 //
-// Note on nesting resolution: snapshot v2 tags a precomp layer only as
-// `kind:"precomp"` — it does not carry the nested comp's id — so we resolve the
-// nested comp by matching the layer's name against the project's compositions.
-// Snapshot v3 should carry the source-comp id, at which point this matches by
-// id (and comp-scoped selection becomes possible). Cycle-guarded by comp name.
+// Nesting resolution: a precomp layer carries its nested composition's id
+// (`source_comp_id`, snapshot v4), so nesting matches by id — no fragile
+// by-name lookup (two comps may share a name). A pre-v4 snapshot without the id
+// falls back to the by-name match so an older engine still folds. Selecting a
+// nested layer fronts its owning composition first, then selects the layer
+// (comp-scoped selection), mirroring the egui hierarchy click. Cycle-guarded by
+// comp id.
 
 import 'package:flutter/widgets.dart';
 
@@ -58,9 +60,13 @@ class _HierarchyPanelState extends State<HierarchyPanel> {
         if (front == null) {
           return _emptyHint(t);
         }
-        // A name → composition index for resolving nested precomp layers.
+        // An id → composition index for resolving nested precomp layers by their
+        // `source_comp_id`, with a name → composition fallback for a pre-v4
+        // snapshot that carries no id.
+        final byId = <String, CompTabInfo>{};
         final byName = <String, CompTabInfo>{};
         for (final c in comps) {
+          byId.putIfAbsent(c.id, () => c);
           byName.putIfAbsent(c.name, () => c);
         }
 
@@ -70,10 +76,12 @@ class _HierarchyPanelState extends State<HierarchyPanel> {
         _appendLayers(
           rows,
           comp: front.comp,
+          ownerCompId: front.id,
+          byId: byId,
           byName: byName,
           depth: 1,
           path: front.id,
-          visited: {front.name},
+          visited: {front.id},
           theme: t,
         );
         return ListView(
@@ -102,6 +110,8 @@ class _HierarchyPanelState extends State<HierarchyPanel> {
   void _appendLayers(
     List<Widget> rows, {
     required BridgeComp comp,
+    required String ownerCompId,
+    required Map<String, CompTabInfo> byId,
     required Map<String, CompTabInfo> byName,
     required int depth,
     required String path,
@@ -117,7 +127,11 @@ class _HierarchyPanelState extends State<HierarchyPanel> {
       final selected = widget.app.selectedLayer == layer.id;
       final rowPath = '$path/${layer.id}';
       final isPrecomp = layer.kind == BridgeLayerKind.precomp;
-      final nested = isPrecomp ? byName[layer.name] : null;
+      // Resolve the nested comp by its source_comp_id (v4), by name otherwise.
+      final nested = isPrecomp
+          ? (layer.sourceCompId != null ? byId[layer.sourceCompId] : null) ??
+              byName[layer.name]
+          : null;
       final open = isPrecomp && _isOpen(rowPath, depth);
       rows.add(_LayerRow(
         icon: icon,
@@ -130,7 +144,15 @@ class _HierarchyPanelState extends State<HierarchyPanel> {
         onTwirl: isPrecomp
             ? () => setState(() => _twirl[rowPath] = !open)
             : null,
-        onTap: () => widget.app.selectLayer(layer.id),
+        // Comp-scoped selection: front the layer's OWNING comp first (a no-op
+        // for the front comp itself), then select it — so selecting a nested
+        // layer switches to its composition, as the egui hierarchy does.
+        onTap: () {
+          if (widget.app.frontCompIdResolved != ownerCompId) {
+            widget.app.frontCompSelect(ownerCompId);
+          }
+          widget.app.selectLayer(layer.id);
+        },
       ));
       if (open) {
         if (nested == null) {
@@ -138,7 +160,7 @@ class _HierarchyPanelState extends State<HierarchyPanel> {
             depth: depth + 1,
             text: 'nested comp not found in project',
           ));
-        } else if (visited.contains(nested.name)) {
+        } else if (visited.contains(nested.id)) {
           rows.add(_MutedRow(
             depth: depth + 1,
             text: '… recursive nesting',
@@ -148,10 +170,12 @@ class _HierarchyPanelState extends State<HierarchyPanel> {
           _appendLayers(
             rows,
             comp: nested.comp,
+            ownerCompId: nested.id,
+            byId: byId,
             byName: byName,
             depth: depth + 1,
             path: rowPath,
-            visited: {...visited, nested.name},
+            visited: {...visited, nested.id},
             theme: theme,
           );
         }

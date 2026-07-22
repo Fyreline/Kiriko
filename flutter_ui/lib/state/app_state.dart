@@ -27,6 +27,104 @@ class FootageDragData {
   const FootageDragData(this.itemId, this.name);
 }
 
+/// The payload carried when an effect row from the Effects & presets panel is
+/// dragged onto a layer (a Flutter [Draggable]/[DragTarget]): the effect's
+/// match name and its label (for the drag feedback). Mirrors the egui
+/// drag-an-effect-onto-a-layer gesture (docs/07 §7); the drop applies it through
+/// `addEffect`.
+class EffectDragData {
+  final String effectName;
+  final String label;
+  const EffectDragData(this.effectName, this.label);
+}
+
+/// What a pointer drag/click does in the Viewer — the Dart mirror of the egui
+/// `ToolMode` (crates/lumit-ui/src/app_state/mod.rs:366). Additive Section-D
+/// state on [AppStateStub.viewerTool].
+enum ToolMode { select, hand, shape, pen }
+
+/// The mask shape the Shape tool draws — the Dart mirror of the egui `ShapeKind`
+/// (crates/lumit-ui/src/app_state/mod.rs:347). The bridge's `addMask` op takes
+/// the lower-case name.
+enum ShapeKind {
+  rectangle,
+  ellipse,
+  star;
+
+  /// The op's kind string (`rectangle`/`ellipse`/`star`).
+  String get opName => name;
+
+  /// The sentence-case label the egui `ShapeKind::label` uses.
+  String get label => switch (this) {
+        ShapeKind.rectangle => 'Rectangle',
+        ShapeKind.ellipse => 'Ellipse',
+        ShapeKind.star => 'Star',
+      };
+}
+
+/// A preview render scale — the Full/Half/Third/Quarter picker in the transport
+/// (the egui resolution picker). [factor] is the multiplier the bridge render
+/// call takes (`renderCompFrame`'s `scale`); 1.0 is the comp's own resolution.
+enum PreviewScale {
+  full(1.0, 'Full'),
+  half(0.5, 'Half'),
+  third(1.0 / 3.0, 'Third'),
+  quarter(0.25, 'Quarter');
+
+  final double factor;
+  final String label;
+  const PreviewScale(this.factor, this.label);
+}
+
+/// A text layer's editable content, held per session because snapshot v5 does
+/// not carry text content back (only the setter exists). Seeds an em-dash-free
+/// editor once the user has committed, and defaults sensibly before then.
+class TextContent {
+  final String text;
+  final double size;
+  final List<double> rgba;
+  const TextContent(this.text, this.size, this.rgba);
+
+  /// The unedited default: empty text, 72 pt, opaque white (scene-linear).
+  static const initial = TextContent('', 72, [1, 1, 1, 1]);
+
+  TextContent copyWith({String? text, double? size, List<double>? rgba}) =>
+      TextContent(text ?? this.text, size ?? this.size, rgba ?? this.rgba);
+}
+
+/// A solid layer's editable size, held per session because the snapshot carries
+/// a solid's colour (`layer.colour`) but not its pixel size (only the setter
+/// exists). The colour seeds from the snapshot; this remembers the size.
+class SolidSize {
+  final int width;
+  final int height;
+  const SolidSize(this.width, this.height);
+}
+
+/// An armed eyedropper: which effect Colour parameter the next Viewer click
+/// samples into. The Dart mirror of the egui `EyedropperTarget` (colour mode
+/// only in this slice). Set by the effect-controls dropper button, consumed by
+/// the Viewer eyedropper overlay, which samples the shown frame and commits
+/// through `setEffectParamColour`, then disarms.
+class EyedropperArm {
+  final String compId;
+  final String layerId;
+  final String effectId;
+  final String paramName;
+
+  /// The alpha to preserve on commit (the sampled pixel writes RGB only, like
+  /// the egui colour eyedropper).
+  final double alpha;
+
+  const EyedropperArm({
+    required this.compId,
+    required this.layerId,
+    required this.effectId,
+    required this.paramName,
+    this.alpha = 1.0,
+  });
+}
+
 /// One pending export in the Dart-side queue — a `VecDeque` mirror of
 /// export_actions.rs. The egui side snapshots the whole document at QUEUE time;
 /// the bridge can only snapshot at START time, so a Dart queue item carries the
@@ -249,6 +347,35 @@ class AppStateStub extends ChangeNotifier {
   int beatSensitivity = 50;
   bool canUndo = false;
   bool canRedo = false;
+
+  // --- Keyframe clipboard seam (egui note 2.2) ----------------------------
+  //
+  // Ctrl+C/Ctrl+V on the Timeline copy the selected lane keys and paste them at
+  // the playhead. The shell owns the key handling (a different agent's file), so
+  // it calls [copySelectedKeyframes]/[pasteKeyframes] here; the Timeline body,
+  // which owns the lane selection, installs the two handlers and holds the
+  // copied payload in [keyframeClipboard] (kept on the app state so it survives
+  // the body being rebuilt). Additive: with no handler installed both are quiet
+  // no-ops, so the placeholder build is unaffected.
+
+  /// The copied keyframe payload (an opaque JSON string the Timeline produces),
+  /// or null before anything is copied.
+  String? keyframeClipboard;
+
+  /// Installed by the Timeline body: copies the current lane selection into
+  /// [keyframeClipboard].
+  void Function()? copyKeyframesHandler;
+
+  /// Installed by the Timeline body: pastes [keyframeClipboard] at the playhead.
+  void Function()? pasteKeyframesHandler;
+
+  /// Copy the selected lane keys (the shell's Ctrl+C) — a no-op when the
+  /// Timeline is not mounted or nothing is selected.
+  void copySelectedKeyframes() => copyKeyframesHandler?.call();
+
+  /// Paste the copied keys at the playhead (the shell's Ctrl+V) — a no-op with
+  /// an empty clipboard or no mounted Timeline.
+  void pasteKeyframes() => pasteKeyframesHandler?.call();
 
   final List<StubAction> actionLog = [];
 
@@ -983,9 +1110,257 @@ class AppStateStub extends ChangeNotifier {
     _applyReply(e.restoreJournal(path), 'Recovered from journal');
   }
 
+  /// Open a project from an explicit [path] — the recovery modal's "open last
+  /// save" and "open an autosave" paths (mirrors [openProject] without the
+  /// picker). When [rememberAs] is given the workspace remembers THAT path as
+  /// the last project instead of [path]: opening an autosave keeps the real
+  /// project as "last" so the next launch reopens the project, not the rotating
+  /// copy (egui's `recover_from_autosave` keeps the project path the same way).
+  ///
+  /// Honest limit recorded on the ledger E row: the bridge has no
+  /// load-content-but-keep-path op, so the engine's OWN loaded path follows
+  /// [path]; a Save straight after opening an autosave therefore writes to the
+  /// autosave copy until that op lands. Restore-journal and open-last-save are
+  /// unaffected (both load the project's own path).
+  void openPath(String path, {String? rememberAs}) {
+    final b = bridge;
+    if (b == null) {
+      engine('Open project');
+      return;
+    }
+    flushPendingSession();
+    final reply = b.openProject(path);
+    _applyReply(reply, 'Project opened');
+    if (reply.ok) {
+      _dirtySinceSave = false;
+      final remember = rememberAs ?? path;
+      _applySessionFor(remember);
+      rememberProject?.call(remember);
+    }
+  }
+
   /// The engine's honest boot lines for the splash (empty without a bridge or an
   /// older library, so the splash keeps its canned lines then).
   List<String> bootLog() => editOps?.bootLog() ?? const [];
+
+  // --- Section D additive state (editors, viewer tools, preview scale) ------
+  //
+  // Snapshot v5 carries a solid's colour (`layer.colour`) but not its size, and
+  // does not carry text content or camera zoom back at all — only the setters
+  // exist. These session maps remember what the user committed so the editors
+  // read their own values back (annotated on the ledger: read-back awaits the
+  // matching snapshot fields). All additive; no existing method changes.
+
+  /// Text-layer content the user has committed this session, keyed by layer id.
+  final Map<String, TextContent> textEdits = {};
+
+  /// Solid-layer size the user has committed this session, keyed by layer id.
+  final Map<String, SolidSize> solidSizeEdits = {};
+
+  /// Camera-layer zoom the user has committed this session, keyed by layer id.
+  final Map<String, double> cameraZoomEdits = {};
+
+  /// The text content the editor shows for [layerId]: this session's edit, else
+  /// the unedited default (empty, 72 pt, white).
+  TextContent textContentFor(String layerId) =>
+      textEdits[layerId] ?? TextContent.initial;
+
+  /// The solid size the editor shows for [layerId]: this session's edit, else a
+  /// sensible default (the front comp's size, or 1920×1080).
+  SolidSize solidSizeFor(String layerId) {
+    final held = solidSizeEdits[layerId];
+    if (held != null) return held;
+    final comp = frontComp;
+    return SolidSize(comp?.width ?? 1920, comp?.height ?? 1080);
+  }
+
+  /// The camera zoom the editor shows for [layerId]: this session's edit, else a
+  /// sensible default (the front comp width, a common AE default).
+  double cameraZoomFor(String layerId) =>
+      cameraZoomEdits[layerId] ?? (frontComp?.width ?? 1920).toDouble();
+
+  /// Commit a text layer's content (content, size, scene-linear fill), through
+  /// `setTextContent`, remembering it so the editor reads it back.
+  void commitTextContent(
+      String compId, String layerId, TextContent content) {
+    textEdits[layerId] = content;
+    final c = content.rgba;
+    setTextContent(compId, layerId, content.text, content.size, c[0], c[1],
+        c[2], c.length > 3 ? c[3] : 1.0);
+  }
+
+  /// Commit a solid layer's colour and size, through `setSolid`, remembering the
+  /// size so the editor reads it back (the colour reads back from the snapshot).
+  void commitSolid(String compId, String layerId, List<double> rgba,
+      SolidSize size) {
+    solidSizeEdits[layerId] = size;
+    setSolid(compId, layerId, rgba[0], rgba[1], rgba[2],
+        rgba.length > 3 ? rgba[3] : 1.0, size.width, size.height);
+  }
+
+  /// Commit a camera layer's zoom, through `setCameraZoom`, remembering it so
+  /// the editor reads it back.
+  void commitCameraZoom(String compId, String layerId, double zoom) {
+    cameraZoomEdits[layerId] = zoom;
+    setCameraZoom(compId, layerId, zoom);
+  }
+
+  /// The selected layer's scene-linear solid colour from the snapshot (v3+),
+  /// falling back to opaque mid-grey when absent.
+  List<double> solidColourFor(BridgeLayer layer) {
+    final c = layer.colour;
+    if (c != null && c.length >= 3) {
+      return [c[0], c[1], c[2], c.length > 3 ? c[3] : 1.0];
+    }
+    return const [0.5, 0.5, 0.5, 1.0];
+  }
+
+  // Viewer tool state (the toolbar) — the Dart mirror of the egui ToolMode /
+  // ShapeKind, additive.
+
+  ToolMode viewerTool = ToolMode.select;
+  ShapeKind viewerShape = ShapeKind.rectangle;
+
+  /// Select a Viewer tool (the toolbar buttons / the V·H·Q·G shortcuts).
+  void setViewerTool(ToolMode mode) {
+    if (viewerTool == mode) return;
+    viewerTool = mode;
+    notifyListeners();
+  }
+
+  /// Pick the Shape tool's mask shape (its right-click menu) and arm the Shape
+  /// tool, exactly as the egui shape-picker context menu does.
+  void setViewerShape(ShapeKind shape) {
+    viewerShape = shape;
+    viewerTool = ToolMode.shape;
+    notifyListeners();
+  }
+
+  /// Draw the current shape as a mask on the selected layer, on a Viewer
+  /// drag-release. The bridge's `addMask` op takes only a kind (no geometry can
+  /// cross yet — the egui path commits real rect/ellipse/star geometry, so the
+  /// drawn size/position is not honoured; annotated on the ledger). A quiet
+  /// notice when there is no selected layer.
+  void drawShapeMask() => addMaskToSelected(viewerShape.opName);
+
+  // Preview render scale (the resolution picker in the transport).
+
+  PreviewScale previewScale = PreviewScale.full;
+
+  /// Set the preview render scale. The `PreviewSource` render path (owned by the
+  /// perf pass) must adopt [previewScale] for it to downsample; until it does,
+  /// this is honest state the picker reflects (annotated on the ledger).
+  void setPreviewScale(PreviewScale scale) {
+    if (previewScale == scale) return;
+    previewScale = scale;
+    notifyListeners();
+  }
+
+  // Eyedropper (the effect-controls colour dropper → Viewer sample).
+
+  /// The armed eyedropper, or null when disarmed.
+  EyedropperArm? eyedropperArm;
+
+  /// Whether the eyedropper is armed (drives the Viewer magnifier overlay).
+  bool get eyedropperArmed => eyedropperArm != null;
+
+  /// Arm the eyedropper for a Colour effect parameter (its dropper button). The
+  /// next Viewer click samples the shown frame and commits the colour.
+  void armEyedropper(EyedropperArm arm) {
+    eyedropperArm = arm;
+    notifyListeners();
+  }
+
+  /// Disarm the eyedropper (a commit, Escape, or a click outside the image).
+  void disarmEyedropper() {
+    if (eyedropperArm == null) return;
+    eyedropperArm = null;
+    notifyListeners();
+  }
+
+  /// Commit a sampled scene-linear colour into the armed eyedropper's parameter
+  /// (RGB from the pixel, alpha preserved), then disarm — the egui eyedropper
+  /// commit path.
+  void commitEyedropper(double r, double g, double b) {
+    final arm = eyedropperArm;
+    if (arm == null) return;
+    setEffectParamColour(
+        arm.compId, arm.layerId, arm.effectId, arm.paramName, r, g, b, arm.alpha);
+    eyedropperArm = null;
+    notifyListeners();
+  }
+
+  /// Render the front comp's current frame to CPU pixels for a one-off sample
+  /// (the eyedropper's readback), or null when the composited-comp render is not
+  /// available (no bridge, an older library, no GPU adapter). Full scale so the
+  /// sampled pixel is the true colour, not a downsample.
+  DecodedFrame? sampleCompFrame() {
+    final b = bridge;
+    final compId = frontCompIdResolved;
+    if (b is! CompRenderBridge || compId == null) return null;
+    return (b as CompRenderBridge).renderCompFrame(compId, previewFrame, 1.0);
+  }
+
+  // --- Bridge v0.8: rendered-frame cache + thumbnails ---------------------
+
+  /// A hook the [PreviewSource] registers so "Clear cache" also empties the
+  /// Dart-side decoded-frame LRU (the engine cache and the Dart image cache are
+  /// two tiers of the same thing). Null when no Viewer is mounted.
+  VoidCallback? previewCacheClearer;
+
+  /// The rendered-frame cache controls, or null when there is no bridge or the
+  /// loaded library predates ABI 8.
+  CacheControlBridge? get cacheControl {
+    final b = bridge;
+    return b is CacheControlBridge && (b as CacheControlBridge).supportsCacheControl
+        ? b as CacheControlBridge
+        : null;
+  }
+
+  /// The thumbnail capability, or null when there is no bridge or the loaded
+  /// library predates ABI 8. Exposed so the Project panel (another agent) can
+  /// decode a footage row's thumbnail through one seam.
+  ThumbnailBridge? get thumbnails {
+    final b = bridge;
+    return b is ThumbnailBridge && (b as ThumbnailBridge).supportsThumbnail
+        ? b as ThumbnailBridge
+        : null;
+  }
+
+  /// A cached thumbnail of footage [itemId] whose longer edge is at most
+  /// [maxEdge], or null without the capability. Decoded and cached engine-side,
+  /// so repeated calls are cheap.
+  DecodedFrame? thumbnail(String itemId, int maxEdge) =>
+      thumbnails?.thumbnail(itemId, maxEdge);
+
+  /// Empty the rendered-frame cache now (Settings → Clear cache): the engine
+  /// cache and the Dart-side decoded LRU together. A calm notice reports the
+  /// result; on an older library it says the build is missing the control rather
+  /// than silently doing nothing.
+  void clearCache() {
+    final c = cacheControl;
+    if (c == null) {
+      // Still empty the Dart-side tier; note the engine cache is unavailable.
+      previewCacheClearer?.call();
+      notice = 'cache cleared (this engine build has no frame cache)';
+      notifyListeners();
+      return;
+    }
+    final stats = c.clearCache();
+    previewCacheClearer?.call();
+    notice = 'cache cleared (${stats.entries} engine frames freed)';
+    notifyListeners();
+  }
+
+  /// Set the rendered-frame cache's RAM budget in megabytes (Settings →
+  /// Performance). A quiet no-op without the capability. Clamped to a sane
+  /// minimum so a zero never disables caching by accident.
+  void setCacheBudgetMb(int megabytes) {
+    final c = cacheControl;
+    if (c == null) return;
+    final bytes = megabytes.clamp(16, 1 << 20) * 1024 * 1024;
+    c.setCacheBudget(bytes);
+  }
 
   // --- Bridge v0.4 export -------------------------------------------------
 

@@ -310,8 +310,12 @@ class _SettingsWindowState extends State<SettingsWindow> {
               label: 'Memory budget',
               hint:
                   "The one cap on everything Lumit caches in RAM: rendered frames, decoded video and decoded audio together. Defaults to half the machine's memory.",
-              control: _mb(ws.performance.ramBudgetMb, 2048, 1048576,
-                  (v) => ws.performance.ramBudgetMb = v),
+              control: _mb(ws.performance.ramBudgetMb, 2048, 1048576, (v) {
+                ws.performance.ramBudgetMb = v;
+                // Push the cap to the engine's rendered-frame cache (K-176) — the
+                // dominant RAM tier the bridge holds today.
+                widget.app.setCacheBudgetMb(v);
+              }),
             ),
             _Row(
               label: 'Disk budget',
@@ -329,9 +333,10 @@ class _SettingsWindowState extends State<SettingsWindow> {
           _Group(title: 'Cache', rows: [
             _Row(
               label: 'Clear cache',
-              hint: 'Empty the RAM and video-memory frame caches now.',
+              hint: 'Empty the rendered-frame cache now (engine RAM cache and the '
+                  'Viewer image cache together).',
               control: HouseButton(
-                onPressed: () => widget.app.engine('Clear cache'),
+                onPressed: () => widget.app.clearCache(),
                 child: const Text('Clear cache'),
               ),
             ),
@@ -350,7 +355,10 @@ class _SettingsWindowState extends State<SettingsWindow> {
             _Row(
               label: 'Cache root folder',
               hint:
-                  'Where the on-disk frame cache is stored. Choosing a folder moves new project caches there instead of next to the project file.',
+                  'Where the on-disk frame cache will be stored once the engine '
+                  "disk-cache tier lands. The bridge caches rendered frames in RAM "
+                  'today (Memory budget above); this folder is remembered for the '
+                  'disk tier and does not move anything yet.',
               control: Row(mainAxisSize: MainAxisSize.min, children: [
                 if (ws.performance.cacheRoot != null)
                   HouseButton(

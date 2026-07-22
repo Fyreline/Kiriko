@@ -178,7 +178,20 @@ class PreviewSource extends ChangeNotifier {
         (_renderer.supportsSharedTexture ? ViewerTextureController() : null);
     app.addListener(_onAppChanged);
     app.playheadFrame.addListener(_onAppChanged);
+    // Let Settings → Clear cache empty this decoded-frame LRU too (the engine
+    // cache and this Dart tier are two halves of the same thing, K-176).
+    app.previewCacheClearer = clearDecodedCache;
     _resolveAndDecode();
+  }
+
+  /// Empty the decoded-frame LRU (the Dart-side tier of the rendered-frame
+  /// cache), disposing each held image. The next frame re-decodes. Wired to
+  /// Settings → Clear cache via [AppStateStub.previewCacheClearer].
+  void clearDecodedCache() {
+    for (final entry in _cache.values) {
+      entry.image.dispose();
+    }
+    _cache.clear();
   }
 
   /// What the Viewer resolved this frame (null = no single-layer footage under
@@ -227,6 +240,21 @@ class PreviewSource extends ChangeNotifier {
     _resolveAndDecode();
   }
 
+  /// Publish [generation] to the engine as the newest wanted primary render, so a
+  /// stale render already queued behind the renderer lock is skipped before it
+  /// starts (engine-side cancellation, K-176). A fast atomic store on the UI
+  /// isolate through the bridge's [RenderCancelBridge] capability; a no-op when
+  /// the loaded library is older (the symbol is absent) or there is no bridge.
+  /// Only the primary comp/shared render publishes — the throttled scope render
+  /// uses a higher generation it does not publish, so it is never mistaken for a
+  /// supersession of the picture the Viewer shows.
+  void _publishGeneration(int generation) {
+    final b = app.bridge;
+    if (b is RenderCancelBridge && (b as RenderCancelBridge).supportsRenderCancel) {
+      (b as RenderCancelBridge).renderCancelStale(generation);
+    }
+  }
+
   void _resolveAndDecode() {
     // Prefer the zero-copy shared-texture path (K-177); then the read-back
     // composited-comp path; only when both decline do we fall to the
@@ -262,7 +290,9 @@ class PreviewSource extends ChangeNotifier {
     }
     _pendingKey = 'shared:$compId@$frame';
     var settled = false;
-    _renderer.requestShared(compId, frame, ++_seq, (shared) async {
+    final gen = ++_seq;
+    _publishGeneration(gen);
+    _renderer.requestShared(compId, frame, gen, (shared) async {
       settled = true;
       if (_disposed) return;
       _pendingKey = null;
@@ -385,7 +415,9 @@ class PreviewSource extends ChangeNotifier {
     // the only request in flight until its reply arrives.
     _pendingKey = key;
     var settled = false;
-    _renderer.requestComp(compId, frame, 1.0, ++_seq, (rendered) {
+    final gen = ++_seq;
+    _publishGeneration(gen);
+    _renderer.requestComp(compId, frame, 1.0, gen, (rendered) {
       settled = true;
       if (_disposed) return;
       _pendingKey = null;
@@ -534,6 +566,9 @@ class PreviewSource extends ChangeNotifier {
     _disposed = true;
     app.removeListener(_onAppChanged);
     app.playheadFrame.removeListener(_onAppChanged);
+    if (identical(app.previewCacheClearer, clearDecodedCache)) {
+      app.previewCacheClearer = null;
+    }
     _textureController?.dispose();
     _renderer.dispose();
     for (final entry in _cache.values) {

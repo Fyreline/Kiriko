@@ -23,6 +23,36 @@ import '../theme/theme.dart';
 import '../widgets/controls.dart';
 import 'preview_source.dart';
 import 'slate.dart';
+import 'viewer_overlays.dart';
+import 'viewer_toolbar.dart';
+
+/// The next playhead frame during playback — looping the work area when one is
+/// set, else the whole comp. Mirrors the egui transport (playback.rs
+/// `comp_cached_tick`): the loop span is `[waStart, waEnd)` (out edge exclusive),
+/// a playhead scrubbed outside the area snaps back to its start, and the wrap is
+/// modular so a large [advance] still lands inside the span. Pure, so it
+/// unit-tests without a ticker. [workArea] is `[inFrame, outFrame]` or null for
+/// the whole comp.
+int workAreaLoopFrame({
+  required int current,
+  required int advance,
+  required int frameCount,
+  List<int>? workArea,
+}) {
+  if (frameCount <= 0) return 0;
+  final waStart = (workArea != null ? workArea[0] : 0).clamp(0, frameCount - 1);
+  final waEnd =
+      (workArea != null ? workArea[1] : frameCount).clamp(waStart + 1, frameCount);
+  final span = waEnd - waStart;
+  if (current < waStart || current >= waEnd) {
+    return waStart; // scrubbed outside the area — clamp back in
+  }
+  final next = current + advance;
+  if (next >= waEnd) {
+    return waStart + ((next - waStart) % span); // loop the work area
+  }
+  return next;
+}
 
 class ViewerPanel extends StatefulWidget {
   final AppStateStub app;
@@ -89,11 +119,12 @@ class _ViewerPanelState extends State<ViewerPanel>
 
     final advance = _frameAccum.floor();
     _frameAccum -= advance;
-    var next = app.previewFrame + advance;
-    if (next >= frameCount) {
-      next = next % frameCount; // loop the composition
-    }
-    app.advancePlayback(next);
+    app.advancePlayback(workAreaLoopFrame(
+      current: app.previewFrame,
+      advance: advance,
+      frameCount: frameCount,
+      workArea: comp.workArea,
+    ));
   }
 
   @override
@@ -103,10 +134,18 @@ class _ViewerPanelState extends State<ViewerPanel>
       color: t.viewerSurround,
       child: Column(
         children: [
+          // The tool row above the stage (Select / Hand / Shape / Pen).
+          ViewerToolbar(app: app),
           Expanded(
             child: ListenableBuilder(
               listenable: Listenable.merge([app, source]),
-              builder: (context, _) => _buildStage(context, t),
+              builder: (context, _) => Stack(
+                fit: StackFit.expand,
+                children: [
+                  _buildStage(context, t),
+                  _buildInteraction(context),
+                ],
+              ),
             ),
           ),
           ListenableBuilder(
@@ -115,6 +154,39 @@ class _ViewerPanelState extends State<ViewerPanel>
           ),
         ],
       ),
+    );
+  }
+
+  /// The interaction overlay (shape-drag, transform gizmo, eyedropper), sized to
+  /// the stage and given the fitted picture's rectangle. It draws nothing when
+  /// there is no picture or no front comp to map against.
+  Widget _buildInteraction(BuildContext context) {
+    final comp = app.frontComp;
+    if (comp == null || comp.width <= 0 || comp.height <= 0) {
+      return const SizedBox.expand();
+    }
+    // The aspect the stage fits to: the shared texture's, else the shown image's.
+    double? aspect;
+    if (source.sharedActive) {
+      aspect = source.sharedAspect;
+    } else {
+      final img = source.image;
+      if (img != null && img.height > 0) aspect = img.width / img.height;
+    }
+    aspect ??= comp.width / comp.height;
+    final a = aspect;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final rect = _fittedRect(
+            Size(constraints.maxWidth, constraints.maxHeight), a);
+        return ViewerInteractionLayer(
+          app: app,
+          source: source,
+          imageRect: rect,
+          compWidth: comp.width,
+          compHeight: comp.height,
+        );
+      },
     );
   }
 
@@ -218,11 +290,42 @@ class _ViewerPanelState extends State<ViewerPanel>
             ),
           ),
           const Spacer(),
-          Text('Full', style: t.small),
+          // The resolution (preview scale) picker — Full / Half / Third /
+          // Quarter. The bridge render call takes a scale; the tooltip is honest
+          // that this is a preview downsample, not a lower-quality export.
+          LumitTooltip(
+            message: 'Preview resolution (downsamples the preview render; the '
+                'export is always full quality)',
+            child: BareDropdown<PreviewScale>(
+              key: const ValueKey('resolution-picker'),
+              value: app.previewScale,
+              options: PreviewScale.values,
+              label: (s) => s.label,
+              onChanged: app.setPreviewScale,
+            ),
+          ),
         ],
       ),
     );
   }
+}
+
+/// The centred, aspect-preserved rectangle a picture of [aspect] fits into a
+/// [stage] — the same fit the `_FittedImage`/`Texture` uses, so the interaction
+/// overlay lands exactly over the shown pixels.
+Rect _fittedRect(Size stage, double aspect) {
+  if (stage.width <= 0 || stage.height <= 0 || aspect <= 0) {
+    return Rect.zero;
+  }
+  var w = stage.width;
+  var h = w / aspect;
+  if (h > stage.height) {
+    h = stage.height;
+    w = h * aspect;
+  }
+  final left = (stage.width - w) / 2;
+  final top = (stage.height - h) / 2;
+  return Rect.fromLTWH(left, top, w, h);
 }
 
 /// Frame → SMPTE non-drop timecode (HH:MM:SS:FF) at [fps]. A zero/degenerate

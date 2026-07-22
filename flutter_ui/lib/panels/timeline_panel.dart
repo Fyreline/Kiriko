@@ -13,11 +13,14 @@ import 'package:flutter/widgets.dart';
 
 import '../bridge/bridge.dart';
 import '../icons/icons.dart';
+import '../shell/dialogs.dart';
 import '../state/app_state.dart';
 import '../widgets/controls.dart';
 import 'timeline/comp_tabs.dart';
 import 'timeline/graph_editor.dart';
 import 'timeline/group_header.dart';
+import 'timeline/keyframe_clipboard.dart';
+import 'timeline/lane_context_menu.dart';
 import 'timeline/lane_host.dart';
 import 'timeline/lane_scale.dart';
 import 'timeline/lane_selection.dart';
@@ -27,8 +30,9 @@ import 'timeline/property_rows.dart';
 import 'timeline/ruler.dart';
 import 'timeline/search.dart';
 
-/// The fixed outline-column width (px). Resizable later; F3 pins it at 260 and
-/// degrades the switch cluster when the panel is too narrow to hold it.
+/// The default outline-column width (px). The divider between the outline and
+/// the lane drags it (session-only), and it degrades the switch cluster when
+/// the panel is too narrow to hold the wider setting.
 const double _kOutlineWidth = 260;
 const double _kRulerHeight = 36;
 
@@ -91,6 +95,15 @@ class _TimelineBodyState extends State<_TimelineBody>
   /// The horizontal pan: the view's left-edge comp frame (0 = comp start).
   /// Persisted only for this session (widget state), as the brief asks.
   double _viewStart = 0;
+
+  /// The outline-column width, dragged by the divider between the outline and
+  /// the lane (egui persists it; session-only widget state here, like [_viewStart]).
+  double _outlineWidth = _kOutlineWidth;
+
+  /// Whether the lane time grid (vertical guide lines) is drawn — the empty-lane
+  /// menu's "Show time grid" toggle, session-only lane state (egui's
+  /// `TimelineGrid`, panel.rs:398).
+  bool _showTimeGrid = false;
 
   /// The layer-search query (case-insensitive substring filter).
   final TextEditingController _searchController = TextEditingController();
@@ -210,10 +223,73 @@ class _TimelineBodyState extends State<_TimelineBody>
   }
 
   @override
+  void initState() {
+    super.initState();
+    // Install the keyframe copy/paste handlers the shell's Ctrl+C/V drive (the
+    // selection lives here; the clipboard payload lives on the app state so it
+    // survives this body being rebuilt).
+    app.copyKeyframesHandler = _copySelectedKeyframes;
+    app.pasteKeyframesHandler = _pasteKeyframes;
+  }
+
+  @override
   void dispose() {
+    // Uninstall our handlers only if they are still ours (a newer body may have
+    // replaced them).
+    if (app.copyKeyframesHandler == _copySelectedKeyframes) {
+      app.copyKeyframesHandler = null;
+    }
+    if (app.pasteKeyframesHandler == _pasteKeyframes) {
+      app.pasteKeyframesHandler = null;
+    }
     _searchController.dispose();
     _searchFocus.dispose();
     super.dispose();
+  }
+
+  /// Copy the selected lane keys into the app clipboard (egui note 2.2). A quiet
+  /// no-op when nothing is selected.
+  void _copySelectedKeyframes() {
+    if (_selectedKeys.isEmpty) return;
+    final clip = buildKeyframeClipboard(_selectedKeys, widget.comp);
+    if (clip.isEmpty) return;
+    app.keyframeClipboard = clip.encode();
+    app.setNotice(_selectedKeys.length == 1
+        ? '1 keyframe copied'
+        : '${_selectedKeys.length} keyframes copied');
+  }
+
+  /// Paste the copied keys at the playhead: values in one batch per layer, then
+  /// each eased key's shape restored, then the selection follows the paste.
+  void _pasteKeyframes() {
+    final clip = KeyframeClipboard.decode(app.keyframeClipboard);
+    if (clip.isEmpty) return;
+    final playhead = app.previewFrame;
+    for (final layerId in clip.layerIds) {
+      app.applyKeyframeBatch(
+          widget.compId, layerId, pasteAddBatchJson(clip, layerId, playhead));
+    }
+    // Restore the easing the value-only batch could not carry.
+    for (final k in clip.keys) {
+      if (!k.eases) continue;
+      app.setKeyframeInterp(
+        widget.compId,
+        k.layerId,
+        k.property,
+        playhead + k.frameOffset,
+        k.interpIn,
+        k.interpOut,
+        speedIn: k.speedIn ?? 0,
+        influenceIn: k.influenceIn ?? 1.0 / 3.0,
+        speedOut: k.speedOut ?? 0,
+        influenceOut: k.influenceOut ?? 1.0 / 3.0,
+      );
+    }
+    setState(() {
+      _selectedKeys
+        ..clear()
+        ..addAll(pastedKeyIds(clip, playhead));
+    });
   }
 
   @override
@@ -308,10 +384,10 @@ class _TimelineBodyState extends State<_TimelineBody>
     return LayoutBuilder(
       builder: (context, constraints) {
         final totalW = constraints.maxWidth;
-        // The outline never swallows the lane; below ~340 px it shrinks so the
-        // lane keeps at least 80 px, and the switch cluster degrades to suit.
+        // The outline never swallows the lane; the dragged width is clamped so
+        // the lane keeps at least 80 px, and the switch cluster degrades to suit.
         final outlineW =
-            _kOutlineWidth.clamp(60.0, (totalW - 80).clamp(60.0, _kOutlineWidth));
+            _outlineWidth.clamp(60.0, (totalW - 80).clamp(60.0, double.infinity));
         final trackLeft = outlineW.toDouble();
         final trackW = (totalW - outlineW - 8).clamp(40.0, double.infinity);
         final scale = LaneScale.fit(
@@ -347,10 +423,20 @@ class _TimelineBodyState extends State<_TimelineBody>
                         ),
                         alignment: Alignment.centerLeft,
                         padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: _SearchField(
-                          controller: _searchController,
-                          focus: _searchFocus,
-                          onChanged: (v) => setState(() => _search = v),
+                        // The top row (egui's timeline header): the layer search
+                        // and, at its right, the composition motion-blur master.
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: _SearchField(
+                                controller: _searchController,
+                                focus: _searchFocus,
+                                onChanged: (v) => setState(() => _search = v),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            _MotionBlurMaster(app: app),
+                          ],
                         ),
                       ),
                       Expanded(
@@ -431,6 +517,25 @@ class _TimelineBodyState extends State<_TimelineBody>
                   ),
                 );
               }),
+            // The outline/lane divider: drag it to resize the outline column
+            // (session-only, egui persists it). Clamped so the lane keeps 80 px.
+            Positioned(
+              left: (outlineW - 3).toDouble(),
+              top: 0,
+              bottom: scale.canPan ? _PanScrollbar.height : 0,
+              width: 6,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.resizeLeftRight,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onHorizontalDragUpdate: (d) => setState(() {
+                    _outlineWidth = (_outlineWidth + d.delta.dx)
+                        .clamp(60.0, (totalW - 80).clamp(60.0, double.infinity));
+                  }),
+                  child: const SizedBox.expand(),
+                ),
+              ),
+            ),
             // The playhead line is the only thing that moves per frame, so it
             // alone watches the fine-grained playhead notifier — the ruler,
             // layer rows and lanes above stay outside this rebuild (perf pass:
@@ -467,37 +572,75 @@ class _TimelineBodyState extends State<_TimelineBody>
     List<BridgeLayer> layers,
     double outlineW,
   ) {
-    return app.timelineGraphMode
-        ? GraphEditor(
-            app: app,
-            comp: widget.comp,
-            compId: widget.compId,
+    if (app.timelineGraphMode) {
+      return GraphEditor(
+        app: app,
+        comp: widget.comp,
+        compId: widget.compId,
+        scale: scale,
+      );
+    }
+    final t = ThemeScope.of(context).theme;
+    // The lane background: the optional time grid, and a right-click target for
+    // the empty-lane context menu. Drawn BEHIND the rows so a clip bar or a
+    // keyframe (with its own handlers) wins the hit-test — the menu opens only
+    // on empty lane space (egui adds the marquee bg before the rows, panel.rs:357).
+    final background = Positioned.fill(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onSecondaryTapDown: (d) {
+          if (d.localPosition.dx >= scale.trackLeft) {
+            _openLaneMenu(d.globalPosition);
+          }
+        },
+        child: CustomPaint(
+          painter: _TimeGridPainter(
             scale: scale,
-          )
-        : Listener(
-                          onPointerSignal: (e) {
-                            if (e is! PointerScrollEvent || !scale.canPan) {
-                              return;
-                            }
-                            final shift =
-                                HardwareKeyboard.instance.isShiftPressed;
-                            final dx = e.scrollDelta.dx != 0
-                                ? e.scrollDelta.dx
-                                : (shift ? e.scrollDelta.dy : 0);
-                            if (dx == 0) return;
-                            _pan(dx / scale.pxPerFrame,
-                                widget.comp.frameCount, app.timelineZoom);
-                          },
-                          child: SingleChildScrollView(
-                            child: Column(
-                              children: [
-                                for (var i = 0; i < layers.length; i++)
-                                  ..._layerBlock(layers[i], i,
-                                      outlineW.toDouble(), scale, fps, markers),
-                              ],
-                            ),
-                          ),
-                        );
+            fps: fps,
+            show: _showTimeGrid,
+            line: t.hairline,
+          ),
+        ),
+      ),
+    );
+    final rows = Positioned.fill(
+      child: Listener(
+        onPointerSignal: (e) {
+          if (e is! PointerScrollEvent || !scale.canPan) return;
+          final shift = HardwareKeyboard.instance.isShiftPressed;
+          final dx = e.scrollDelta.dx != 0
+              ? e.scrollDelta.dx
+              : (shift ? e.scrollDelta.dy : 0);
+          if (dx == 0) return;
+          _pan(dx / scale.pxPerFrame, widget.comp.frameCount, app.timelineZoom);
+        },
+        child: SingleChildScrollView(
+          child: Column(
+            children: [
+              for (var i = 0; i < layers.length; i++)
+                ..._layerBlock(
+                    layers[i], i, outlineW.toDouble(), scale, fps, markers),
+            ],
+          ),
+        ),
+      ),
+    );
+    return Stack(children: [background, rows]);
+  }
+
+  /// Open the empty-lane context menu at [globalPosition] (row 2). Comp settings
+  /// routes to the shared dialogue; Reveal in project / grid / beats go through
+  /// the app state and this body's own grid toggle.
+  void _openLaneMenu(Offset globalPosition) {
+    showLaneContextMenu(
+      context: context,
+      app: app,
+      compId: widget.compId,
+      showTimeGrid: _showTimeGrid,
+      onToggleGrid: () => setState(() => _showTimeGrid = !_showTimeGrid),
+      onCompositionSettings: () => showCompositionSettingsDialog(context, app),
+      position: globalPosition,
+    );
   }
 
   /// One layer's rows: the clip row, then — when its twirl is open — the
@@ -894,8 +1037,6 @@ class _BottomBar extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: 8),
-          _MotionBlurMaster(app: app),
                 ],
               ),
             ),
@@ -919,12 +1060,61 @@ class _BottomBar extends StatelessWidget {
   }
 }
 
+/// The lane time grid: faint vertical guide lines at the ruler's labelled
+/// second ticks, drawn behind the rows when "Show time grid" is on (egui's
+/// `TimelineGrid::Time`). Draws nothing when [show] is false.
+class _TimeGridPainter extends CustomPainter {
+  final LaneScale scale;
+  final double fps;
+  final bool show;
+  final Color line;
+
+  _TimeGridPainter({
+    required this.scale,
+    required this.fps,
+    required this.show,
+    required this.line,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (!show || fps <= 0) return;
+    final pxPerSecond = scale.pxPerFrame * fps;
+    if (pxPerSecond <= 0) return;
+    final spec = chooseTicks(pxPerSecond);
+    final viewStartSeconds = scale.viewStartFrame / fps;
+    final viewEndSeconds = viewStartSeconds + scale.trackWidth / pxPerSecond;
+    final durationSeconds = scale.frameCount / fps;
+    final paint = Paint()
+      ..color = line
+      ..strokeWidth = 0.5;
+    var s =
+        (viewStartSeconds / spec.secondsPerLabel).floor() * spec.secondsPerLabel;
+    while (s <= viewEndSeconds && s <= durationSeconds + 1e-6) {
+      if (s >= -1e-6) {
+        final x = scale.xOfFrame(s * fps);
+        if (x >= scale.trackLeft - 0.5 &&
+            x <= scale.trackLeft + scale.trackWidth + 0.5) {
+          canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+        }
+      }
+      s += spec.secondsPerLabel;
+    }
+  }
+
+  @override
+  bool shouldRepaint(_TimeGridPainter old) =>
+      old.show != show ||
+      old.fps != fps ||
+      old.scale.pxPerFrame != scale.pxPerFrame ||
+      old.scale.viewStartFrame != scale.viewStartFrame ||
+      old.scale.trackWidth != scale.trackWidth;
+}
+
 /// The composition motion-blur master (T9/T22): the comp-wide enable that the
-/// per-layer motion-blur switches need. egui puts this in the Timeline's top
-/// row; that strip is shared here, so — as the port allows — it sits in the
-/// bottom bar for now (INTEGRATOR: move it up to the top row alongside the
-/// search box once that row is owned in one place). Toggling flips only the
-/// master enable, preserving the comp's shutter angle/phase/samples.
+/// per-layer motion-blur switches need. It sits in the Timeline's top row
+/// (egui's home for it), at the right of the layer-search box. Toggling flips
+/// only the master enable, preserving the comp's shutter angle/phase/samples.
 class _MotionBlurMaster extends StatelessWidget {
   final AppStateStub app;
   const _MotionBlurMaster({required this.app});
