@@ -456,8 +456,71 @@ class AppStateStub extends ChangeNotifier {
     notifyListeners();
   }
 
+  // --- Audio playback (bridge v0.10, docs/09) ------------------------------
+  //
+  // The engine owns one audio engine for the session; the sound card's clock
+  // is the playback master and the Viewer's ticker chases it (the picture asks
+  // "what time is it?" — docs/impl/playback-scheduler.md §4). Everything here
+  // degrades to the wall-clock transport when the capability is absent (an old
+  // library, the placeholder build, every existing fake), so no behaviour
+  // changes without it.
+
+  /// The audio playback capability, when the loaded library offers it.
+  AudioPlaybackBridge? get audioBridge {
+    final b = bridge;
+    // No promotion from DocumentBridge? to the unrelated capability type, so
+    // the cast is explicit (the same shape as [cacheControl]).
+    return b is AudioPlaybackBridge &&
+            (b as AudioPlaybackBridge).supportsAudioPlayback
+        ? b as AudioPlaybackBridge
+        : null;
+  }
+
+  /// Whether the engine reported a loaded comp mix on the last clock poll (or
+  /// play call). Gates the re-prepare on edit, so a comp merely on screen
+  /// never starts decoding audio — mirroring egui's `sync_comp_audio` "only
+  /// manage audio we are already responsible for".
+  bool _audioLoaded = false;
+
+  /// Poll the engine's audio clock (one cheap FFI call), or null when the
+  /// capability is absent. Updates the loaded flag the edit hook reads.
+  AudioClock? pollAudioClock() {
+    final a = audioBridge;
+    if (a == null) return null;
+    final clock = a.audioClock();
+    _audioLoaded = clock.loaded;
+    return clock;
+  }
+
+  /// Start (or restart) the front comp's audio from [frame] — the play press
+  /// and the work-area loop wrap both land here. A silent comp, a missing
+  /// capability or a degenerate rate are quiet no-ops.
+  void audioPlayFrom(int frame) {
+    final a = audioBridge;
+    final id = frontCompIdResolved;
+    final fps = frontComp?.fps.fps ?? 0;
+    if (a == null || id == null || fps <= 0) return;
+    a.audioPlay(id, frame / fps);
+    _audioLoaded = true; // optimistic; the next clock poll corrects it
+  }
+
+  /// Pause the engine audio and park its clock on [previewFrame] — the scrub/
+  /// stop path, so a later play resumes from where the picture stands.
+  void _audioPauseAtPlayhead() {
+    final a = audioBridge;
+    if (a == null) return;
+    a.audioPause();
+    final fps = frontComp?.fps.fps ?? 0;
+    if (fps > 0) a.audioSeek(previewFrame / fps);
+  }
+
   void togglePlay() {
     playing = !playing;
+    if (playing) {
+      audioPlayFrom(previewFrame);
+    } else {
+      audioBridge?.audioPause();
+    }
     notifyListeners();
   }
 
@@ -465,6 +528,7 @@ class AppStateStub extends ChangeNotifier {
     final wasPlaying = playing;
     playing = false;
     _setPlayhead((previewFrame + delta).clamp(0, previewFrameCount));
+    _audioPauseAtPlayhead();
     _scheduleSessionPersist();
     // Only the transport-state change needs the big notifier; the frame move
     // itself rides [playheadFrame], so layer rows do not rebuild.
@@ -475,6 +539,7 @@ class AppStateStub extends ChangeNotifier {
     final wasPlaying = playing;
     playing = false;
     _setPlayhead(frame.clamp(0, previewFrameCount));
+    _audioPauseAtPlayhead();
     _scheduleSessionPersist();
     if (wasPlaying) notifyListeners();
   }
@@ -712,6 +777,10 @@ class AppStateStub extends ChangeNotifier {
     frontCompId = id;
     previewFrameCount = frontComp?.frameCount ?? previewFrameCount;
     _setPlayhead(previewFrame.clamp(0, previewFrameCount));
+    // Fronting another comp mid-playback moves the sound with the picture:
+    // the engine silences the old mix and chases the new comp's (the picture
+    // stays on the wall clock until its mix lands).
+    if (playing) audioPlayFrom(previewFrame);
     _scheduleSessionPersist();
     notifyListeners();
   }
@@ -2118,6 +2187,15 @@ class AppStateStub extends ChangeNotifier {
     if (fc != null) {
       previewFrameCount = fc.frameCount;
       _setPlayhead(previewFrame.clamp(0, previewFrameCount));
+    }
+    // An edit while audio is loaded or playing re-prepares the mix, so a
+    // mute/solo/move/trim/Volume change is heard (egui's `sync_comp_audio`).
+    // The engine's jobs signature makes an unchanged mix a no-op, and a
+    // changed one swaps in mid-playback with the clock kept. Gated on
+    // loaded/playing so a comp merely on screen never starts decoding audio.
+    if (playing || _audioLoaded) {
+      final id = frontCompIdResolved;
+      if (id != null) audioBridge?.audioPrepare(id);
     }
   }
 

@@ -2885,3 +2885,40 @@ the *speed* curve for retimed clips today; the value curve is a large, separate
 build, and drawing it at low fidelity (straight lines where real curves belong)
 would look wrong, so it is left as an honest, named remainder rather than
 half-built (see `docs/flutter-port/06-REMAINING-WORK.md` §C).
+
+**Audio playback in the Flutter frontend.** Until this change, pressing play in
+the Flutter window moved the picture but made no sound at all — the playhead
+was advanced by an ordinary interface timer. Now the same audio machinery the
+egui application uses is wired through the bridge, and it works the way all
+good playback works: **there is exactly one clock, and the sound card owns
+it.** The sound card asks for its next slice of samples on a strict schedule it
+controls; counting how many samples it has consumed *is* the playback time.
+Every screen refresh, the Viewer asks the engine "what time is it?" and shows
+the frame for that answer — the picture chases the sound, which is why the two
+can never drift apart.
+
+When you press play, the engine walks the composition for every audible layer
+that carries sound, decodes those files once (they are kept for the session),
+lays each one on a long strip at its own start time and volume — the *mix
+plan* — and hands the plan to the sound card's thread. All of that happens in
+the background: the play press returns instantly, and until the sound is ready
+the picture simply runs on the old interface timer, then hands over to the
+audio clock the moment it is loaded.
+
+Editing while playing is the nice part. Mute a layer, drag a clip, trim it,
+nudge a volume — the interface tells the engine "the comp changed", the engine
+compares a fingerprint of what the mix *should* be against what is loaded, and
+if they differ it builds a fresh plan and **swaps** it in without touching the
+clock or stopping the sound. You hear the edit on the next slice the sound card
+asks for, about a hundredth of a second later. If nothing that affects sound
+changed, the fingerprint matches and nothing happens at all.
+
+A machine with no speakers or sound device is handled calmly: the engine notes
+"no audio" once and playback simply runs silent on the interface timer, exactly
+as before — no errors, no retries. The same is true for a composition with no
+audio layers, and for the loop: when playback wraps around the work area, the
+audio is asked to jump back to the loop start and keep going. Two known
+remainders are named rather than built: output-latency compensation (the few
+milliseconds between the clock and the speaker cone — within the ±half-frame
+tolerance the performance rules allow) and the per-layer waveform lanes the
+egui timeline draws.

@@ -660,3 +660,30 @@ hotkeys, and their absence makes testing feel clunky).
   guard), `final_sweep_test.dart` (thumbnail seam + epoch re-decode), `edit_ops_test.dart`
   (sync fake path, reply adoption, worker error shape) and `viewer_gizmo_test.dart`
   (eyedropper commits through the existing op).
+
+- [x] **No audio playback at all.** Play moved the picture but never made a sound: the
+  Flutter transport was a Dart `Ticker` advancing the playhead on the wall clock, and
+  nothing ever opened `lumit-audio`'s proven `AudioEngine`. Closed by growing the bridge an
+  audio surface (bridge v0.10): `audio_prepare`/`audio_play`/`audio_pause`/`audio_seek`/
+  `audio_stop` plus an allocation-free per-tick `audio_clock` poll, and the Viewer's ticker
+  now treats the sound card's clock as the playback master — the picture chases it
+  (docs/impl/playback-scheduler.md §4), falling back to the wall clock for a silent comp,
+  no output device, or an old library, so every existing test and fake is untouched.
+  Engine side: the cpal stream is not `Send`, so one session `AudioEngine` lives on a
+  dedicated audio thread taking commands over a channel (a new `ClockHandle` in
+  `lumit-audio` carries the clock's atomics across threads); a background prepare worker
+  (one at a time, latest-wins mailbox) builds the mix through a new GPU-free
+  `lumit_ui::headless::AudioJobsBuilder` seam — extracted from the renderer so preparing
+  sound never queues behind the session RENDERER lock — decodes each item once at the
+  device rate, and installs a live `MixPlan`. An edit while loaded/playing re-prepares:
+  the egui jobs-signature idea makes an unchanged mix a no-op and a changed one a
+  mid-playback `swap_plan` (clock and play state kept — the docs/09 §6 instant-edit
+  contract, so mute/solo/move/trim/Volume are heard in ~10 ms). No lock is ever held
+  across a probe, decode, mix or the FFI boundary; a device-less machine resolves to a
+  calm terminal no-audio state. Tests: `audio.rs` (signature tracks every sound-changing
+  edit; plan building places/skips/rejects wrong-rate buffers; calm errors), `ffi.rs`
+  (clock out-pointer null-safety), `lumit-audio` (the clock handle reads the callback's
+  atomics from another thread), `headless.rs` (the jobs builder needs no GPU and caches
+  its probes), and `audio_playback_test.dart` (transport→audio calls with the right start
+  seconds, scrub parks the clock, edit re-prepares, the tick chases a fake clock with the
+  work-area wrap re-seeking, and the wall-clock fallback stays intact).
