@@ -171,6 +171,7 @@ class _SettingsWindowState extends State<SettingsWindow> {
                   value: ws.autosave.intervalMins,
                   min: 1,
                   max: 60,
+                  resetTo: 5, // the default interval (AUTOSAVE_INTERVAL_SECS)
                   onChanged: (v) => setState(() {
                     ws.autosave.intervalMins = v.round();
                     ws.touch();
@@ -185,6 +186,7 @@ class _SettingsWindowState extends State<SettingsWindow> {
                 value: ws.autosave.keep,
                 min: 1,
                 max: 50,
+                resetTo: 3, // the default copies kept (AUTOSAVE_KEEP)
                 onChanged: (v) => setState(() {
                   ws.autosave.keep = v.round();
                   ws.touch();
@@ -315,19 +317,19 @@ class _SettingsWindowState extends State<SettingsWindow> {
                 // Push the cap to the engine's rendered-frame cache (K-176) — the
                 // dominant RAM tier the bridge holds today.
                 widget.app.setCacheBudgetMb(v);
-              }),
+              }, resetTo: PerformanceSettings.defaultRamBudgetMb()),
             ),
             _Row(
               label: 'Disk budget',
               hint: 'Cap on the on-disk frame cache (.lum-cache).',
               control: _mb(ws.performance.diskCacheMb, 0, 1048576,
-                  (v) => ws.performance.diskCacheMb = v),
+                  (v) => ws.performance.diskCacheMb = v, resetTo: 50 * 1024),
             ),
             _Row(
               label: 'Video memory budget',
               hint: 'How much VRAM the displayed-frame cache may hold.',
               control: _mb(ws.performance.vramCacheMb, 128, 16384,
-                  (v) => ws.performance.vramCacheMb = v),
+                  (v) => ws.performance.vramCacheMb = v, resetTo: 512),
             ),
           ]),
           _Group(title: 'Cache', rows: [
@@ -391,7 +393,8 @@ class _SettingsWindowState extends State<SettingsWindow> {
         ],
       );
 
-  Widget _mb(int value, int min, int max, void Function(int) set) {
+  Widget _mb(int value, int min, int max, void Function(int) set,
+      {int? resetTo}) {
     final t = ws.theme;
     return Row(mainAxisSize: MainAxisSize.min, children: [
       Text('MB', style: t.small),
@@ -401,6 +404,7 @@ class _SettingsWindowState extends State<SettingsWindow> {
         min: min,
         max: max,
         speed: 64,
+        resetTo: resetTo,
         onChanged: (v) => setState(() {
           set(v.round());
           ws.touch();

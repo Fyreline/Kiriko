@@ -248,6 +248,8 @@ class _CompDialogState extends State<_CompDialog> {
                   min: 16,
                   max: 16384,
                   speed: 8,
+                  // The default comp width (egui open_new_comp_dialog: 1920×1080).
+                  resetTo: 1920,
                   onChanged: (v) => setState(() => _width = v.round()),
                 ),
                 Padding(
@@ -259,6 +261,7 @@ class _CompDialogState extends State<_CompDialog> {
                   min: 16,
                   max: 16384,
                   speed: 8,
+                  resetTo: 1080,
                   onChanged: (v) => setState(() => _height = v.round()),
                 ),
               ],
@@ -289,6 +292,8 @@ class _CompDialogState extends State<_CompDialog> {
                   value: _durationS,
                   min: 1,
                   max: 86400,
+                  // The default duration in seconds (egui open_new_comp_dialog).
+                  resetTo: 30,
                   onChanged: (v) => setState(() => _durationS = v.round()),
                 ),
                 const SizedBox(width: 6),

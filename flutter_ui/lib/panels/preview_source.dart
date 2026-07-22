@@ -387,13 +387,20 @@ class PreviewSource extends ChangeNotifier {
     final compId = app.frontCompIdResolved;
     if (compId == null || !_renderer.supportsCompRender) return false;
     final frame = app.previewFrame;
-    final key = 'comp:$compId@$frame';
+    // The resolution picker's downsample factor: the render (and the engine
+    // frame cache, which keys on scale) both honour it, so Half/Third/Quarter
+    // actually render fewer pixels and warm their own per-scale cache entries.
+    final scale = app.previewScale.factor;
+    final key = 'comp:$compId@$frame@$scale';
 
     final cached = _cache[key];
     if (cached != null) {
       final wasComp = _compActive;
       _enterComp();
       _touch(key, cached);
+      // A frame we can serve from the Dart LRU is warm in the engine cache too
+      // (the RAM tier the timeline cache bar draws).
+      app.noteFrameWarmed(compId, frame);
       final changed = !identical(_image, cached.image);
       _image = cached.image;
       _displayedFrame = cached.frame;
@@ -417,7 +424,7 @@ class PreviewSource extends ChangeNotifier {
     var settled = false;
     final gen = ++_seq;
     _publishGeneration(gen);
-    _renderer.requestComp(compId, frame, 1.0, gen, (rendered) {
+    _renderer.requestComp(compId, frame, scale, gen, (rendered) {
       settled = true;
       if (_disposed) return;
       _pendingKey = null;
@@ -428,6 +435,8 @@ class PreviewSource extends ChangeNotifier {
         _drainWanted();
         return;
       }
+      // The engine has rendered and cached this frame (the RAM tier).
+      app.noteFrameWarmed(compId, frame);
       _enterComp();
       _startImageDecode(key, rendered);
       _drainWanted();

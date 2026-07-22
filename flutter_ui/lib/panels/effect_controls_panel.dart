@@ -283,6 +283,8 @@ class _TextGroupState extends State<_TextGroup> {
                   speed: 0.5,
                   decimals: 0,
                   suffix: ' pt',
+                  // The default point size (TextContent.initial.size).
+                  resetTo: 72,
                   onChanged: (v) => _commit(size: v.toDouble()),
                 ),
               ),
@@ -662,6 +664,9 @@ class _TransformRowState extends State<_TransformRow> {
           speed: a.speed,
           decimals: a.decimals,
           suffix: a.suffix,
+          // The property's model default (0 for anchor/position/rotation, 100
+          // for scale/opacity) — the right-click Reset target.
+          resetTo: a.seed,
           onChanged: (v) => _commit(a, v.toDouble()),
         ),
       ));

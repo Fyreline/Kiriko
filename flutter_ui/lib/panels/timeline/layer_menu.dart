@@ -1,10 +1,11 @@
 // The per-layer right-click context menu, ported from the egui
 // `layer_context_menu` (crates/lumit-ui/src/shell/timeline/menu.rs): the things
 // you can do to a layer in one place (the house pattern — right-click, never
-// scattered buttons). The wired entries (Duplicate, Delete, and the Solo /
-// Enabled / Motion blur switch toggles) route to the real ops; the entries the
-// Flutter frontend hasn't grown yet (Rename, Add effect/mask, Convert, Trim)
-// route to `app.engine(...)` so a click is always answered honestly.
+// scattered buttons). Every entry now routes to a real op: Rename opens an
+// in-place outline editor (committing `renameLayer`), Add effect opens the
+// categorised effect picker (committing `addEffect`), Convert to sequenced and
+// Trim to source end call the v0.5 ops (Trim is offered only for a retimed
+// footage clip, as egui does, menu.rs:174-184).
 
 import 'package:flutter/widgets.dart';
 
@@ -27,6 +28,7 @@ enum _LayerMenuAction {
   enabled,
   motionBlur,
   convert,
+  trim,
 }
 
 /// The starter mask shapes the "Add mask" submenu offers (egui menu.rs) — the
@@ -38,15 +40,21 @@ const List<(String label, String kind)> _maskShapes = [
 ];
 
 /// Show the layer context menu at [position] (global) and run the chosen action
-/// against [app]. Mirrors the egui item set; unimplemented entries speak through
-/// the status line.
+/// against [app]. Mirrors the egui item set. [onRename] is called for the
+/// Rename entry so the row can open its in-place outline editor (the row owns
+/// the edit state); every other entry is handled here.
 Future<void> showLayerContextMenu({
   required BuildContext context,
   required AppStateStub app,
   required String compId,
   required BridgeLayer layer,
   required Offset position,
+  VoidCallback? onRename,
 }) async {
+  // Trim to source end is offered only for a retimed footage clip — the egui
+  // condition (menu.rs:174-184: `Footage { retime: Some(_) }`).
+  final retimed =
+      layer.kind == BridgeLayerKind.footage && layer.retime != null;
   final action = await showLumitPopup<_LayerMenuAction>(
     context: context,
     position: position,
@@ -62,7 +70,7 @@ Future<void> showLayerContextMenu({
           ),
           MenuRow(
             onPressed: () => close(_LayerMenuAction.addEffect),
-            child: const Text('Add effect'),
+            child: const _MenuSubmenuLabel('Add effect'),
           ),
           MenuRow(
             onPressed: () => close(_LayerMenuAction.addMask),
@@ -112,6 +120,11 @@ Future<void> showLayerContextMenu({
               onPressed: () => close(_LayerMenuAction.convert),
               child: const Text('Convert to sequenced layer'),
             ),
+            if (retimed)
+              MenuRow(
+                onPressed: () => close(_LayerMenuAction.trim),
+                child: const Text('Trim to source end'),
+              ),
           ],
         ],
       ),
@@ -149,11 +162,87 @@ Future<void> showLayerContextMenu({
           context: context, app: app, compId: compId, layer: layer,
           position: position);
     case _LayerMenuAction.rename:
-      app.engine('Rename layer');
+      // The row owns the in-place editor; it commits `renameLayer`.
+      onRename?.call();
     case _LayerMenuAction.addEffect:
-      app.engine('Add effect');
+      await _showAddEffectMenu(
+          context: context, app: app, compId: compId, layer: layer,
+          position: position);
     case _LayerMenuAction.convert:
-      app.engine('Convert to sequenced layer');
+      app.convertToSequenced(compId, layer.id);
+    case _LayerMenuAction.trim:
+      app.trimToSourceEnd(compId, layer.id);
+  }
+}
+
+/// The "Add effect" submenu: the built-in registry grouped under its category
+/// headings (bridge v0.5 `category`/`categoryLabel`, mirroring the Effects &
+/// presets browser), each row committing the effect through `addEffect`. An
+/// older registry with no categories lists flat under one "Effects" heading. An
+/// empty registry (no bridge) shows a quiet hint.
+Future<void> _showAddEffectMenu({
+  required BuildContext context,
+  required AppStateStub app,
+  required String compId,
+  required BridgeLayer layer,
+  required Offset position,
+}) async {
+  // Group by category, preserving the registry's order (first-seen wins) — the
+  // same grouping the Effects & presets panel uses.
+  final groups = <String, (String, List<BridgeEffectInfo>)>{};
+  for (final e in app.listEffects()) {
+    final key = e.category.isEmpty ? '' : e.category;
+    final label = e.categoryLabel.isEmpty ? 'Effects' : e.categoryLabel;
+    (groups[key] ??= (label, <BridgeEffectInfo>[])).$2.add(e);
+  }
+  final name = await showLumitPopup<String>(
+    context: context,
+    position: position,
+    builder: (close) => FloatSurface(
+      width: 220,
+      child: groups.isEmpty
+          ? const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: Text('No effects available'),
+            )
+          : ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 420),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final entry in groups.entries) ...[
+                      if (entry.key.isNotEmpty)
+                        _MenuCategoryHeading(entry.value.$1),
+                      for (final e in entry.value.$2)
+                        MenuRow(
+                          onPressed: () => close(e.name),
+                          child: Text(e.label),
+                        ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+    ),
+  );
+  if (name != null) app.addEffect(compId, layer.id, name);
+}
+
+/// A muted category heading inside the Add-effect submenu.
+class _MenuCategoryHeading extends StatelessWidget {
+  final String label;
+  const _MenuCategoryHeading(this.label);
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 2),
+      child: Text(label,
+          style: t.small.copyWith(
+              color: t.textMuted, fontWeight: FontWeight.w600)),
+    );
   }
 }
 

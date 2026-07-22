@@ -1333,11 +1333,74 @@ class AppStateStub extends ChangeNotifier {
   DecodedFrame? thumbnail(String itemId, int maxEdge) =>
       thumbnails?.thumbnail(itemId, maxEdge);
 
+  /// The rendered-frame cache's live stats, or the empty default without the
+  /// capability. The Timeline cache bar polls this on the app cadence (never
+  /// per-paint) so it can size the RAM tier against the budget.
+  BridgeCacheStats cacheStats() =>
+      cacheControl?.cacheStats() ?? BridgeCacheStats.empty;
+
+  // --- Cache bar warm-frame tracking (the RAM tier) -----------------------
+  //
+  // The bridge `cache_stats` export reports only aggregate counters
+  // (used/budget/entries/hits/misses), not WHICH comp frames are warm — so the
+  // Dart side records the frames it has itself driven into the engine cache to
+  // draw egui's per-frame cache bar (previewing.rs `cache_bar`, the RAM tier).
+  // The set is scoped to one (comp, scale): a document edit invalidates the
+  // engine's rendered frames, so any adopt clears it, and changing the preview
+  // scale re-scopes it (egui folds the quality tag into its bar memo key). The
+  // [PreviewSource] calls [noteFrameWarmed] as each comp frame lands.
+
+  final Set<int> _warmFrames = {};
+  String? _warmComp;
+  PreviewScale _warmScale = PreviewScale.full;
+
+  /// Bumped whenever the warm-frame set changes, so the cache bar rebuilds off a
+  /// fine-grained notifier rather than the big document one.
+  final ValueNotifier<int> cacheBarRevision = ValueNotifier<int>(0);
+
+  /// The warm comp frames (the RAM tier) for [compId] at the current preview
+  /// scale, or an empty set when the scope has moved on.
+  Set<int> warmFramesFor(String compId) =>
+      _warmComp == compId && _warmScale == previewScale
+          ? _warmFrames
+          : const <int>{};
+
+  /// Record that comp [compId] frame [frame] is now in the engine RAM cache
+  /// (the [PreviewSource] calls this after a successful comp render). Re-scopes
+  /// the set when the comp or the preview scale has changed.
+  void noteFrameWarmed(String compId, int frame) {
+    if (_warmComp != compId || _warmScale != previewScale) {
+      _warmComp = compId;
+      _warmScale = previewScale;
+      _warmFrames.clear();
+    }
+    // Cap the tracked set to the engine's true entry count so a budget eviction
+    // (LRU) is reflected honestly rather than overstating warmth. Approximate:
+    // drop the oldest-noted frames when we exceed what the cache can hold.
+    if (_warmFrames.add(frame)) {
+      final entries = cacheStats().entries;
+      if (entries > 0 && _warmFrames.length > entries) {
+        final overflow = _warmFrames.length - entries;
+        final oldest = _warmFrames.take(overflow).toList();
+        _warmFrames.removeAll(oldest);
+      }
+      cacheBarRevision.value++;
+    }
+  }
+
+  /// Forget every warm frame (Settings → Clear cache, and any document edit).
+  void _invalidateWarmFrames() {
+    if (_warmFrames.isEmpty) return;
+    _warmFrames.clear();
+    cacheBarRevision.value++;
+  }
+
   /// Empty the rendered-frame cache now (Settings → Clear cache): the engine
   /// cache and the Dart-side decoded LRU together. A calm notice reports the
   /// result; on an older library it says the build is missing the control rather
   /// than silently doing nothing.
   void clearCache() {
+    _invalidateWarmFrames();
     final c = cacheControl;
     if (c == null) {
       // Still empty the Dart-side tier; note the engine cache is unavailable.
@@ -1668,6 +1731,12 @@ class AppStateStub extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// A monotonic document epoch, bumped whenever a fresh snapshot is adopted (a
+  /// new engine document identity). The Project-panel thumbnails key their cache
+  /// on it so a relink (or any edit) re-decodes rather than showing a stale
+  /// picture; egui keys its own rendered-frame invalidation the same way.
+  int documentEpoch = 0;
+
   /// Adopt a snapshot into the held state (undo/redo flags follow it). Keeps the
   /// playhead range in step with the front comp so the Timeline scrub and the
   /// End-key jump land on real frames.
@@ -1676,6 +1745,11 @@ class AppStateStub extends ChangeNotifier {
     snapshot = snap;
     canUndo = snap.canUndo;
     canRedo = snap.canRedo;
+    // A document edit invalidates the engine's rendered frames (and any
+    // thumbnails a relink changed), so the cache bar's warm set resets and the
+    // thumbnail epoch advances.
+    documentEpoch++;
+    _invalidateWarmFrames();
     final fc = frontComp;
     if (fc != null) {
       previewFrameCount = fc.frameCount;
@@ -1855,6 +1929,7 @@ class AppStateStub extends ChangeNotifier {
     _autosaveTimer?.cancel();
     _previewSource?.dispose();
     playheadFrame.dispose();
+    cacheBarRevision.dispose();
     super.dispose();
   }
 }

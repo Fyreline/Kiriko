@@ -9,9 +9,14 @@
 // "Show only missing footage" toggle appears in the header when anything IS
 // missing. An empty document shows a quiet hint.
 //
-// Thumbnails (docs/06 §5) await a `thumbnail` bridge binding — the perf pass is
-// to land one; until then the rows carry the type glyph only (annotated on the
-// ledger).
+// Thumbnails (docs/06 §5): a footage row shows a small decoded thumbnail of the
+// item (`app.thumbnail`, the `ThumbnailBridge` binding) in place of its type
+// glyph, decoded asynchronously off the build and cached until the document
+// epoch advances (a relink re-decodes). A placeholder glyph shows until the
+// picture lands, and the glyph stays for a missing file or a build without the
+// capability.
+
+import 'dart:ui' as ui;
 
 import 'package:flutter/widgets.dart';
 
@@ -308,11 +313,7 @@ class _ProjectRowState extends State<_ProjectRow> {
           padding: EdgeInsets.only(left: 6.0 + widget.depth * 14.0, right: 6),
           child: Row(
             children: [
-              lumitIcon(
-                widget.missing ? LumitIcon.unlink : icon,
-                size: 14,
-                color: widget.missing ? t.warning : tint,
-              ),
+              _leading(t, icon, tint),
               const SizedBox(width: 6),
               Expanded(child: _nameOrEditor(t)),
               if (widget.missing) ...[
@@ -344,6 +345,29 @@ class _ProjectRowState extends State<_ProjectRow> {
       );
     }
     return row;
+  }
+
+  /// The leading cell: a decoded thumbnail for a present footage item (when the
+  /// bridge offers thumbnails), else the type glyph. Missing footage keeps the
+  /// warning-tinted unlink glyph.
+  Widget _leading(LumitTheme t, LumitIcon icon, Color tint) {
+    final glyph = lumitIcon(
+      widget.missing ? LumitIcon.unlink : icon,
+      size: 14,
+      color: widget.missing ? t.warning : tint,
+    );
+    if (item.kind != BridgeItemKind.footage ||
+        widget.missing ||
+        app.thumbnails == null) {
+      return glyph;
+    }
+    return _FootageThumbnail(
+      key: ValueKey<String>('thumb-${item.id}'),
+      app: app,
+      itemId: item.id,
+      epoch: app.documentEpoch,
+      placeholder: glyph,
+    );
   }
 
   Widget _nameOrEditor(LumitTheme t) {
@@ -379,6 +403,120 @@ class _ProjectRowState extends State<_ProjectRow> {
         BridgeItemKind.solid => (LumitIcon.solid, t.layer.solid),
         BridgeItemKind.unknown => (LumitIcon.footage, t.textMuted),
       };
+}
+
+/// A footage row's thumbnail: decoded asynchronously through `app.thumbnail`
+/// (once, cached engine-side) and held as a `ui.Image` until the document epoch
+/// advances. Shows [placeholder] until the picture lands, and holds the last
+/// picture across an epoch bump rather than flashing the glyph. Its longer edge
+/// is capped at ~28 logical px (2× for crispness), fit into a small 30×17 box.
+class _FootageThumbnail extends StatefulWidget {
+  final AppStateStub app;
+  final String itemId;
+  final int epoch;
+  final Widget placeholder;
+  const _FootageThumbnail({
+    super.key,
+    required this.app,
+    required this.itemId,
+    required this.epoch,
+    required this.placeholder,
+  });
+
+  @override
+  State<_FootageThumbnail> createState() => _FootageThumbnailState();
+}
+
+class _FootageThumbnailState extends State<_FootageThumbnail> {
+  static const double _w = 30;
+  static const double _h = 17;
+  static const int _maxEdge = 56; // ~28 logical px at 2×
+
+  ui.Image? _image;
+  int _loadedEpoch = -1;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _maybeLoad();
+  }
+
+  @override
+  void didUpdateWidget(_FootageThumbnail old) {
+    super.didUpdateWidget(old);
+    // Re-decode when the item changed or the document epoch advanced (a relink
+    // or any edit); the held image stays on screen until the new one lands.
+    if (old.itemId != widget.itemId || old.epoch != widget.epoch) {
+      _maybeLoad();
+    }
+  }
+
+  void _maybeLoad() {
+    if (_loading || _loadedEpoch == widget.epoch) return;
+    _loading = true;
+    final epoch = widget.epoch;
+    final itemId = widget.itemId;
+    // Defer the (synchronous FFI) decode off the build with a microtask, then
+    // turn the pixels into an image asynchronously — the build never blocks.
+    Future<void>(() async {
+      final frame = widget.app.thumbnail(itemId, _maxEdge);
+      if (!mounted || widget.epoch != epoch || widget.itemId != itemId) {
+        _loading = false;
+        return;
+      }
+      if (frame == null || frame.width == 0 || frame.height == 0) {
+        _loading = false;
+        _loadedEpoch = epoch; // don't hammer a footage item with no thumbnail
+        return;
+      }
+      ui.decodeImageFromPixels(
+        frame.rgba,
+        frame.width,
+        frame.height,
+        ui.PixelFormat.rgba8888,
+        (img) {
+          _loading = false;
+          _loadedEpoch = epoch;
+          if (!mounted || widget.epoch != epoch || widget.itemId != itemId) {
+            img.dispose();
+            return;
+          }
+          setState(() {
+            _image?.dispose();
+            _image = img;
+          });
+        },
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _image?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ThemeScope.of(context).theme;
+    final image = _image;
+    if (image == null) {
+      return SizedBox(
+          width: _w, height: _h, child: Center(child: widget.placeholder));
+    }
+    return SizedBox(
+      width: _w,
+      height: _h,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(2),
+        child: Container(
+          color: t.surface0,
+          child: RawImage(image: image, fit: BoxFit.contain),
+        ),
+      ),
+    );
+  }
 }
 
 /// The floating label shown under the pointer while a footage row is dragged.

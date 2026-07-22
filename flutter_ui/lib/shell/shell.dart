@@ -183,6 +183,14 @@ class _ShellBodyState extends State<_ShellBody> {
       if (compId != null && layerId != null) {
         app.duplicateLayer(compId, layerId);
       }
+    } else if (ctrl && key == LogicalKeyboardKey.keyC) {
+      // Copy the selected Timeline keyframes (egui note 2.2 / UI-7). A quiet
+      // no-op when the Timeline is unmounted or nothing is selected — the text
+      // focus gate above already stands this down while a field has focus.
+      app.copySelectedKeyframes();
+    } else if (ctrl && key == LogicalKeyboardKey.keyV) {
+      // Paste the copied keyframes at the playhead (the sibling of Ctrl+C).
+      app.pasteKeyframes();
     } else if (shift && key == LogicalKeyboardKey.f3) {
       app.toggleGraphMode();
     } else if (key == LogicalKeyboardKey.space) {

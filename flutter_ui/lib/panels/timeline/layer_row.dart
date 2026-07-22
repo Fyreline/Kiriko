@@ -10,6 +10,7 @@ import 'package:flutter/widgets.dart';
 import '../../bridge/bridge.dart';
 import '../../icons/icons.dart';
 import '../../state/app_state.dart';
+import '../../theme/theme.dart';
 import '../../widgets/controls.dart';
 import 'lane_scale.dart';
 import 'layer_menu.dart';
@@ -84,6 +85,39 @@ class _Drag {
 
 class _LayerRowState extends State<LayerRow> {
   _Drag? _drag;
+
+  // In-place outline rename (the context menu's Rename), committing renameLayer.
+  bool _renaming = false;
+  TextEditingController? _rename;
+  final FocusNode _renameFocus = FocusNode();
+
+  @override
+  void dispose() {
+    _rename?.dispose();
+    _renameFocus.dispose();
+    super.dispose();
+  }
+
+  void _startRename() {
+    setState(() {
+      _renaming = true;
+      _rename = TextEditingController(text: layer.name);
+    });
+    _renameFocus.requestFocus();
+  }
+
+  void _commitRename() {
+    if (!_renaming) return;
+    final text = _rename?.text.trim() ?? '';
+    if (text.isNotEmpty && text != layer.name) {
+      app.renameLayer(widget.compId, layer.id, text);
+    }
+    setState(() {
+      _renaming = false;
+      _rename?.dispose();
+      _rename = null;
+    });
+  }
 
   // The lane-local x of the last pointer-down. The mode hit-test must use this,
   // not the drag-start position: touch slop moves the pointer ~18 px before a
@@ -173,6 +207,23 @@ class _LayerRowState extends State<LayerRow> {
     final t = ThemeScope.of(context).theme;
     final style = layerTypeStyle(layer.kind, t);
     final selected = app.selectedLayer == layer.id;
+    // An effect dragged from the Effects & presets panel drops onto the row to
+    // apply it to THIS layer (mirroring the egui drag-effect-onto-a-layer
+    // gesture, docs/07 §7) — the sibling of the Effect controls drop target.
+    return DragTarget<EffectDragData>(
+      onAcceptWithDetails: (d) =>
+          app.addEffect(widget.compId, layer.id, d.data.effectName),
+      builder: (context, candidate, rejected) => DecoratedBox(
+        decoration: candidate.isEmpty
+            ? const BoxDecoration()
+            : BoxDecoration(color: t.accent.withValues(alpha: 0.12)),
+        child: _rowBody(t, style, selected),
+      ),
+    );
+  }
+
+  Widget _rowBody(
+      LumitTheme t, ({LumitIcon icon, Color colour}) style, bool selected) {
     return SizedBox(
       height: kRowHeight,
       child: Row(
@@ -193,6 +244,11 @@ class _LayerRowState extends State<LayerRow> {
               onReorderUpdate: widget.onReorderUpdate,
               onReorderEnd: widget.onReorderEnd,
               onReorderCancel: widget.onReorderCancel,
+              renaming: _renaming,
+              renameController: _rename,
+              renameFocus: _renameFocus,
+              onRequestRename: _startRename,
+              onCommitRename: _commitRename,
             ),
           ),
           Expanded(
@@ -252,6 +308,15 @@ class _OutlineCell extends StatelessWidget {
   final VoidCallback? onReorderEnd;
   final VoidCallback? onReorderCancel;
 
+  /// In-place rename state, owned by the row: [renaming] shows the editor over
+  /// the name, [onRequestRename] is what the context menu's Rename triggers, and
+  /// [onCommitRename] writes the edit through `renameLayer`.
+  final bool renaming;
+  final TextEditingController? renameController;
+  final FocusNode renameFocus;
+  final VoidCallback onRequestRename;
+  final VoidCallback onCommitRename;
+
   const _OutlineCell({
     required this.app,
     required this.compId,
@@ -262,6 +327,11 @@ class _OutlineCell extends StatelessWidget {
     required this.width,
     required this.open,
     required this.onToggleOpen,
+    required this.renaming,
+    required this.renameController,
+    required this.renameFocus,
+    required this.onRequestRename,
+    required this.onCommitRename,
     this.onReorderStart,
     this.onReorderUpdate,
     this.onReorderEnd,
@@ -328,6 +398,7 @@ class _OutlineCell extends StatelessWidget {
         compId: compId,
         layer: layer,
         position: d.globalPosition,
+        onRename: onRequestRename,
       ),
       // A vertical drag on the outline reorders the layer stack (the body draws
       // the insertion line and commits on release). A locked layer refuses.
@@ -369,12 +440,36 @@ class _OutlineCell extends StatelessWidget {
             lumitIcon(style.icon, size: 13, color: style.colour),
             const SizedBox(width: 5),
             Expanded(
-              child: Text(
-                layer.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: t.small.copyWith(color: nameColour),
-              ),
+              child: renaming && renameController != null
+                  ? Container(
+                      height: kRowHeight - 6,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      decoration: BoxDecoration(
+                        color: t.surface0,
+                        borderRadius:
+                            BorderRadius.circular(t.tokens.controlRadius),
+                        border: Border.all(color: t.accent),
+                      ),
+                      alignment: Alignment.centerLeft,
+                      child: EditableText(
+                        key: ValueKey<String>('layer-rename-${layer.id}'),
+                        controller: renameController!,
+                        focusNode: renameFocus,
+                        style: t.small.copyWith(color: t.textSecondary),
+                        cursorColor: t.accent,
+                        backgroundCursorColor: t.surface2,
+                        selectionColor: t.accent.withValues(alpha: 0.5),
+                        maxLines: 1,
+                        onSubmitted: (_) => onCommitRename(),
+                        onTapOutside: (_) => onCommitRename(),
+                      ),
+                    )
+                  : Text(
+                      layer.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: t.small.copyWith(color: nameColour),
+                    ),
             ),
             for (final w in cluster)
               Padding(padding: const EdgeInsets.only(left: 1), child: w),

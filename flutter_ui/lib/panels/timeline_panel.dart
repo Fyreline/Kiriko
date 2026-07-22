@@ -16,6 +16,7 @@ import '../icons/icons.dart';
 import '../shell/dialogs.dart';
 import '../state/app_state.dart';
 import '../widgets/controls.dart';
+import 'timeline/cache_bar.dart';
 import 'timeline/comp_tabs.dart';
 import 'timeline/graph_editor.dart';
 import 'timeline/group_header.dart';
@@ -447,6 +448,14 @@ class _TimelineBodyState extends State<_TimelineBody>
                               scale: scale,
                               fps: fps,
                               markers: markers,
+                              height: _kRulerHeight,
+                            ),
+                            // The warm-frame cache bar (RAM tier) along the
+                            // ruler's bottom edge, over the ticks.
+                            TimelineCacheBar(
+                              app: app,
+                              compId: widget.compId,
+                              scale: scale,
                               height: _kRulerHeight,
                             ),
                             if (widget.comp.workArea != null)

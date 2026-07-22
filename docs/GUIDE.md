@@ -2245,6 +2245,19 @@ on demand. A companion tidy-up: when you scrub quickly, a frame you have already
 moved past no longer wastes a full draw finishing after you have gone — a newer
 request tells the engine "that one is stale, skip it" before it starts.
 
+**Seeing what is on the shelf (the cache bar).** A thin green strip now runs
+along the bottom of the timeline ruler, over the frames whose picture is already
+on that shelf — so at a glance you can see how much of the comp is ready to play
+back instantly, exactly as the old egui app shows it. The engine only tells the
+bridge *how many* frames are cached, not *which* ones, so the Flutter side keeps
+its own note of the frames it has driven onto the shelf and draws a band over
+each; editing anything (which throws the shelf away) or clearing the cache wipes
+the strip too. The strip is scoped to the current preview size — which matters,
+because the **resolution picker** (Full / Half / Third / Quarter in the transport)
+now genuinely renders a smaller picture rather than a full-size one relabelled:
+choosing Half asks the engine for half-resolution pixels, which are faster to
+draw and get their own place on the shelf.
+
 **Where things are.** `docs/flutter-port/` holds the plan: `01` the strategy
 and phases, `02` an inventory of every surface the egui interface ships (the
 port's shopping list), `03` the bridge design, `04` a table mapping each egui

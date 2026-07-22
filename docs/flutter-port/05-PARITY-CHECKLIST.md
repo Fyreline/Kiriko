@@ -210,10 +210,12 @@ where the row is logic).
   06 §B)
 - ◐ Transport ☑ (play/pause, frame + timecode); resolution picker ☑ (Full/Half/
   Third/Quarter `BareDropdown` driving `AppStateStub.previewScale`, honest
-  tooltip that it is a preview downsample). Named remainders: the perf-pass
-  `PreviewSource` still renders at scale 1.0 and must adopt `previewScale`; the
+  tooltip that it is a preview downsample). Downsample ☑ (2026-07-22): the
+  perf-pass `PreviewSource` now threads `app.previewScale.factor` through the
+  primary comp render and keys its Dart LRU on the scale, so the picker actually
+  renders fewer pixels and warms a per-scale cache entry. Named remainder: the
   realtime-tier readout is engine `RealtimeController` machinery the bridge does
-  not run (a later phase). `viewer_panel.dart`
+  not run (a later phase). `viewer_panel.dart`, `preview_source.dart`
 - ☑ Missing-footage slate: generated colour bars (band-for-band from
   `lumit-media/src/slate.rs`, drawn from `documentColour`, never a bundled
   asset) with the item path overlaid; a present-but-unreadable file shows a
@@ -337,10 +339,13 @@ where the row is logic).
   dropdowns in a wide row; the Flutter outline is narrow and column-degraded, so
   — taking the option the port allows — they live in the context menu instead
   (`panels/timeline/columns.dart`, the pure `parentingWouldCycle` unit-tested).
-  Rename, Add effect and Convert still route to `app.engine(...)` honestly —
-  widget-tested. egui's **Trim to source end** entry (offered on a retimed footage
-  layer, `menu.rs:174-184`) now has a bridge op + `AppStateStub.trimToSourceEnd`
-  (v0.7); the layer-menu entry itself is the section-C repoint
+  Rename, Add effect, Convert and Trim are all wired now (2026-07-22 final
+  sweep): **Rename** opens an in-place outline editor committing `renameLayer`;
+  **Add effect** ▸ opens the categorised submenu from `listEffects()`'s
+  categories committing `addEffect`; **Convert to sequenced** calls
+  `convertToSequenced`; **Trim to source end** (offered only on a retimed footage
+  layer, `menu.rs:174-184`) calls `trimToSourceEnd`. Widget-tested
+  (`layer_menu.dart`, `layer_row.dart`)
 - ☑ Layer search (wave 2): a search box in the outline header filters rows by
   case-insensitive name substring — unit-tested + widget-tested
 - ☑ Horizontal pan (wave 2): shift-wheel + a scrollbar when zoomed past fit,
@@ -380,14 +385,21 @@ where the row is logic).
   (`timeline_panel.dart` `_MotionBlurMaster`); a **resizable outline column**
   (the outline/lane divider drags `_outlineWidth`, session state); **keyframe
   copy/paste** (Ctrl+C/V through the additive `AppStateStub.copySelectedKeyframes`
-  /`pasteKeyframes` seam the shell drives, clipboard logic + pure round-trip in
-  `keyframe_clipboard.dart`) — all unit/widget-tested
+  /`pasteKeyframes` seam, now routed from the shell key handler behind the
+  text-focus gate, clipboard logic + pure round-trip in `keyframe_clipboard.dart`)
+  — all unit/widget-tested
+- ☑ Cache bar (2026-07-22 final sweep): `AppStateStub.cacheStats()` exposes the
+  `CacheControlBridge` binding; warm frames are tracked as the `PreviewSource`
+  drives them into the engine cache (`noteFrameWarmed`, scoped per comp+scale,
+  reset on edit/clear), and `panels/timeline/cache_bar.dart` draws the RAM-tier
+  band over the ruler (theme.success, 15-DESIGN §6.3), polling on the
+  `cacheBarRevision` cadence (never per-paint) — pure `warmFrameRanges` +
+  fake-stats widget-tested
 - ☐ Remainder (blocked, verified 2026-07-22): matte/blend/parent columns;
   **beat markers drawn distinctly** and **sequence sub-bars** and the **overrun
   HOLD hatch** — all blocked on the snapshot (markers carry no kind
   `snapshot.rs:137`; `BridgeLayer` has no `clips`; no `start_offset`/local in-out
-  for `overrun_span_secs`); the **cache bar** awaits a `cache_stats` Dart binding
-  (the `framecache.rs` FFI export landed, the Dart accessor did not)
+  for `overrun_span_secs`)
 
 ## Phase F4 — editors (in progress)
 
@@ -463,13 +475,14 @@ First slice (2026-07-21):
   dart`, widget-tested (`f4_effects_test.dart`, `section_d_test.dart`). Effects
   are now **grouped under collapsing category headers** (the registry's
   `category`/`categoryLabel`, v0.7) — an uncategorised registry lists flat. Each
-  row is **Draggable** and the Effect controls panel is a `DragTarget` that
-  applies a dropped effect to the shown layer (`addEffect`). Named remainders: the
-  `.lumfx` **preset save/load** cannot round-trip byte-compatibly from the
-  snapshot (it flattens each effect's `EffectKey` — namespace/version dropped —
-  and each parameter's animation), so it awaits a preset bridge op (serialising
-  the engine `EffectInstance`) or an `EffectInstance` read-back; and the
-  Timeline-row drop target awaits the timeline agent's `DragTarget` seam.
+  row is **Draggable** and both the Effect controls panel **and each Timeline
+  layer row** are `DragTarget`s that apply a dropped effect to their layer
+  (`addEffect`) — the Timeline-row drop landed in the 2026-07-22 final sweep
+  (`layer_row.dart`, widget-tested). Named remainder: the `.lumfx` **preset
+  save/load** cannot round-trip byte-compatibly from the snapshot (it flattens
+  each effect's `EffectKey` — namespace/version dropped — and each parameter's
+  animation), so it awaits a preset bridge op (serialising the engine
+  `EffectInstance`) or an `EffectInstance` read-back.
 - ☑ Add mask ▸ Rectangle/Ellipse/Star: wired from the **layer context menu**
   (`addMask`, wave 3) and from the **Composition ▸ Add mask** menu bar
   (`shell/menu_bar.dart:90-94` → `addMaskToSelected`, corrected 2026-07-22 audit —
@@ -613,13 +626,13 @@ The owner wants right-click menus everywhere egui offers one. Per-surface audit
 | Surface | egui offers (source) | Flutter has (source) | Gap |
 |---|---|---|---|
 | Bare pane | Pop out into its own window (`shell/dock.rs:231`) | Yes — Pop out, surfaces the multi-window notice (`shell/dock_widget.dart:642`) | **parity** (pop-out itself still deferred) |
-| Layer row (outline name) | Rename · Add effect ▸ (categorised) · Add mask ▸ · Duplicate · Delete · Solo · Enabled · Motion blur · Convert to sequenced · **Trim to source end** (retimed footage) (`shell/timeline/menu.rs:27`, opened at `timeline/panel.rs:816`) | Rename\* · Add effect\* · Add mask ▸ · **Blend mode ▸ · Matte ▸ · Parent ▸** · Duplicate · Delete · Solo · Enabled · Motion blur · Convert\* (`panels/timeline/layer_menu.dart`) | **partial** — Rename / Add effect / Convert are stubs (`app.engine(…)`, layer_menu.dart:152-156); **Trim to source end missing**; Add effect not categorised. Blend/Matte/Parent added deliberately (narrow column, K-note) |
+| Layer row (outline name) | Rename · Add effect ▸ (categorised) · Add mask ▸ · Duplicate · Delete · Solo · Enabled · Motion blur · Convert to sequenced · **Trim to source end** (retimed footage) (`shell/timeline/menu.rs:27`, opened at `timeline/panel.rs:816`) | Rename (in-place editor → `renameLayer`) · Add effect ▸ (categorised → `addEffect`) · Add mask ▸ · **Blend mode ▸ · Matte ▸ · Parent ▸** · Duplicate · Delete · Solo · Enabled · Motion blur · Convert (→ `convertToSequenced`) · **Trim to source end** (retimed footage → `trimToSourceEnd`) (`panels/timeline/layer_menu.dart`, `layer_row.dart`) | **parity** (2026-07-22) — every entry wired to a real op; Trim offered only for a retimed footage layer (egui condition). Blend/Matte/Parent added deliberately (narrow column, K-note) |
 | Lane / property keyframe | Timeline lane key: right-click removes; graph-editor key: Easy ease · Linear · Hold · Unify handles · Delete key (`shell/graph.rs:1676`) | Lane key right-click opens Easy ease · Linear · Hold · Unify (broken bezier only) · Delete key (`panels/timeline/keyframe_interp_menu.dart`, wired at `property_row.dart`) | **parity for lane keys** (2026-07-22) — Easy ease = `EASY_EASE`, Unify averages both slopes keeping each reach; a multi-selection all take the choice (per-key `setKeyframeInterp`, multi-delete via `applyKeyframeBatch`). The **graph-editor** key menu rides the unbuilt transform value graph (no value keys to right-click yet) |
 | Empty timeline lane | Composition settings · Reveal in project · Show time grid · Beat sensitivity slider + Detect beats · Clear beat markers (`timeline/panel.rs:384`) | Composition settings… · Reveal in project · Show time grid · Beat sensitivity slider + Detect beats · Clear beat markers (`panels/timeline/lane_context_menu.dart`) | **parity** (2026-07-22) — Reveal → `selectProjectItem`; grid is session-only lane state; Detect/Clear → `detectBeats`/`clearBeatMarkers` |
 | Comp-tab strip (empty space) | Pop out timeline (`shell/panels.rs:1139`) | Pop out timeline → the multi-window notice (`panels/timeline/comp_tabs.dart`) | **parity** (2026-07-22, pop-out itself deferred to E — same notice the dock seam uses) |
 | Project row | Composition settings · Relink… (missing footage) · Find missing footage · Move to root · Delete (`shell/panels.rs:909`) | Composition settings… · Relink… (missing only) · Find missing footage (footage) · Move to root · Delete (`panels/project_panel.dart` `showProjectContextMenu`) | **parity** — Relink/Find-missing are footage-scoped as in egui; Comp settings opens the dialogue; Relink→`relink`, Find missing→missing-only filter, Move to root→`moveToRoot`, Delete→`deleteItem` (no confirm, as egui). Missing rows carry a "missing" badge + inline Relink…; a second click renames in place (`renameItem`) |
 | Viewer toolbar Shape tool | Rectangle / Ellipse / Star mask shape (`shell/app_update.rs:971`) | Select/Hand/Shape/Pen tool row + Shape right-click Rectangle/Ellipse/Star picker (`panels/viewer_toolbar.dart`) | **parity** — tool state on `AppStateStub.viewerTool`/`viewerShape`; a Shape drag commits a default mask (`addMask` carries no geometry — named remainder) |
-| Value field (DragValue) | egui built-in Reset / Copy / Paste on every drag box | Reset / Copy / Paste on `DragValueField` (`widgets/controls.dart`, 2026-07-22) | **done** — Copy/Paste via the system clipboard (parse-on-paste with the field's clamp); Reset shows only when a call site passes the new optional `resetTo` default. **Call-site wiring still wanted** (all in other agents' files, `resetTo` defaults null so nothing breaks): `settings_window.dart` (Default::default numbers), `effect_controls_panel.dart` transform rows (the property default), `dialogs.dart` comp-settings (the defaults) |
+| Value field (DragValue) | egui built-in Reset / Copy / Paste on every drag box | Reset / Copy / Paste on `DragValueField` (`widgets/controls.dart`, 2026-07-22) | **done** — Copy/Paste via the system clipboard (parse-on-paste with the field's clamp); Reset shows when a call site passes the optional `resetTo` default. Call sites wired (2026-07-22 final sweep): `effect_controls_panel.dart` transform axes (the property seed) + text size (72 pt); `dialogs.dart` new-comp width/height/duration (1920×1080 / 30 s); `settings_window.dart` autosave interval/copies (5 / 3) + the three cache budgets. Effect-param scalars skipped (`BridgeParamRange` carries no default) |
 | Dock tab pill (inside a tab group) | none (egui gives only bare panes a menu) | none | parity |
 
 ### 2. "The layer area being in the wrong order" — investigated
@@ -719,10 +732,11 @@ is a genuine miss (fires even with a live bridge) unless marked otherwise.
   Delete→`deleteItem` (no confirm, as egui). Missing footage rows carry a
   crossed-link **"missing" badge** + an inline **Relink…** button and a header
   "show only missing" toggle; a **second click on a selected row renames it in
-  place** (`renameItem`). Widget-tested (`section_d_test.dart`). Still open:
-  **thumbnails** — the `thumbnail` bridge binding (`ThumbnailBridge`, v0.8) has
-  landed; rendering it in the rows (async `DecodedFrame`→image + cache) is the
-  remaining step.
+  place** (`renameItem`). Widget-tested (`section_d_test.dart`). **Thumbnails ☑**
+  (2026-07-22 final sweep): a footage row renders a small decoded thumbnail
+  through `app.thumbnail`, decoded asynchronously off the build and cached until
+  the document epoch advances (a relink re-decodes), the type glyph as the
+  placeholder (`project_panel.dart`, widget-tested with a fake `ThumbnailBridge`).
 
 ### Settings & window
 
@@ -817,8 +831,8 @@ not a true gap); "**stub**" = fires even with a live bridge.
 | Cut clip at playhead / Delete clip at playhead | menu bar (`menu_bar.dart:76-77`) | bridge op **landed** (v0.7, `AppStateStub.cutClipAtPlayhead`/`deleteClipAtPlayhead`); menu-bar repoint pending (section C) |
 | Detect beats (sensitivity N) / Clear beat markers | menu bar (`menu_bar.dart:87-89`) | bridge op **landed** (v0.7, `AppStateStub.detectBeats`/`clearBeatMarkers`); menu repoint pending (sections B/C) |
 | Clear cache / Choose cache root folder | settings (`settings_window.dart`) | Clear cache ☑ (`clear_cache` + Dart LRU); Memory budget → `set_cache_budget` ☑; cache-root folder is the future **disk** tier (hint says so, no fake op) |
-| Rename layer / Convert to sequenced layer | layer context menu (`layer_menu.dart:152-156`) | bridge op **landed** (v0.7, `AppStateStub.renameLayer`/`convertToSequenced`; `trimToSourceEnd` too); the in-place rename editor + Convert/Trim menu repoint pending (section C) |
-| Add effect (categorised) | layer context menu | bridge exposes the category now (v0.7 `list_effects` carries it); the categorised layer-menu picker is section C |
+| Rename layer / Convert to sequenced layer / Trim to source end | layer context menu (`layer_menu.dart`, `layer_row.dart`) | ☑ (2026-07-22) — Rename opens the in-place outline editor (`renameLayer`), Convert calls `convertToSequenced`, Trim (retimed footage only) calls `trimToSourceEnd` |
+| Add effect (categorised) | layer context menu | ☑ (2026-07-22) — the categorised submenu built from `listEffects()`'s categories commits `addEffect` (`layer_menu.dart`) |
 
 ## Post-parity fixes (owner's known rough edges — do NOT fix during the port)
 
