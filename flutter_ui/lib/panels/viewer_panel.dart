@@ -232,26 +232,48 @@ class _ViewerPanelState extends State<ViewerPanel>
       return _FittedImage(image: image);
     }
 
-    // Nothing to show yet (frame still decoding, or nothing under the playhead):
-    // the quiet film-icon placeholder. The wording drops the "single-layer"
-    // caveat once the composited-comp path is live.
+    // Nothing to show yet: the quiet film-icon placeholder, whose wording
+    // NAMES the live state (desk-test round 3 — a placeholder must explain
+    // itself, never promise future work; comp rendering has been live since
+    // K-175/K-177).
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           lumitIcon(LumitIcon.film, size: 32, color: t.textDisabled),
           const SizedBox(height: 8),
-          Text(
-            source.compActive
-                ? 'Rendering the composited comp…'
-                : 'Single-layer preview — the composited comp arrives when the '
-                    'compositor leaves the egui crate',
-            style: t.small,
-            textAlign: TextAlign.center,
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 320),
+            child: Text(
+              _placeholderReason(),
+              style: t.small,
+              textAlign: TextAlign.center,
+            ),
           ),
         ],
       ),
     );
+  }
+
+  /// The truthful placeholder wording for the current state, most specific
+  /// reason first.
+  String _placeholderReason() {
+    if (app.bridge == null) {
+      return 'No engine library loaded — build lumit-bridge and restart '
+          '(cargo build -p lumit-bridge --release --features shared-texture)';
+    }
+    if (app.frontComp == null) {
+      return 'Open a composition to preview it';
+    }
+    if (!source.compRenderSupported) {
+      return 'This engine library predates comp rendering — rebuild '
+          'lumit-bridge and restart';
+    }
+    if (source.compRenderFailed) {
+      return 'The comp render failed (no GPU adapter, or an engine error) — '
+          'showing the single-layer fallback where one exists';
+    }
+    return 'Rendering the composited comp…';
   }
 
   Widget _buildTransport(BuildContext context, LumitTheme t) {

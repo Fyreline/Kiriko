@@ -204,6 +204,16 @@ class PreviewSource extends ChangeNotifier {
   /// the frame as self-contained (any missing layer is slated inside it).
   bool get compActive => _compActive;
 
+  /// Whether the renderer can composite comps at all (the dll carries the
+  /// comp-render capability). False means an old library, not a failure.
+  bool get compRenderSupported => _renderer.supportsCompRender;
+
+  /// Whether the most recent comp render came back empty (no GPU adapter, or
+  /// an engine-side render error) — cleared by the next successful comp
+  /// frame. The Viewer's placeholder names this state.
+  bool _compRenderFailed = false;
+  bool get compRenderFailed => _compRenderFailed;
+
   /// True when the Viewer should show the shared GPU texture directly (the
   /// zero-copy path, K-177) rather than a read-back image. Set once the shared
   /// render lands and the platform channel has registered the texture.
@@ -431,12 +441,19 @@ class PreviewSource extends ChangeNotifier {
       _pendingKey = null;
       if (rendered == null || rendered.width == 0 || rendered.height == 0) {
         // The engine could not composite this frame: fall back to single-layer,
-        // holding the last picture.
+        // holding the last picture. Remember the failure so the Viewer's
+        // placeholder can NAME it instead of promising future work (the
+        // desk-test round 3 requirement).
+        if (!_compRenderFailed) {
+          _compRenderFailed = true;
+          notifyListeners();
+        }
         _resolveAndDecodeSingleLayer();
         _drainWanted();
         return;
       }
       // The engine has rendered and cached this frame (the RAM tier).
+      _compRenderFailed = false;
       app.noteFrameWarmed(compId, frame);
       _enterComp();
       _startImageDecode(key, rendered);
