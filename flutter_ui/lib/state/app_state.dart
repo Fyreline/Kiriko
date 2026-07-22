@@ -258,6 +258,7 @@ class AppStateStub extends ChangeNotifier {
     this.sessionFor,
     this.autosaveInterval = const Duration(minutes: 5),
     this.autosaveKeep = 3,
+    bool useSharedTexture = true,
     String? lastProjectPath,
   })  : openProjectPicker = openProjectPicker ?? pickProjectToOpen,
         saveLocationPicker = saveLocationPicker ?? pickProjectSaveLocation,
@@ -1491,6 +1492,22 @@ class AppStateStub extends ChangeNotifier {
   // Preview render scale (the resolution picker in the transport).
 
   PreviewScale previewScale = PreviewScale.full;
+
+  /// Whether the Viewer may use the zero-copy shared-texture path (Settings →
+  /// Performance). On by default; turning it off forces the read-back path
+  /// without a rebuild — the escape hatch for a driver/embedder combination
+  /// that registers a texture but presents nothing (round 3). Persisted with
+  /// the workspace via the settings seam.
+  bool useSharedTexture = true;
+
+  /// Set the shared-texture preference and re-resolve the preview: the app
+  /// notifier is what `PreviewSource` listens to, so the next frame takes the
+  /// other path with no restart.
+  void setUseSharedTexture(bool value) {
+    if (useSharedTexture == value) return;
+    useSharedTexture = value;
+    notifyListeners();
+  }
 
   /// Auto resolution mode (the picker's "Auto" option, egui `preview_auto_res`):
   /// the preview renders at the realtime controller's live tier scale during

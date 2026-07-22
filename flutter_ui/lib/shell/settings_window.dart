@@ -355,6 +355,22 @@ class _SettingsWindowState extends State<SettingsWindow> {
               ),
             ),
             _Row(
+              label: 'GPU shared texture',
+              hint:
+                  'Show the Viewer straight from graphics memory. Turn off if '
+                  'the picture is blank — the read-back path always draws.',
+              control: HouseCheckbox(
+                value: ws.performance.useSharedTexture,
+                onChanged: (v) => setState(() {
+                  ws.performance.useSharedTexture = v;
+                  // The app notifier drives PreviewSource's re-resolve, so the
+                  // change takes effect on the next frame without a restart.
+                  widget.app.setUseSharedTexture(v);
+                  ws.touch();
+                }),
+              ),
+            ),
+            _Row(
               label: 'Cache root folder',
               hint:
                   'Where the on-disk frame cache will be stored once the engine '

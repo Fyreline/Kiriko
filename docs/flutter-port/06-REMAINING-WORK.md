@@ -435,3 +435,26 @@ annotated honestly rather than faked.
    diagnose live why the built app showed the stale placeholder; make the
    placeholder name its reason (library too old / no adapter / render error)
    instead of promising future work.
+
+## Live defect under investigation (round 3, 2026-07-22)
+
+- **The shared-texture Viewer presents an empty texture on the owner's
+  machine.** Evidence: a new comp composites over an OPAQUE BLACK background
+  (`Composition::background` defaults to `[0,0,0,1]`, model.rs:1515, and
+  `render_comp_linear` seeds the composite with it, export.rs:1447/1742), so an
+  empty comp must draw a visible black frame; the owner sees only the grey
+  pasteboard AND no placeholder text, which means an image/texture IS being
+  presented — i.e. the texture registers and draws nothing. The scopes are
+  smooth because they ride the CPU read-back, not the texture. This is exactly
+  the K-177 caveat that the ANGLE/embedder side of opening the DXGI shared
+  handle could only be exercised in the real app; the failure mode not covered
+  was "registration succeeds but the surface never shows content" (the
+  fallback only triggers on a FAILED registration).
+  - Shipped now: a **Settings → Performance → GPU shared texture** kill-switch
+    (persisted, takes effect next frame) and a **GPU/CPU indicator** in the
+    transport row, so the active path is visible and escapable without a
+    rebuild.
+  - Next, once the owner confirms the CPU build renders: the handshake itself
+    (a keyed mutex or shared fence around the D3D12 copy — the named K-177
+    follow-up — and/or the descriptor/`MarkTextureFrameAvailable` ordering in
+    `viewer_texture_bridge.cpp`).

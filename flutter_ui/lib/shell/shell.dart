@@ -102,6 +102,7 @@ class _ShellBodyState extends State<_ShellBody> {
     autosaveInterval:
         Duration(minutes: widget.workspace.autosave.intervalMins),
     autosaveKeep: widget.workspace.autosave.keep,
+    useSharedTexture: widget.workspace.performance.useSharedTexture,
   );
 
   @override

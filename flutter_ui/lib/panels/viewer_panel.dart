@@ -344,6 +344,28 @@ class _ViewerPanelState extends State<ViewerPanel>
                 style: t.small.copyWith(color: t.textMuted),
               ),
             ),
+          // Which path drew what you are looking at (round 3): GPU = the
+          // zero-copy shared texture, CPU = the read-back. Visible because a
+          // silently-empty texture path is otherwise indistinguishable from an
+          // empty composition. Flexible so a narrow Viewer drops it rather
+          // than overflowing the transport row.
+          Flexible(
+            child: Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: LumitTooltip(
+                message: source.sharedActive
+                    ? 'Zero-copy shared texture. If the picture is blank, turn '
+                        'it off in Settings → Performance to use the read-back path'
+                    : 'Read-back path (the shared texture is off or unavailable)',
+                child: Text(
+                  source.sharedActive ? 'GPU' : 'CPU',
+                  style: t.small.copyWith(color: t.textMuted),
+                  overflow: TextOverflow.clip,
+                  softWrap: false,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );

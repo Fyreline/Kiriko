@@ -30,11 +30,17 @@ class PerformanceSettings {
   bool backgroundFill;
   String? cacheRoot;
 
+  /// Whether the Viewer may use the zero-copy shared-texture path (round 3
+  /// escape hatch: a texture that registers but presents nothing leaves an
+  /// empty Viewer, so the read-back path must be reachable from Settings).
+  bool useSharedTexture;
+
   PerformanceSettings({
     int? ramBudgetMb,
     this.diskCacheMb = 50 * 1024,
     this.vramCacheMb = 512,
     this.backgroundFill = true,
+    this.useSharedTexture = true,
     this.cacheRoot,
   }) : ramBudgetMb = ramBudgetMb ?? defaultRamBudgetMb();
 
@@ -81,6 +87,7 @@ class PerformanceSettings {
         'disk_cache_mb': diskCacheMb,
         'vram_cache_mb': vramCacheMb,
         'background_fill': backgroundFill,
+        'use_shared_texture': useSharedTexture,
         'cache_root': cacheRoot,
       };
 
@@ -90,6 +97,7 @@ class PerformanceSettings {
         diskCacheMb: j['disk_cache_mb'] as int? ?? 50 * 1024,
         vramCacheMb: j['vram_cache_mb'] as int? ?? 512,
         backgroundFill: j['background_fill'] as bool? ?? true,
+        useSharedTexture: j['use_shared_texture'] as bool? ?? true,
         cacheRoot: j['cache_root'] as String?,
       );
 }

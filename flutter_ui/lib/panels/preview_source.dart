@@ -285,6 +285,10 @@ class PreviewSource extends ChangeNotifier {
     final controller = _textureController;
     final compId = app.frontCompIdResolved;
     if (compId == null ||
+        // The Settings kill-switch (round 3): a shared texture that registers
+        // but presents nothing shows an empty Viewer with no error to catch,
+        // so the read-back path must be reachable without a rebuild.
+        !app.useSharedTexture ||
         !_renderer.supportsSharedTexture ||
         controller == null ||
         !controller.available) {
