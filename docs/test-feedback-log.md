@@ -621,3 +621,20 @@ hotkeys, and their absence makes testing feel clunky).
   `a_frame_rendered_before_a_probe_landed_is_refused_when_it_finishes` and
   `a_comp_frame_comes_back_stamped_with_the_epoch_it_was_asked_for`, the latter driving the
   real preview engine and verified to fail when the stamp is dropped in transit.
+
+# Flutter desk-test round 5 — 2026-07-22 (flutter-frontend-alternative branch)
+
+- [x] **The Viewer preview did not live-update on an edit.** Changing an effect parameter (or
+  any document edit) left the picture unchanged until the frame happened to fall out of the
+  cache. The engine-side rendered-frame cache invalidated correctly, but the Dart-side
+  decoded-frame LRU in `preview_source.dart` keyed frames without the document epoch, so the
+  stale `ui.Image` was served after the edit. Fixed by teaching the LRU the epoch: it is
+  dropped from the cache on a bump and folded into every cache key, and a render/decode reply
+  that lands after a bump is dropped rather than banked or shown (the last picture is held
+  while a fresh render is issued — never blank). Pure playhead motion rides the fine-grained
+  notifier and never bumps the epoch, so scrubbing still hits the cache. Also fixed a scopes
+  staleness nit: `scopes_panel.dart`'s `_maybeRebuild` returned early while a trace was
+  decoding and never retried, so a generation arriving mid-build showed only on the next
+  notification; it now rechecks when the build completes. Regressions in
+  `viewer_scopes_test.dart` (edit re-renders the same frame, playhead motion re-uses the
+  cache, a post-edit reply is dropped not banked), verified to fail without the fix.

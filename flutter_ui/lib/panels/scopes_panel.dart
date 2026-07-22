@@ -113,6 +113,13 @@ class _ScopesPanelState extends State<ScopesPanel> {
           _builtGeneration = gen;
           _builtKind = _kind;
         });
+        // A newer generation (or a scope change) may have arrived while this
+        // trace was decoding — `_maybeRebuild` returns early while `_building`,
+        // so without this recheck that frame would only show on the NEXT
+        // notification. Rebuild now if what we just built is already stale.
+        if (_source.generation != _builtGeneration || _kind != _builtKind) {
+          _maybeRebuild();
+        }
       },
     );
   }

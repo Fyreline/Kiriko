@@ -1010,6 +1010,94 @@ void main() {
     });
   });
 
+  // The document epoch and the decoded-frame LRU (TF: the Viewer preview did not
+  // live-update on an edit — the Dart LRU keyed frames without the document
+  // epoch, so a stale image was served even though the engine invalidated its
+  // own cache). These prove the epoch scopes the cache: an edit re-renders the
+  // same frame, pure playhead motion still hits the cache, and a reply landing
+  // after an edit is dropped rather than banked.
+  group('PreviewSource document-epoch cache (TF live-update)', () {
+    final snap = _snapshot(
+      _comp([_layer(name: 'clip.mp4', inFrame: 0, outFrame: 48)]),
+      [_footage('clip.mp4')],
+    );
+
+    testWidgets('an edit re-renders the same frame rather than serving the cache',
+        (tester) async {
+      final app = AppStateStub(bridge: _FrameBridge(snap, null));
+      final renderer = _QueuedRenderer()..compResult = _solid(8, 8, 10, 20, 30);
+      late PreviewSource source;
+      await tester.runAsync(() async {
+        source = PreviewSource(app, renderer: renderer);
+        renderer.flush(); // answer the initial comp render
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        expect(renderer.compRequests, ['c1@0'],
+            reason: 'one render for the initial frame');
+        expect(source.image, isNotNull);
+
+        // An edit adopts a new snapshot → documentEpoch bumps. The same
+        // comp/frame is wanted, but its cache key now carries the new epoch, so
+        // the LRU cannot serve the pre-edit picture: a fresh render must go out.
+        renderer.compResult = _solid(8, 8, 200, 100, 50);
+        app.undo(); // any edit path; bumps documentEpoch and notifies
+        renderer.flush();
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      });
+      expect(renderer.compRequests, ['c1@0', 'c1@0'],
+          reason: 'the edit forced a fresh render of the same frame');
+      expect(source.image, isNotNull, reason: 'the post-edit frame is shown');
+      source.dispose();
+    });
+
+    testWidgets('playhead motion alone re-uses the cache (no re-render)',
+        (tester) async {
+      final app = AppStateStub(bridge: _FrameBridge(snap, null));
+      final renderer = _QueuedRenderer()..compResult = _solid(8, 8, 4, 5, 6);
+      late PreviewSource source;
+      await tester.runAsync(() async {
+        source = PreviewSource(app, renderer: renderer);
+        renderer.flush(); // frame 0
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        app.advancePlayback(5); // fine-grained playhead move, no epoch bump
+        renderer.flush(); // frame 5
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        app.advancePlayback(0); // back to a frame still warm at this epoch
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      expect(renderer.compRequests, ['c1@0', 'c1@5'],
+          reason: 'returning to frame 0 is served from the cache, not re-rendered');
+      source.dispose();
+    });
+
+    testWidgets('a reply landing after an epoch bump is dropped, not banked',
+        (tester) async {
+      final app = AppStateStub(bridge: _FrameBridge(snap, null));
+      final renderer = _QueuedRenderer()..compResult = _solid(8, 8, 1, 2, 3);
+      late PreviewSource source;
+      await tester.runAsync(() async {
+        source = PreviewSource(app, renderer: renderer);
+        expect(renderer.compRequests, ['c1@0'],
+            reason: 'the initial render is in flight');
+
+        // An edit adopts a new snapshot while the first render is unanswered.
+        app.undo();
+
+        // The stale reply lands: the epoch guard drops it (never banked under the
+        // old key, never shown), then the drain issues a fresh render.
+        renderer.flush();
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(renderer.compRequests, ['c1@0', 'c1@0'],
+            reason: 'a fresh render was issued after the stale reply was dropped');
+
+        renderer.flush(); // answer the fresh render
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      });
+      expect(source.image, isNotNull,
+          reason: 'the post-edit frame is shown once its fresh render lands');
+      source.dispose();
+    });
+  });
+
   // The GPU scope pass (K-096 v1): the ScopesPanel prefers the engine trace when
   // the loaded library offers `render_scope`, and falls back to the CPU trace
   // when it does not. These drive the panel widget against a fake bridge.
